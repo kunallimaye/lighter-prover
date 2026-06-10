@@ -103,7 +103,7 @@ provision_one_vm() {
         --boot-disk-type="${disk_type}"
         --service-account="${compute_sa}"
         --scopes=cloud-platform
-        --max-run-duration=8h
+        --max-run-duration=10h
         --instance-termination-action=DELETE
         --network="${NETWORK}"
         --subnet="${SUBNET}"

@@ -135,30 +135,73 @@ machine_field() {
 # Update this table when prices change OR when adding new machine types.
 
 declare -A _PRICE_PER_HR=(
-  [c4a-highcpu-32]=1.18
-  [c4a-highcpu-64]=2.36
-  [n4a-highcpu-32]=1.05
-  [n4a-highcpu-64]=2.10
-  [n4d-highcpu-32]=1.30
-  [n4d-highcpu-64]=2.60
-  [t2a-standard-32]=1.21
-  [t2a-standard-48]=1.81
-  [c4d-highcpu-32]=1.45
-  [c4d-highcpu-64]=2.90
+  [c4a-highcpu-32]=1.40
+  [c4a-highcpu-64]=2.80
+  [n4a-highcpu-32]=1.20
+  [n4a-highcpu-64]=2.40
+  [n4d-highcpu-32]=1.10
+  [n4d-highcpu-64]=2.20
+  [t2a-standard-32]=1.30
+  [t2a-standard-48]=1.95
+  [c4d-highcpu-32]=1.40
+  [c4d-highcpu-64]=2.80
+)
+
+# Per-shape realistic full-sweep wall-time estimates (hours), calibrated
+# against the v2 run findings tracked in issue #19. The previous estimator
+# assumed 1h per VM, which was 3-6× too low.
+#
+#  - T2A (Neoverse-N1, weakest):       6h
+#  - C4A / N4A (Axion, mid):           4h
+#  - C4D / N4D (AMD Turin, strongest): 3h
+declare -A _HOURS_PER_SHAPE=(
+  [c4a-highcpu-32]=4
+  [c4a-highcpu-64]=4
+  [n4a-highcpu-32]=4
+  [n4a-highcpu-64]=4
+  [n4d-highcpu-32]=3
+  [n4d-highcpu-64]=3
+  [t2a-standard-32]=6
+  [t2a-standard-48]=6
+  [c4d-highcpu-32]=3
+  [c4d-highcpu-64]=3
 )
 
 # estimate_cost <hours> <machine_type...> -> prints "$X.XX"
+#
+# If <hours> is "auto", uses _HOURS_PER_SHAPE per machine_type.
+# Otherwise, uses the given fixed hours for every machine.
 estimate_cost() {
   local hours="$1"; shift
   local total=0
-  local mt price
+  local mt price h
   for mt in "$@"; do
     price="${_PRICE_PER_HR[$mt]:-}"
     if [[ -z "$price" ]]; then
       log_warn "no price entry for $mt — estimating \$1.50/h"
       price=1.50
     fi
-    total="$(python3 -c "print(f'{$total + $price * $hours:.4f}')")"
+    if [[ "$hours" == "auto" ]]; then
+      h="${_HOURS_PER_SHAPE[$mt]:-4}"
+    else
+      h="$hours"
+    fi
+    total="$(python3 -c "print(f'{$total + $price * $h:.4f}')")"
+  done
+  python3 -c "print(f'\${$total:.2f}')"
+}
+
+# estimate_cost_breakdown <machine_type...> -> prints per-shape lines to stderr
+# and a final total to stdout (format "$X.XX"). Uses _HOURS_PER_SHAPE.
+estimate_cost_breakdown() {
+  local total=0
+  local mt price h subtotal
+  for mt in "$@"; do
+    price="${_PRICE_PER_HR[$mt]:-1.50}"
+    h="${_HOURS_PER_SHAPE[$mt]:-4}"
+    subtotal="$(python3 -c "print(f'{$price * $h:.2f}')")"
+    total="$(python3 -c "print(f'{$total + $price * $h:.4f}')")"
+    printf '    %-20s  %2sh × $%-5s/h = $%s\n' "$mt" "$h" "$price" "$subtotal" >&2
   done
   python3 -c "print(f'\${$total:.2f}')"
 }
