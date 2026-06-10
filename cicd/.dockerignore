@@ -1,0 +1,46 @@
+.git
+.gitignore
+.env
+.env.*
+.DS_Store
+
+# Rust build artifacts. CRITICAL: target/ can easily exceed several GB and
+# is the single biggest source of slow container builds. Always exclude.
+target/
+**/target/
+
+# Logs and local-only state never belong in the container build context.
+logs/
+.orchestration/
+
+# Documentation and ADRs are not needed at runtime — they only inflate
+# the context upload. README/AGENTS/etc.
+*.md
+docs/
+LICENSE
+THIRD_PARTY_NOTICES
+
+# Anything under cicd/ that isn't consumed by the Containerfile itself.
+# The Containerfile copies cicd/entrypoint.sh + cicd/orchestrator.py
+# from the build context, so we DO NOT exclude cicd/ wholesale — only
+# the operator-facing infrastructure files.
+cicd/terraform/
+cicd/cloudbuild*.yaml
+cicd/iam/
+
+# Local config / overrides — never bake host-specific secrets in.
+config.toml
+.env
+
+# Go and node artifacts the upstream repo doesn't actually have but
+# which we exclude pre-emptively to keep the context small.
+bin/
+dist/
+node_modules/
+vendor/
+
+# Cached editor / scratch files.
+.idea/
+.vscode/
+*.swp
+.cache/

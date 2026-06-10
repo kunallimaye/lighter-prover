@@ -1,0 +1,52 @@
+# Terraform plan pipeline (three-role topology, #141).
+#
+# Triggered by: pull-request events. Runs terraform init + plan and
+# surfaces the plan so reviewers can see what cloud-infra would mutate
+# before it ships to main.
+#
+# Variables mirror cloudbuild-apply.yaml exactly (same TF_VAR set,
+# trimmed to the Phase 1 module's surface area).
+steps:
+  - id: tf-init
+    name: 'hashicorp/terraform:1.14'
+    dir: 'cicd/terraform'
+    args:
+      - 'init'
+      - '-backend-config=bucket=${_TF_STATE_BUCKET}'
+      - '-backend-config=prefix=${_TF_STATE_PREFIX}'
+    env:
+      - 'TF_IN_AUTOMATION=true'
+
+  - id: tf-plan
+    name: 'hashicorp/terraform:1.14'
+    dir: 'cicd/terraform'
+    args:
+      - '${_TF_ACTION}'
+      - '-no-color'
+      - '-input=false'
+    env:
+      - 'TF_IN_AUTOMATION=true'
+      - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
+      - 'TF_VAR_orchestration_region=${_REGION}'
+      - 'TF_VAR_build_project_id=${_BUILD_PROJECT_ID}'
+      - 'TF_VAR_build_region=${_REGION}'
+      - 'TF_VAR_runtime_project_id=${_RUNTIME_PROJECT_ID}'
+      - 'TF_VAR_runtime_region=${_REGION}'
+      - 'TF_VAR_builder_sa_email=${_BUILDER_SA_EMAIL}'
+      - 'TF_VAR_runtime_sa_email=${_RUNTIME_SA_EMAIL}'
+      - 'TF_VAR_ar_repo=${_AR_REPO}'
+
+substitutions:
+  _TF_ACTION: 'plan'
+  _TF_STATE_BUCKET: ''
+  _TF_STATE_PREFIX: 'lighter-prover'
+  _REGION: 'us-central1'
+  _ORCH_PROJECT_ID: ''
+  _BUILD_PROJECT_ID: ''
+  _RUNTIME_PROJECT_ID: ''
+  _BUILDER_SA_EMAIL: ''
+  _RUNTIME_SA_EMAIL: ''
+  _AR_REPO: 'lighter-prover'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
