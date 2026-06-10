@@ -1,0 +1,114 @@
+# syntax=docker/dockerfile:1.6
+#
+# Lighter prover bench container (Phase 1 — fan-out throughput)
+# ─────────────────────────────────────────────────────────────
+#
+# Multi-stage build:
+#   1. builder — pinned nightly Rust toolchain (see rust-toolchain),
+#      cargo fetch + cargo build --release -p bench --bin bench.
+#   2. runtime — debian:stable-slim with the bench binary, the
+#      bench_test.json fixture, an entrypoint script (worker /
+#      orchestrator roles), and tini as PID 1.
+#
+# Build args:
+#   LIGHTER_REF       Upstream git ref the binary is built against. Default
+#                     is upstream commit 5bbb307 because the bundled
+#                     bench_test.json panics on current main (upstream
+#                     elliottech/lighter-prover#9). Override to rebuild
+#                     against newer upstream once #9 is fixed.
+#   TARGET_CPU_NATIVE Set to "1" to compile with -C target-cpu=native
+#                     for ~10-15% throughput on the host machine. Default
+#                     "0" so the produced image is portable across CPUs
+#                     (Cloud Build → Cloud Run pushes images to machines
+#                     the builder never saw).
+#   RUST_TOOLCHAIN    Rust toolchain version (default: matches the
+#                     rust-toolchain file shipped in the source tree —
+#                     nightly-2025-12-06 at time of writing).
+#
+# Acceptance: image < 1 GB. As of the bench commit, the runtime stage
+# is ~200 MB (debian-slim + tini + ~80 MB stripped bench binary + 1.5 MB
+# bench_test.json).
+
+ARG LIGHTER_REF=5bbb307dfb26276c48054f2c3ea9dcfe80d3678a
+ARG TARGET_CPU_NATIVE=0
+ARG RUST_TOOLCHAIN=nightly-2025-12-06
+
+# ─── Stage 1: builder ────────────────────────────────────────────────
+FROM rustlang/rust:nightly-bookworm AS builder
+
+ARG LIGHTER_REF
+ARG TARGET_CPU_NATIVE
+ARG RUST_TOOLCHAIN
+
+# Install the exact pinned toolchain. The rust-toolchain file in the
+# source tree would auto-trigger this on the first cargo invocation
+# anyway, but installing explicitly lets us cache the install layer.
+RUN rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
+ && rustup default "${RUST_TOOLCHAIN}" \
+ && rustup component add rustfmt clippy --toolchain "${RUST_TOOLCHAIN}" || true
+
+WORKDIR /src
+
+# Copy the source tree. We rely on the repo-root .dockerignore to
+# keep target/, .git, and logs out of the build context. The LIGHTER_REF
+# arg is captured into an env so it shows up in `docker image inspect`
+# and in the binary's own startup log line (the bench `--version` /
+# machine-metadata header reads $GIT_SHA when set).
+COPY . .
+
+ENV GIT_SHA=${LIGHTER_REF}
+
+# RUSTFLAGS toggle — see header comment.
+ARG _RUSTFLAGS_DEFAULT=""
+ARG _RUSTFLAGS_NATIVE="-C target-cpu=native"
+RUN export RUSTFLAGS="$( [ "${TARGET_CPU_NATIVE}" = "1" ] && echo "${_RUSTFLAGS_NATIVE}" || echo "${_RUSTFLAGS_DEFAULT}" )" \
+ && echo "Building with RUSTFLAGS=${RUSTFLAGS}, LIGHTER_REF=${LIGHTER_REF}" \
+ && cargo +"${RUST_TOOLCHAIN}" fetch \
+ && cargo +"${RUST_TOOLCHAIN}" build --release -p bench --bin bench \
+ && strip target/release/bench || true
+
+# ─── Stage 2: runtime ────────────────────────────────────────────────
+FROM debian:stable-slim AS runtime
+
+ARG LIGHTER_REF
+ARG TARGET_CPU_NATIVE
+
+# tini = PID 1 with proper signal handling. python3 = orchestrator role.
+# ca-certificates = future-proofing for any HTTPS fetches.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      tini \
+      python3 \
+      python3-pip \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# Non-root user. Cloud Run will pick its own UID; we still want a sane
+# default for podman / local docker.
+RUN useradd --create-home --shell /bin/bash --uid 1000 bench
+
+WORKDIR /app
+
+COPY --from=builder /src/target/release/bench /app/bench
+COPY --from=builder /src/bench/bench_test.json /app/bench_test.json
+COPY cicd/entrypoint.sh /app/entrypoint.sh
+COPY cicd/orchestrator.py /app/orchestrator.py
+RUN chmod +x /app/entrypoint.sh /app/orchestrator.py \
+ && chown -R bench:bench /app
+
+USER bench
+
+# Defaults — every value is overridable at `podman run` / Cloud Run time.
+ENV LIGHTER_ROLE=worker \
+    LIGHTER_BENCH_INPUT=/app/bench_test.json \
+    LIGHTER_BENCH_REPEAT=1 \
+    LIGHTER_WORKERS=1 \
+    LIGHTER_TX_PER_PROOF=4 \
+    LIGHTER_TX_LIMIT=480 \
+    RUST_LOG=info \
+    LIGHTER_REF=${LIGHTER_REF} \
+    LIGHTER_TARGET_CPU_NATIVE=${TARGET_CPU_NATIVE}
+
+# tini -- = pass everything after `--` straight to the entrypoint and
+# install tini as the signal-forwarding init.
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
