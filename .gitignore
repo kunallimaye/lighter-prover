@@ -7,3 +7,36 @@ target/
 *.pdb
 
 vendor
+
+
+# Added by devops scaffold
+# Environment
+.env
+.env.local
+.env.*.local
+config.toml
+# OS
+.DS_Store
+Thumbs.db
+# IDE
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+*~
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+.terraform.lock.hcl
+# Build
+tmp/
+.cache/
+*.log
+logs/
+# Detached orchestration state (heartbeat/checkpoint/recovery files, #140)
+.orchestration/
+# Go
+bin/
+/vendor/
