@@ -60,12 +60,40 @@ fn main() {
 
     let args = Args::parse();
 
+    const UPSTREAM_TESTED_MAX_TX_PER_PROOF: usize = 6;
+    if args.tx_per_proof > UPSTREAM_TESTED_MAX_TX_PER_PROOF {
+        eprintln!(
+            "error: --tx-per-proof {} exceeds the upstream-tested maximum of {}.\n\
+             \n\
+             Upstream lighter-prover (commit 5bbb307) sets log_gates = 14 in\n\
+             circuit/src/block_tx_chain_constraints.rs:128 when tx_per_proof > 6.\n\
+             That setting is insufficient: the chain-recursion verifier circuit\n\
+             requires more than 2^14 = 16384 rows for tx_per_proof in {{7, 8, 16, 32}}\n\
+             and panics at build time with 'Failed to build circuit'.\n\
+             \n\
+             Empirically validated chunk sizes on upstream 5bbb307: 1, 2, 3, 4, 5, 6.\n\
+             \n\
+             See https://github.com/kunallimaye/lighter-prover/issues/8 for the\n\
+             log_gates analysis and proposed fix paths (bump constant, tiered\n\
+             table, or dynamic computation from CommonCircuitData).",
+            args.tx_per_proof, UPSTREAM_TESTED_MAX_TX_PER_PROOF
+        );
+        std::process::exit(2);
+    }
+
     if args.tx_per_proof == 0 {
         eprintln!("error: --tx-per-proof must be > 0");
         std::process::exit(2);
     }
     if args.tx_limit == 0 {
         eprintln!("error: --tx-limit must be > 0");
+        std::process::exit(2);
+    }
+    if args.tx_per_proof > args.tx_limit {
+        eprintln!(
+            "error: --tx-per-proof ({}) must be <= --tx-limit ({}); a single chunk would not fit",
+            args.tx_per_proof, args.tx_limit
+        );
         std::process::exit(2);
     }
 
