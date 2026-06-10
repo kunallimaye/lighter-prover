@@ -8,14 +8,17 @@
 #   TX_PER_PROOF      Chunk size handed to bench (default: 4)
 #   TX_LIMIT          Cap on txs consumed from bench_test.json (default: 480)
 #   N                 Worker count for fan-out targets (default: 4)
-#   LIGHTER_REF       Upstream commit the container is built against
-#                     (default: 5bbb307, last commit before upstream #9)
 #   TARGET_CPU_NATIVE Set to 1 for non-portable native-CPU build
+#
+# Note: there is no LIGHTER_REF knob — the container build derives it
+# from `git rev-parse HEAD` (local) or $COMMIT_SHA (Cloud Build) so the
+# :ref-<short> tag and GIT_SHA env truthfully name the source baked in
+# (see issue #15 and ADR-0001 §Revision 1).
 #
 # Example:
 #   make local-bench TX_PER_PROOF=2 TX_LIMIT=480
 #   make local-fanout N=4
-#   make cloud-bench-build LIGHTER_REF=<new-sha>
+#   make cloud-bench-build
 
 .PHONY: help \
   local-init local-clean local-build local-test local-bench local-fanout local-lint \

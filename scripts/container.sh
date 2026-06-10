@@ -8,7 +8,8 @@ source "${SCRIPT_DIR}/common.sh"
 start_log "container-${1:-unknown}"
 
 # Knobs (override at make-invoke time).
-LIGHTER_REF="${LIGHTER_REF:-5bbb307dfb26276c48054f2c3ea9dcfe80d3678a}"
+# LIGHTER_REF is derived from `git rev-parse HEAD` in build() — it IS
+# the SHA of the source baked into the image, not an external pin.
 TARGET_CPU_NATIVE="${TARGET_CPU_NATIVE:-0}"
 TX_PER_PROOF="${TX_PER_PROOF:-4}"
 TX_LIMIT="${TX_LIMIT:-480}"
@@ -34,18 +35,29 @@ clean() {
 }
 
 build() {
-  log_info "Building bench container (LIGHTER_REF=${LIGHTER_REF}, native=${TARGET_CPU_NATIVE})..."
   require_cmd podman
+  # Derive LIGHTER_REF from this repo's HEAD so the value baked into the
+  # image truthfully matches the source COPY'd into the builder stage.
+  # Mirrors the Cloud Build path (cicd/cloudbuild.yaml) which uses
+  # $COMMIT_SHA for the same purpose.
+  local lighter_ref
+  lighter_ref="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
+  local lighter_ref_short
+  lighter_ref_short="$(git -C "${PROJECT_ROOT}" rev-parse --short=7 HEAD 2>/dev/null || echo unknown)"
+  local ref_tag="localhost/lighter-bench:ref-${lighter_ref_short}"
+
+  log_info "Building bench container (LIGHTER_REF=${lighter_ref}, native=${TARGET_CPU_NATIVE})..."
   podman build \
-    --build-arg "LIGHTER_REF=${LIGHTER_REF}" \
+    --build-arg "LIGHTER_REF=${lighter_ref}" \
     --build-arg "TARGET_CPU_NATIVE=${TARGET_CPU_NATIVE}" \
     -f "${PROJECT_ROOT}/cicd/Containerfile" \
     -t "${LOCAL_IMAGE}" \
+    -t "${ref_tag}" \
     "${PROJECT_ROOT}"
   # Acceptance: image < 1 GB. Surface size so the operator sees it.
   local sz
   sz="$(podman image inspect "${LOCAL_IMAGE}" --format '{{.Size}}' 2>/dev/null || echo 0)"
-  log_ok "Image built: ${LOCAL_IMAGE} ($(numfmt --to=iec "${sz}" 2>/dev/null || echo "${sz} bytes"))"
+  log_ok "Image built: ${LOCAL_IMAGE} + ${ref_tag} ($(numfmt --to=iec "${sz}" 2>/dev/null || echo "${sz} bytes"))"
 }
 
 run() {
@@ -83,7 +95,7 @@ test() {
 
 # Full prove pipeline, single container, default config.
 # tx_per_proof=4 tx_limit=480 (per #4 baseline) is the throughput-optimal
-# single-worker config under upstream 5bbb307.
+# single-worker config for the bench fixture this repo carries.
 bench() {
   log_info "Running full bench (tx_per_proof=${TX_PER_PROOF} tx_limit=${TX_LIMIT})..."
   require_cmd podman
