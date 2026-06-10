@@ -233,7 +233,7 @@ _step_create_agent_sa_and_bind() {
   [[ -n "${AGENT_ROLE_EXPIRY_DAYS}" ]] || die "AGENT_ROLE_EXPIRY_DAYS is empty. Set it in config.toml ([gcp.orchestration].agent_role_expiry_days) or .env, or accept the 30-day default in common.sh."
   local expiry_ts
   expiry_ts="$(date -u -d "+${AGENT_ROLE_EXPIRY_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
-    || date -u -v+${AGENT_ROLE_EXPIRY_DAYS}d '+%Y-%m-%dT%H:%M:%SZ')"
+    || date -u -v+"${AGENT_ROLE_EXPIRY_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ')"
   local condition_title="agent-role-expiry-${AGENT_ROLE_EXPIRY_DAYS}d"
   log_info "  binding agent SA → custom role with expiry ${expiry_ts}"
   gcloud projects add-iam-policy-binding "${ORCH_PROJECT}" \
