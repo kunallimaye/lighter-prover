@@ -19,27 +19,45 @@ _PROV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091 # path is resolved at runtime from $BASH_SOURCE
 . "${_PROV_DIR}/common.sh"
 
-# render_startup <sha> <svalues> <host_label> <run_id> -> path of rendered file
+# render_startup <image> <svalues> <host_label> <run_id> -> path of rendered file
+# <image> is the full AR URI including the per-microarch tag (#33).
 render_startup() {
-  local sha="$1" svalues="$2" host_label="$3" run_id="$4"
+  local image="$1" svalues="$2" host_label="$3" run_id="$4"
   local tmpl="${FLEET_TEMPLATES}/vm-startup.sh.tmpl"
   local out
   out="$(mktemp -t bench-fleet-startup.XXXXXX)"
   # Use awk for the substitution -- sed's delimiter escaping is brittle when
-  # the bucket URI contains "/".
+  # the bucket / image URIs contain "/".
   awk \
+    -v image="${image}" \
     -v bucket="${GCS_BUCKET}" \
     -v run_prefix="${run_id}/${host_label}/" \
-    -v sha="${sha}" \
     -v svalues="${svalues}" \
     -v host_label="${host_label}" \
-    '{ gsub(/__BUCKET__/, bucket);
+    -v tx_limit="${TX_LIMIT}" \
+    '{ gsub(/__IMAGE__/, image);
+       gsub(/__BUCKET__/, bucket);
        gsub(/__RUN_PREFIX__/, run_prefix);
-       gsub(/__SHA__/, sha);
        gsub(/__SVALUES__/, svalues);
        gsub(/__HOST_LABEL__/, host_label);
+       gsub(/__TX_LIMIT__/, tx_limit);
        print }' "${tmpl}" > "${out}"
   printf '%s\n' "${out}"
+}
+
+# fleet_image_for <machine_type> <sha> -> full AR image URI with the
+# per-microarch tag from machines.tsv (image_tag column). #33: prebuilt
+# images replace on-VM builds; "native honesty" is preserved by mapping
+# every shape to an explicit -C target-cpu variant.
+fleet_image_for() {
+  local mt="$1" sha="$2"
+  local tag
+  tag="$(machine_field "$mt" "image_tag")" || return 1
+  if [[ -z "${tag}" ]]; then
+    log_err "[${mt}] image_tag missing in machines.tsv"
+    return 1
+  fi
+  printf '%s:%s-%s\n' "${AR_IMAGE_BASE}" "${sha}" "${tag}"
 }
 
 # provision_one_vm <machine_type> <run_id> <sha> <svalues> [<dry_run>] [<run_dir>]
@@ -75,8 +93,12 @@ provision_one_vm() {
     compute_sa="$(get_compute_sa)" || return 1
   fi
 
+  # Resolve the prebuilt per-microarch image for this shape (#33).
+  local image
+  image="$(fleet_image_for "${mt}" "${sha}")" || return 1
+
   local startup_path
-  startup_path="$(render_startup "${sha}" "${svalues}" "${mt}" "${run_id}")"
+  startup_path="$(render_startup "${image}" "${svalues}" "${mt}" "${run_id}")"
   # Stash the rendered script next to the run state for debugging.
   cp "${startup_path}" "${run_dir}/${mt}.startup.sh"
 
@@ -91,8 +113,13 @@ provision_one_vm() {
   for zone in "${ZONES[@]}"; do
     log_info "[${mt}] trying zone=${zone} instance=${inst_name}"
 
-    local create_cmd=(
-      gcloud --impersonate-service-account="${BENCH_SWEEP_SA}"
+    # Impersonation flag only when BENCH_SWEEP_SA is set (#33: default
+    # empty — the active account is the orchestrator identity).
+    local create_cmd=(gcloud)
+    if [[ -n "${BENCH_SWEEP_SA}" ]]; then
+      create_cmd+=(--impersonate-service-account="${BENCH_SWEEP_SA}")
+    fi
+    create_cmd+=(
              --project="${PROJECT}"
         compute instances create "${inst_name}"
         --zone="${zone}"

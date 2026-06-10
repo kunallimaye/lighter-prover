@@ -1,69 +1,48 @@
-# Cloud Build pipeline — Lighter bench container (Phase 1, multi-arch).
+# Cloud Build pipeline — Lighter bench container matrix (#33).
 #
-# Builds cicd/Containerfile against the source tree from the build
-# context (i.e. *this* repo at the commit being built), then pushes a
-# **multi-arch (linux/amd64 + linux/arm64) image manifest** to Artifact
-# Registry tagged with :latest, :sha-${SHORT_SHA}, and :ref-${SHORT_SHA}.
+# One submit produces FOUR artifacts, all pushed to ${_IMAGE_NAME}:
 #
-# Multi-arch rationale (issue #29):
-#   Issue #4's fleet baseline targets 10 GCP machine shapes; 8 of them
-#   are ARM (Axion c4a/n4a, Ampere t2a). The classic
-#   `docker build && docker push` flow on Cloud Build's default amd64
-#   worker produced an amd64-only manifest that crashed every ARM VM
-#   with `exec format error`. This pipeline uses `docker buildx` +
-#   QEMU emulation so a single build run produces a manifest covering
-#   both architectures, and consumers pull the same `:ref-<sha>` tag
-#   regardless of node arch.
+#   :<sha> + :latest        portable multi-arch manifest list
+#                           (amd64 default codegen + aarch64 cross-
+#                           compiled). For dev / local-test / Cloud Run.
+#   :<sha>-znver5           amd64,  -C target-cpu=znver5      (c4d/n4d AMD Turin)
+#   :<sha>-neoverse-v2      arm64,  -C target-cpu=neoverse-v2 (c4a/n4a Google Axion)
+#   :<sha>-neoverse-n1      arm64,  -C target-cpu=neoverse-n1 (t2a Ampere Altra)
 #
-# Trade-offs:
-#   * Build wall time grows ~3-5x (the arm64 build runs under QEMU on
-#     an x86 worker). On E2_HIGHCPU_32 expect ~30-60 min for the full
-#     two-arch Rust nightly compile vs ~10-15 min single-arch. The
-#     `timeout` below is raised to 90 min to absorb the variance.
-#   * Image size in the registry roughly doubles (both arch layer
-#     stacks ship behind the same manifest).
+# Cross-compilation rationale (#33, supersedes the #29/#30 QEMU build):
+#   Cloud Build has NO ARM workers (verified June 2026: default pool is
+#   e2/n1 x86 only; private pools are e2/n2d/c3 x86 only). The previous
+#   pipeline ran the entire arm64 Rust compile under QEMU emulation
+#   (~3-5× wall-time). The builder stage in cicd/Containerfile now runs
+#   NATIVELY on the x86 worker for every artifact and cross-compiles
+#   aarch64 output (rustup target + gcc-aarch64-linux-gnu linker). QEMU
+#   is only used for the trivial arm64 runtime stage (apt installs,
+#   minutes), whose layers are cached and shared across all arm64
+#   variants within the buildx builder.
 #
-# Both costs are accepted because the alternative (8 of 10 target VMs
-# failing to start) is not viable.
+# Per-microarch honesty: the fleet benchmarks (scripts/bench-fleet)
+# previously compiled with -C target-cpu=native ON each VM. With
+# prebuilt images, "native" is meaningless — instead each of the 10 GCE
+# shapes maps to one of 3 explicit microarch tags (machines.tsv
+# image_tag column). Same codegen guarantee, no on-VM builds.
 #
 # LIGHTER_REF semantic: the git SHA of this repo's commit being built,
-# which IS the source baked into the image (no separate checkout
-# happens — `COPY . .` in the Containerfile pulls from the build
-# context). Derived from Cloud Build's built-in $COMMIT_SHA.
+# which IS the source baked into the image (COPY . . from the build
+# context). Derived from Cloud Build's built-in $COMMIT_SHA. Manual
+# `gcloud builds submit` must pass COMMIT_SHA explicitly via
+# --substitutions (built-ins only auto-populate on git triggers) —
+# scripts/cloud.sh::cloud_bench_build does this.
 #
-# Triggering paths:
-#   - Recommended (operator workstation): `make cloud-bench-build`.
-#     scripts/cloud.sh::cloud_bench_build derives the commit SHA from
-#     `git rev-parse HEAD` and passes COMMIT_SHA / SHORT_SHA explicitly
-#     via --substitutions (manual `gcloud builds submit` does NOT
-#     auto-populate the built-ins — those only fire on git triggers).
-#     Optionally override _TARGET_CPU_NATIVE=1 to compile with
-#     -C target-cpu=native (non-portable image).
-#   - Cloud Build trigger on git push: $COMMIT_SHA and $SHORT_SHA are
-#     auto-populated by Cloud Build from the triggering commit.
-#
-# Three-role topology (see AGENTS.local.md / ADR-0001):
-#   * orchestration = operator workstation submits the build
-#   * build         = ${PROJECT_ID} (this Cloud Build project) compiles + pushes
-#   * runtime       = Cloud Run Jobs in a (possibly different) project pulls + executes
-#
-# Tier-2 detached orchestration: scripts/cloud.sh::cloud_app_deploy
-# submits this config in the background, writes a heartbeat, and the
-# operator can re-check status via `make cloud-status`.
+# Three-role topology (ADR-0001-container-topology): all three roles
+# collapse onto kunal-scratch (config.toml [gcp.defaults]).
 
 steps:
   # ─── 1. Register QEMU + create a buildx builder ─────────────────────
   #
-  # `tonistiigi/binfmt --install all` registers binfmt_misc handlers
-  # for every cross-arch combo so the docker daemon can execute
-  # foreign-arch ELF binaries during the build. It needs --privileged
-  # to mount the binfmt_misc filesystem; Cloud Build's default worker
-  # supports this.
-  #
-  # `docker buildx create --driver docker-container` spins up a
-  # buildkit container as the builder backend — required because the
-  # default `docker` driver cannot produce multi-arch manifests (those
-  # need buildkit's manifest-list support).
+  # QEMU/binfmt is still required — NOT for rustc (cross-compiled), but
+  # for the arm64 runtime stage's apt layer and for buildx to assemble
+  # multi-arch manifests. docker-container driver is required for
+  # manifest-list output.
   - id: setup-buildx
     name: 'gcr.io/cloud-builders/docker'
     entrypoint: bash
@@ -75,20 +54,12 @@ steps:
         docker buildx create --use --name lighter-builder --driver docker-container
         docker buildx inspect --bootstrap
 
-  # ─── 2. Build + push the multi-arch image ───────────────────────────
+  # ─── 2. Portable multi-arch manifest (:<sha> + :latest) ────────────
   #
-  # `--push` is mandatory for multi-arch: buildx cannot `--load` a
-  # manifest list into the local daemon (no such concept), so the
-  # registry IS the only place a multi-arch image can land. That's
-  # also why we drop the top-level `images:` block below — buildx
-  # already pushed by the time this step exits, and re-pushing via
-  # the `images:` declaration would collapse the manifest list back
-  # to single-arch.
-  #
-  # All three tags (:latest, :sha-<sha>, :ref-<sha>) point at the
-  # same manifest list; consumers continue to pull by tag and the
-  # registry resolves to the right per-arch image automatically.
-  - id: build-and-push-multiarch
+  # `--push` is mandatory for multi-arch (buildx cannot --load a
+  # manifest list). No top-level `images:` block — re-pushing via the
+  # classic path would collapse the manifest list (see #29).
+  - id: build-portable-multiarch
     name: 'gcr.io/cloud-builders/docker'
     entrypoint: bash
     args:
@@ -96,56 +67,128 @@ steps:
       - |
         set -euxo pipefail
         docker buildx build \
+          --builder lighter-builder \
           --platform=linux/amd64,linux/arm64 \
           -f cicd/Containerfile \
           --build-arg LIGHTER_REF=${COMMIT_SHA} \
-          --build-arg TARGET_CPU_NATIVE=${_TARGET_CPU_NATIVE} \
+          --build-arg TARGET_CPU=portable \
+          -t ${_IMAGE_NAME}:${COMMIT_SHA} \
           -t ${_IMAGE_NAME}:latest \
-          -t ${_IMAGE_NAME}:sha-${SHORT_SHA} \
-          -t ${_IMAGE_NAME}:ref-${SHORT_SHA} \
           --push \
           .
 
-# NOTE: no top-level `images:` block. buildx --push above already
-# delivered a multi-arch manifest list to Artifact Registry. Adding an
-# `images:` declaration would make Cloud Build re-resolve and re-push
-# those tags via the classic `docker push` path, which only handles
-# single-arch manifests and would collapse the multi-arch manifest
-# list — silently breaking ARM consumers again. See issue #29.
+  # ─── 3-5. Per-microarch variants ────────────────────────────────────
+  #
+  # Sequential on purpose: each variant is a full recompile (RUSTFLAGS
+  # changes invalidate every crate), and E2_HIGHCPU_32 is already
+  # saturated by one cargo build. The arm64 runtime apt layers are
+  # cached from step 2.
+  - id: build-znver5
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        docker buildx build \
+          --builder lighter-builder \
+          --platform=linux/amd64 \
+          -f cicd/Containerfile \
+          --build-arg LIGHTER_REF=${COMMIT_SHA} \
+          --build-arg TARGET_CPU=znver5 \
+          -t ${_IMAGE_NAME}:${COMMIT_SHA}-znver5 \
+          --push \
+          .
+
+  - id: build-neoverse-v2
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        docker buildx build \
+          --builder lighter-builder \
+          --platform=linux/arm64 \
+          -f cicd/Containerfile \
+          --build-arg LIGHTER_REF=${COMMIT_SHA} \
+          --build-arg TARGET_CPU=neoverse-v2 \
+          -t ${_IMAGE_NAME}:${COMMIT_SHA}-neoverse-v2 \
+          --push \
+          .
+
+  - id: build-neoverse-n1
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        docker buildx build \
+          --builder lighter-builder \
+          --platform=linux/arm64 \
+          -f cicd/Containerfile \
+          --build-arg LIGHTER_REF=${COMMIT_SHA} \
+          --build-arg TARGET_CPU=neoverse-n1 \
+          -t ${_IMAGE_NAME}:${COMMIT_SHA}-neoverse-n1 \
+          --push \
+          .
+
+  # ─── 6. Verify binary architecture of every artifact ───────────────
+  #
+  # Belt-and-suspenders on top of the in-Containerfile file(1) assert:
+  # pull each pushed tag (per platform), extract /app/bench WITHOUT
+  # running it (docker create + docker cp — no QEMU execution), and
+  # fail the build on any ELF-arch mismatch. This is the contract that
+  # prevents a repeat of the pre-#30 "exec format error" fleet wipeout.
+  - id: verify-binary-arch
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        command -v file >/dev/null || { apt-get update -qq && apt-get install -y -qq file; }
+        check() {
+          local tag="$1" platform="$2" pattern="$3"
+          local ref="${_IMAGE_NAME}:$${tag}"
+          docker pull --platform "$${platform}" "$${ref}"
+          local cid
+          cid="$(docker create --platform "$${platform}" "$${ref}")"
+          docker cp "$${cid}:/app/bench" /tmp/bench-check
+          docker rm "$${cid}"
+          file /tmp/bench-check
+          file /tmp/bench-check | grep -q "$${pattern}" \
+            || { echo "FATAL: $${ref} ($${platform}) bench binary is not $${pattern}" >&2; exit 1; }
+          rm -f /tmp/bench-check
+        }
+        check "${COMMIT_SHA}"             linux/amd64 'x86-64'
+        check "${COMMIT_SHA}"             linux/arm64 'ARM aarch64'
+        check "${COMMIT_SHA}-znver5"      linux/amd64 'x86-64'
+        check "${COMMIT_SHA}-neoverse-v2" linux/arm64 'ARM aarch64'
+        check "${COMMIT_SHA}-neoverse-n1" linux/arm64 'ARM aarch64'
+        echo "ALL ARCH CHECKS PASSED"
+
+# NOTE: no top-level `images:` block — buildx --push already delivered
+# the manifests; re-pushing would collapse the multi-arch list (#29).
 
 substitutions:
-  # Artifact Registry image URI. Default matches the runtime-project AR
-  # repo provisioned by cicd/terraform. Override via --substitutions for
-  # promotion / cross-project pushes.
+  # Artifact Registry image URI. Default targets the collapsed
+  # kunal-scratch topology. Override via --substitutions for promotion.
   _IMAGE_NAME: 'us-central1-docker.pkg.dev/${PROJECT_ID}/lighter-prover/bench'
 
-  # Toggle -C target-cpu=native. Default 0 (portable image). Set to 1
-  # only when building for a known fleet of identical CPU models.
-  # Note: target-cpu=native is meaningless for the cross-arch (arm64)
-  # build under QEMU — the emulated CPU is generic. Use with care.
-  _TARGET_CPU_NATIVE: '0'
-
-  # $COMMIT_SHA and $SHORT_SHA are Cloud Build built-ins, auto-populated
-  # from the triggering commit (or `--source` revision for manual
-  # `gcloud builds submit`). They are NOT user substitutions — no
-  # underscore prefix, no default needed; a missing value fails the
-  # build LOUDLY instead of silently tagging :sha-unknown.
-
 options:
-  # Required when the build's service account doesn't have a
-  # default-logging bucket bound. CLOUD_LOGGING_ONLY is the right choice
-  # for projects without a dedicated GCS log bucket.
   logging: CLOUD_LOGGING_ONLY
-
-  # The bench compile is CPU-bound and benefits from a meatier worker.
-  # E2_HIGHCPU_32 is the right knee for the Rust nightly toolchain. The
-  # arm64 cross-build runs under QEMU and is single-threaded-ish per
-  # cargo job, so wider cores still help amortize parallel cargo work.
+  # Required so the ${PROJECT_ID} reference inside the _IMAGE_NAME
+  # substitution default expands (bash would otherwise see the literal
+  # `${PROJECT_ID}` and die on `set -u`).
+  dynamic_substitutions: true
+  # CPU-bound Rust compiles × 5 full variants — the widest x86 worker
+  # in the default pool is the right knee.
   machineType: 'E2_HIGHCPU_32'
 
-# 90 min hard cap. Multi-arch Rust nightly compile (amd64 + arm64 under
-# QEMU emulation) typically lands at 30-60 min on E2_HIGHCPU_32; the
-# 90 min headroom protects against runaway downloads / DNS issues /
-# network blips and Rust's occasional "let me just rebuild the world"
-# moments.
-timeout: '5400s'
+# 3h hard cap: 5 native-speed compiles at ~10-15 min each (amd64 portable,
+# arm64 portable, znver5, neoverse-v2, neoverse-n1) + one QEMU arm64 apt
+# layer (~5-10 min, then cached) + pushes + verify. Typical ~60-90 min;
+# headroom absorbs cold caches and registry/network variance.
+timeout: '10800s'

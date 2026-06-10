@@ -35,13 +35,14 @@ BENCH_DONE_PATH="/tmp/DONE"
 emit_header() {
   # Single banner line consumed by the orchestrator to bind a run's
   # stdout to its container identity. Cheap, parseable, idempotent.
-  printf '### LIGHTER_BENCH_RUN role=%s input=%s repeat=%s tx_per_proof=%s tx_limit=%s ref=%s native=%s host=%s ts=%s\n' \
+  printf '### LIGHTER_BENCH_RUN role=%s input=%s repeat=%s tx_per_proof=%s tx_limit=%s ref=%s target_cpu=%s native=%s host=%s ts=%s\n' \
     "${ROLE}" \
     "${INPUT}" \
     "${REPEAT}" \
     "${LIGHTER_TX_PER_PROOF:-4}" \
     "${LIGHTER_TX_LIMIT:-480}" \
     "${LIGHTER_REF:-unknown}" \
+    "${LIGHTER_TARGET_CPU:-portable}" \
     "${LIGHTER_TARGET_CPU_NATIVE:-0}" \
     "$(hostname)" \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)"

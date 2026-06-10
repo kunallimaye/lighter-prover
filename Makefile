@@ -150,10 +150,12 @@ logs-last: ## Show the most recent log file
 logs-clean: ## Remove all log files
 	@rm -rf logs/*.log && echo "Cleaned log files" || true
 
-# ─── GCP fleet benchmark (issue #11) ─────────────────────────────────
+# ─── GCP fleet benchmark (issue #11, container pivot #33) ────────────
 # Wraps scripts/bench-fleet/run-fleet.sh for the 10-VM cross-architecture
-# bench sweep. See scripts/bench-fleet/README.md for prerequisites
-# (gcloud auth, bench-sweep SA, project setup) and
+# bench sweep. Fleet VMs run Container-Optimized OS and pull prebuilt
+# per-microarch images (build them first: make cloud-bench-build).
+# See scripts/bench-fleet/README.md for prerequisites (gcloud auth,
+# kunal-scratch setup via make admin-cloud-init) and
 # docs/decisions/ADR-0001-gcp-fleet-bench-architecture.md for the
 # architecture rationale.
 #

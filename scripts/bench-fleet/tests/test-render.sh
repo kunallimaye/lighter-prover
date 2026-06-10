@@ -46,19 +46,20 @@ while IFS=$'\t' read -r mt vcpus arch _img _imgp _quota _zones; do
 === host_label ===
 ${mt}
 
+=== image ===
+uri:    us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:0ae123b-fake-tag
+digest: us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
 === lscpu ===
 Architecture: ${arch}
 CPU(s):       ${vcpus}
 Model name:   Fake CPU ${mt}
-
-=== rustc ===
-rustc 1.94.0-nightly
 EOF
 
   # _GCS_PREFIX with two URIs to exercise the raw-logs section.
   cat > "${INFO}/${mt}/_GCS_PREFIX" <<EOF
-gs://kl-ai-workstation-bench-fleet-runs/test/${mt}/bench-S4.log
-gs://kl-ai-workstation-bench-fleet-runs/test/${mt}/machine-info.txt
+gs://kunal-scratch-bench-fleet-runs/test/${mt}/S4/bench.log
+gs://kunal-scratch-bench-fleet-runs/test/${mt}/machine-info.txt
 EOF
 done < <(tail -n +2 "${MACHINES_TSV}")
 

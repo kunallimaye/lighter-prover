@@ -17,7 +17,7 @@
 # while keeping orchestration + build on the dev project.
 
 [project]
-name = "app"
+name = "lighter-prover"
 
 # ─── REQUIRED: catch-all defaults ──────────────────────────────────
 #
@@ -95,3 +95,23 @@ region  = ""
 # dns_project_id = "acme-dns"
 # dns_managed_zone = "example-com"
 # dns_record_name  = "app.example.com."
+
+# ─── Fleet benchmark toolkit (scripts/bench-fleet, #33) ────────────
+#
+# Single source of truth for the GCE bench-fleet. All values have
+# sensible defaults derived from [gcp.defaults]; env vars override
+# (GCS_BUCKET, FLEET_SVALUES, ... — see scripts/bench-fleet/README.md).
+#
+# results_bucket  GCS bucket for fleet run artifacts + sentinels.
+#                 Default: gs://<defaults.project>-bench-fleet-runs
+#                 Created by `make admin-cloud-init` (Owner-tier).
+# machines_tsv    Path to the machine matrix (relative to repo root).
+#                 Default: scripts/bench-fleet/machines.tsv
+# svalues         Default --tx-per-proof sweep values (space-separated).
+# tx_limit        --tx-limit passed to every bench run (LIGHTER_TX_LIMIT).
+
+[fleet]
+# results_bucket = "gs://kunal-scratch-bench-fleet-runs"
+# machines_tsv   = "scripts/bench-fleet/machines.tsv"
+# svalues        = "1 2 4 6"
+# tx_limit       = 480

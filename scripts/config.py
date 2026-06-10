@@ -188,6 +188,17 @@ def main():
     # ─── Agent role expiry (days) ─────────────────────────────
     _emit('AGENT_ROLE_EXPIRY_DAYS', _resolve(config, env, 'orchestration', 'agent_role_expiry_days', '30'))
 
+    # ─── Fleet benchmark toolkit (#33) ────────────────────────
+    # Top-level [fleet] section (not under [gcp] — the fleet is a
+    # project-specific toolkit, not a role). Empty values fall through
+    # to the consuming script's defaults (scripts/bench-fleet/lib/common.sh
+    # derives results_bucket from the runtime project when unset).
+    fleet = config.get('fleet', {})
+    _emit('FLEET_RESULTS_BUCKET', fleet.get('results_bucket', ''))
+    _emit('FLEET_MACHINES_TSV_CFG', fleet.get('machines_tsv', ''))
+    _emit('FLEET_SVALUES', fleet.get('svalues', ''))
+    _emit('FLEET_TX_LIMIT', fleet.get('tx_limit', ''))
+
 
 if __name__ == '__main__':
     main()

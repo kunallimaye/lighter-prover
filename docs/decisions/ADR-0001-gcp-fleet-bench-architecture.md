@@ -234,3 +234,65 @@ operator interface; `run-fleet.sh` remains directly callable for non-default
 flows (subset of machines, alternate git refs, custom confirmation behavior).
 The Makefile passes `--yes` to `fleet-run` to skip the prompt — the underlying
 script's cost-estimate print is the safety gate.
+
+## Addendum: Container pivot + move to kunal-scratch (#33, June 2026)
+
+**Status: supersedes Decision 3 (build-on-VM), Decision 7 (bench-sweep
+impersonation), and the kl-ai-workstation-specific parts of Decision 8.**
+
+### All infrastructure moves to `kunal-scratch`
+
+The `kl-ai-workstation` environment broke irrecoverably (#32: the
+`bench-sweep` SA was deleted and the results bucket removed). Rather
+than restore it, ALL fleet infrastructure — Cloud Build, Artifact
+Registry (`us-central1-docker.pkg.dev/kunal-scratch/lighter-prover`),
+the results bucket (`gs://kunal-scratch-bench-fleet-runs`), and the VMs
+themselves — now lives in `kunal-scratch`. Configuration flows through
+the repo-root `config.toml` ([gcp.defaults] + the new `[fleet]`
+section); the toolkit derives every project-specific value from it and
+hardcodes nothing. The fleet's IAM needs are bootstrapped by idempotent
+steps appended to `admin-cloud-init` (scripts/cloud.sh). Impersonation
+is gone: `BENCH_SWEEP_SA` defaults to empty and the orchestrator's
+active account is the acting identity. kunal-scratch uses the AUTO-mode
+`default` VPC (no custom network flags needed beyond
+`--network=default --subnet=default`).
+
+### Containers replace on-VM builds
+
+Decision 3 (build on each VM with `-C target-cpu=native`) is reversed.
+The fleet now runs Container-Optimized OS VMs that pull prebuilt images
+from Artifact Registry:
+
+* **Kills the on-VM build failure class entirely** — toolchain install
+  flakes, apt mirror issues, build-vs-binary inconsistencies (#24's
+  instant rc=101 mystery), and the ~15-20 min per-VM toolchain+compile
+  tax all disappear. What ran in CI is bit-for-bit what runs on the VM
+  (image digest recorded in machine-info.txt).
+* **Native-codegen honesty is preserved** via explicit per-microarch
+  tags instead of `native`: the 10 GCE shapes collapse onto 3
+  microarchitectures, each with its own image variant —
+  `:<sha>-znver5` (c4d/n4d, AMD Turin), `:<sha>-neoverse-v2` (c4a/n4a,
+  Google Axion), `:<sha>-neoverse-n1` (t2a, Ampere Altra). A portable
+  multi-arch `:<sha>`/`:latest` manifest serves dev/Cloud Run.
+* **The per-S collection contract moves into the container**: each
+  worker container uploads its own `bench.log` + `bench.jsonl` + DONE
+  to `<run-id>/<machine>/S<N>/` (the #25 entrypoint contract). The VM
+  writes only fleet-level artifacts and the `_DONE` sentinel the
+  monitor polls (layout unchanged).
+
+### Cross-compilation, not QEMU
+
+Cloud Build has **no ARM workers** (verified June 2026: the default
+pool offers e2/n1 x86 only; private pools offer e2/n2d/c3 x86 only).
+The PR #30 pipeline compiled the arm64 half of the manifest under QEMU
+emulation — a 3-5× wall-time penalty on a Rust workload this heavy.
+The #33 pipeline cross-compiles instead: the builder stage always runs
+natively on the x86 worker (`FROM --platform=$BUILDPLATFORM`, rustup
+aarch64 target, `gcc-aarch64-linux-gnu` linker) and emits aarch64 code
+at native compile speed. QEMU is retained ONLY for the arm64 runtime
+stage (debian-slim + tini + google-cloud-cli apt installs — minutes,
+cached, and shared across all arm64 variants). Two arch gates prevent
+a repeat of the pre-#30 `exec format error` fleet wipeout: a `file(1)`
+assertion inside the builder stage, and a verify step in
+cicd/cloudbuild.yaml that extracts the binary from every pushed tag
+(docker create/cp — no execution) and fails on ELF-arch mismatch.

@@ -1,37 +1,75 @@
 #!/bin/bash
-# GCE startup script for bench-fleet.
-# Runs as root on Debian 12 (or arm64 variant). Rendered by provision.sh
-# with the __PLACEHOLDER__ tokens substituted before being passed via
-# --metadata-from-file=startup-script.
+# GCE startup script for bench-fleet (#33: Container-Optimized OS edition).
+# Runs as root on COS (cos-stable / cos-arm64-stable). Rendered by
+# provision.sh with the __PLACEHOLDER__ tokens substituted before being
+# passed via --metadata-from-file=startup-script.
 #
-# IMPORTANT: This script intentionally does NOT use `set -e`. We want every
-# phase to attempt to upload its partial results (even after a failure) so
-# the operator can diagnose what went wrong from GCS.
+# Container pivot (#33): the VM no longer installs a toolchain or builds
+# anything. It pulls the prebuilt per-microarch bench image from Artifact
+# Registry and runs one worker container per S value. The container's own
+# entrypoint (cicd/entrypoint.sh, #25 contract) uploads bench.log +
+# bench.jsonl + a per-S DONE sentinel to
+#   gs://<bucket>/<run-id>/<machine>/S<S>/
+# This script only handles: docker auth, pull, per-S orchestration,
+# machine-info capture, and the FLEET-level _DONE sentinel at
+#   gs://<bucket>/<run-id>/<machine>/_DONE
+# (which lib/monitor.sh polls to delete the VM).
+#
+# COS notes:
+#  - docker + docker-credential-gcr are preinstalled; there is NO gcloud
+#    on the host. All GCS uploads from this script run gcloud INSIDE a
+#    container (the bench image ships google-cloud-cli; if the pull
+#    failed we fall back to google/cloud-sdk:slim so diagnostics still
+#    land in GCS).
+#  - /var is writable; we stage fleet artifacts in /var/lib/fleet.
+#
+# IMPORTANT: This script intentionally does NOT use `set -e`. We want
+# every phase to attempt to upload its partial results (even after a
+# failure) so the operator can diagnose from GCS. Per issue #23: never
+# report status=ok when something failed — no `|| true` lying.
 
 set -uo pipefail
 exec > >(tee /var/log/startup.log) 2>&1
 echo "FLEET_START $(date -Is)"
-export DEBIAN_FRONTEND=noninteractive
 
-BUCKET="__BUCKET__"            # e.g. gs://kl-ai-workstation-bench-fleet-runs
+IMAGE="__IMAGE__"              # full AR URI incl. per-microarch tag
+BUCKET="__BUCKET__"            # e.g. gs://kunal-scratch-bench-fleet-runs
 RUN_PREFIX="__RUN_PREFIX__"    # e.g. <run-id>/<machine_type>/  (trailing slash)
-SHA="__SHA__"                  # e.g. 0ae123bfbb7f79db890ce1e06881c4f118e51c19
 SVALUES="__SVALUES__"          # e.g. "1 2 4 6"
 HOST_LABEL="__HOST_LABEL__"    # e.g. c4a-highcpu-32
+TX_LIMIT="__TX_LIMIT__"        # e.g. 480 (LIGHTER_TX_LIMIT in the container)
 
-# ---------- Upload + sentinel helper (defined first so failure paths can call it) ----------
-# cp_retry <src...> <dst> -- gcloud storage cp with one retry after 5s.
-# Echoes the tail of cp output to serial; returns the final cp exit code.
-# Added per issue #23: v3's `|| true` here swallowed HTTP 403s on every
-# upload and still printed status=ok, hiding the root cause for a full run.
-cp_retry() {
+# entrypoint.sh expects BENCH_BUCKET WITHOUT the gs:// scheme (it
+# constructs dest="gs://${BENCH_BUCKET}/${BENCH_PREFIX}/").
+BUCKET_NAME="${BUCKET#gs://}"
+REGISTRY_HOST="${IMAGE%%/*}"   # e.g. us-central1-docker.pkg.dev
+FLEET_DIR=/var/lib/fleet
+mkdir -p "${FLEET_DIR}"
+
+# Which image to use for fleet-level gcloud uploads. Starts as the cloud-sdk
+# fallback; switched to $IMAGE once the pull succeeds (saves a Docker Hub
+# pull in the happy path).
+GCLOUD_IMAGE="google/cloud-sdk:slim"
+
+# ---------- Upload + sentinel helpers (defined first so failure paths can call them) ----------
+# fleet_cp <src-in-/var/lib/fleet-or-/var/log> <gcs-dst> -- gcloud storage cp
+# via container, one retry after 5s. Returns the final cp exit code.
+fleet_cp() {
   local rc=0
-  gcloud storage cp "$@" 2>&1 | tail -20
+  timeout 10m docker run --rm \
+    -v "${FLEET_DIR}":/fleet:ro \
+    -v /var/log:/hostlog:ro \
+    --entrypoint gcloud \
+    "${GCLOUD_IMAGE}" storage cp "$@" 2>&1 | tail -5
   rc=${PIPESTATUS[0]}
   if [[ ${rc} -ne 0 ]]; then
     echo "FLEET_UPLOAD_RETRY $(date -Is) rc=${rc} -- retrying in 5s: gcloud storage cp $*"
     sleep 5
-    gcloud storage cp "$@" 2>&1 | tail -20
+    timeout 10m docker run --rm \
+      -v "${FLEET_DIR}":/fleet:ro \
+      -v /var/log:/hostlog:ro \
+      --entrypoint gcloud \
+      "${GCLOUD_IMAGE}" storage cp "$@" 2>&1 | tail -5
     rc=${PIPESTATUS[0]}
   fi
   return "${rc}"
@@ -40,13 +78,17 @@ cp_retry() {
 upload_and_signal_done() {
   local STATUS="${1:-ok}"
   local UPLOAD_RC=0 rc=0
-  echo "$STATUS" > /opt/results/status.txt
+  echo "${STATUS}" > "${FLEET_DIR}/status.txt"
 
-  cp_retry -r /opt/results "${BUCKET}/${RUN_PREFIX}"
-  rc=$?
-  if [[ ${rc} -ne 0 ]]; then UPLOAD_RC=${rc}; fi
+  local f
+  for f in machine-info.txt svalues-summary.txt status.txt; do
+    [[ -f "${FLEET_DIR}/${f}" ]] || continue
+    fleet_cp "/fleet/${f}" "${BUCKET}/${RUN_PREFIX}${f}"
+    rc=$?
+    if [[ ${rc} -ne 0 && ${UPLOAD_RC} -eq 0 ]]; then UPLOAD_RC=${rc}; fi
+  done
 
-  cp_retry /var/log/startup.log "${BUCKET}/${RUN_PREFIX}startup.log"
+  fleet_cp /hostlog/startup.log "${BUCKET}/${RUN_PREFIX}startup.log"
   rc=$?
   if [[ ${rc} -ne 0 && ${UPLOAD_RC} -eq 0 ]]; then UPLOAD_RC=${rc}; fi
 
@@ -56,10 +98,9 @@ upload_and_signal_done() {
     STATUS="${STATUS}+upload-failed-rc${UPLOAD_RC}"
   fi
 
-  # SENTINEL — orchestrator polls for this file. Use a temp file (not a
-  # stdin pipe) so cp_retry's second attempt still has the content.
-  echo "${STATUS} @ $(date -Is)" > /tmp/_done_sentinel.txt
-  cp_retry /tmp/_done_sentinel.txt "${BUCKET}/${RUN_PREFIX}_DONE"
+  # FLEET SENTINEL — orchestrator polls for this file and deletes the VM.
+  echo "${STATUS} @ $(date -Is)" > "${FLEET_DIR}/_done_sentinel.txt"
+  fleet_cp /fleet/_done_sentinel.txt "${BUCKET}/${RUN_PREFIX}_DONE"
   rc=$?
   if [[ ${rc} -ne 0 ]]; then
     echo "FLEET_UPLOAD_FAILED rc=${rc} (sentinel _DONE could not be written)"
@@ -67,38 +108,50 @@ upload_and_signal_done() {
   echo "FLEET_UPLOAD_DONE $(date -Is) status=${STATUS}"
 }
 
-mkdir -p /opt/results
+# ---------- 1. Docker auth for Artifact Registry ----------
+# COS ships docker-credential-gcr; it auths docker pulls via the VM's
+# metadata-server identity (the default Compute SA, which needs
+# roles/artifactregistry.reader — granted by `make admin-cloud-init`).
+echo "FLEET_DOCKER_AUTH_START $(date -Is)"
+export HOME=/root
+docker-credential-gcr configure-docker --registries="${REGISTRY_HOST}"
+AUTH_RC=$?
+echo "FLEET_DOCKER_AUTH_DONE $(date -Is) rc=${AUTH_RC}"
 
-# ---------- 1. Apt deps ----------
-echo "FLEET_APT_START $(date -Is)"
-apt-get update -qq
-apt-get install -y -qq build-essential git curl pkg-config libssl-dev ca-certificates
-echo "FLEET_APT_DONE $(date -Is)"
+# ---------- 2. Pull the prebuilt bench image (retry 3x) ----------
+echo "FLEET_PULL_START $(date -Is) image=${IMAGE}"
+PULL_RC=1
+for attempt in 1 2 3; do
+  if docker pull "${IMAGE}" 2>&1 | tail -5; then
+    PULL_RC=0
+    break
+  fi
+  echo "FLEET_PULL_RETRY $(date -Is) attempt=${attempt} failed -- sleeping 15s"
+  sleep 15
+done
+echo "FLEET_PULL_DONE $(date -Is) rc=${PULL_RC}"
 
-# ---------- 2. Rustup pinned toolchain ----------
-export HOME=/root CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
-# shellcheck disable=SC1091
-source "$CARGO_HOME/env"
-# The toolchain pin matches the rust-toolchain file at repo root. If you bump
-# the toolchain in the repo, the orchestrator's --ref must point to a SHA that
-# has the new pin -- rustup will read the file again during build.
-rustup toolchain install nightly-2025-12-06 --profile minimal
-rustup default nightly-2025-12-06
-echo "FLEET_RUSTUP_DONE $(date -Is)"
+if [[ ${PULL_RC} -ne 0 ]]; then
+  echo "FLEET_PULL_FAILED -- uploading diagnostics via cloud-sdk fallback and bailing"
+  upload_and_signal_done "pull-failed"
+  exit 1
+fi
+# Pull succeeded — the bench image ships gcloud; use it for fleet uploads
+# (no Docker Hub dependency in the happy path).
+GCLOUD_IMAGE="${IMAGE}"
 
-# ---------- 3. Clone at exact SHA ----------
-cd /opt || { upload_and_signal_done "cd-failed"; exit 1; }
-git clone https://github.com/kunallimaye/lighter-prover.git
-cd lighter-prover || { upload_and_signal_done "clone-failed"; exit 1; }
-git checkout "$SHA"
-git rev-parse HEAD > /opt/results/git-sha.txt
-echo "FLEET_CLONE_DONE $(date -Is)"
+IMAGE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}" 2>/dev/null || echo unknown)"
 
-# ---------- 4. Machine info ----------
+# ---------- 3. Machine info ----------
+# No toolchain on COS (nothing is built here) — provenance is the image
+# URI + digest instead of rustc version (#33).
 {
   echo "=== host_label ==="
-  echo "$HOST_LABEL"
+  echo "${HOST_LABEL}"
+  echo
+  echo "=== image ==="
+  echo "uri:    ${IMAGE}"
+  echo "digest: ${IMAGE_DIGEST}"
   echo
   echo "=== lscpu ==="
   lscpu
@@ -108,100 +161,50 @@ echo "FLEET_CLONE_DONE $(date -Is)"
   echo
   echo "=== uname -a ==="
   uname -a
-  echo
-  echo "=== rustc ==="
-  rustc --version
-  echo
-  echo "=== git sha ==="
-  cat /opt/results/git-sha.txt
-  echo
-  echo "=== target-cpu native cfg ==="
-  rustc --print cfg -C target-cpu=native 2>&1 | head -40
-} > /opt/results/machine-info.txt
+} > "${FLEET_DIR}/machine-info.txt"
+echo "FLEET_MACHINE_INFO_DONE $(date -Is) digest=${IMAGE_DIGEST}"
 
-# ---------- 5. Build (cold) ----------
-# Toolchain provenance into build.log first (issue #24: v3 showed an
-# impossible 33s "build" with instant rc=101 runs; this makes the
-# toolchain + build output auditable from GCS and the serial console).
-{
-  echo "=== toolchain ==="
-  echo "which cargo: $(command -v cargo)"
-  cargo --version
-  rustc --version
-  echo "=== build ==="
-} > /opt/results/build.log
-
-BUILD_START=$(date +%s)
-echo "FLEET_BUILD_START $(date -Is)"
-RUSTFLAGS="-C target-cpu=native" cargo build --release -p bench --bin bench \
-  >> /opt/results/build.log 2>&1
-BUILD_RC=$?
-BUILD_WALL=$(( $(date +%s) - BUILD_START ))
-echo "BUILD_WALL_SECONDS=${BUILD_WALL}" | tee -a /opt/results/build.log
-
-# Consistency check (issue #24): cargo claiming success without producing
-# an executable binary is a hard inconsistency — flag it loudly.
-if [[ ${BUILD_RC} -eq 0 && ! -x /opt/lighter-prover/target/release/bench ]]; then
-  echo "FLEET_BUILD_INCONSISTENT $(date -Is) -- cargo rc=0 but target/release/bench missing or not executable"
-  BUILD_RC=99
-fi
-
-echo "FLEET_BUILD_DONE $(date -Is) rc=${BUILD_RC} wall=${BUILD_WALL}s"
-echo "FLEET_BUILD_LOG_BYTES=$(stat -c%s /opt/results/build.log 2>/dev/null || echo 0)"
-echo "----- build.log tail -30 -----"
-tail -30 /opt/results/build.log
-echo "----- end build.log tail -----"
-
-if [[ ${BUILD_RC} -ne 0 ]]; then
-  echo "FLEET_BUILD_FAILED -- uploading partial artifacts and bailing"
-  upload_and_signal_done "build-failed"
-  exit 1
-fi
-
-# ---------- 6. Sweep ----------
-# Sanity gate (issue #24): prove the binary can at least start before
-# burning sweep time. A broken binary (bad schema, missing dylib, wrong
-# arch) fails here in seconds instead of producing 4 × rc=101 mysteries.
-if ! /opt/lighter-prover/target/release/bench --help >/dev/null 2>&1; then
-  echo "FLEET_BENCH_SANITY_FAILED $(date -Is) -- 'bench --help' returned non-zero"
-  upload_and_signal_done "bench-binary-broken"
-  exit 1
-fi
-echo "FLEET_BENCH_SANITY_OK $(date -Is)"
-
-# bench reads ./bench_test.json from CWD, so we MUST cd into bench/ before each run.
-cd /opt/lighter-prover/bench || { upload_and_signal_done "cd-bench-failed"; exit 1; }
-for S in $SVALUES; do
+# ---------- 4. Per-S worker containers ----------
+# Each container runs the #25 contract: bench once with
+# LIGHTER_TX_PER_PROOF=S, then the entrypoint itself uploads bench.log +
+# bench.jsonl + DONE to gs://$BENCH_BUCKET/$BENCH_PREFIX/. GCS auth flows
+# from the VM's metadata server (default Compute SA) — containers on the
+# default bridge reach 169.254.169.254.
+: > "${FLEET_DIR}/svalues-summary.txt"
+FAIL_COUNT=0
+for S in ${SVALUES}; do
   echo "FLEET_S${S}_START $(date -Is)"
   S_START=$(date +%s)
-  if timeout 4h /opt/lighter-prover/target/release/bench \
-       --tx-per-proof "$S" --tx-limit 480 \
-       > "/opt/results/bench-S${S}.log" 2>&1; then
-    S_RC=0
-  else
-    S_RC=$?
-  fi
+  timeout 4h docker run --rm --name "bench-S${S}" \
+    -e LIGHTER_TX_PER_PROOF="${S}" \
+    -e LIGHTER_TX_LIMIT="${TX_LIMIT}" \
+    -e BENCH_BUCKET="${BUCKET_NAME}" \
+    -e BENCH_PREFIX="${RUN_PREFIX}S${S}" \
+    -e RUST_LOG=info \
+    "${IMAGE}" 2>&1 | tail -20
+  S_RC=${PIPESTATUS[0]}
+  # If timeout killed the client, make sure the container is gone too.
+  docker rm -f "bench-S${S}" >/dev/null 2>&1
   S_WALL=$(( $(date +%s) - S_START ))
-  echo "S${S}_WALL_SECONDS=${S_WALL}" | tee -a "/opt/results/bench-S${S}.log"
-  echo "S${S}_EXIT_CODE=${S_RC}" | tee -a "/opt/results/bench-S${S}.log"
   echo "FLEET_S${S}_DONE $(date -Is) rc=${S_RC} wall=${S_WALL}s"
-  # Tail to serial (issue #24): even if uploads later fail, the operator
-  # can see panics / abnormal exits straight from the serial console.
-  echo "----- bench-S${S}.log tail -20 -----"
-  tail -20 "/opt/results/bench-S${S}.log"
-  echo "----- end bench-S${S}.log tail -----"
+  echo "S${S} rc=${S_RC} wall_seconds=${S_WALL}" >> "${FLEET_DIR}/svalues-summary.txt"
+  if [[ ${S_RC} -ne 0 ]]; then
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
 done
-cd /opt/lighter-prover || true
 
-# ---------- 7. Upload + sentinel ----------
-upload_and_signal_done "ok"
+# ---------- 5. Fleet-level upload + sentinel ----------
+# Honest status (issue #23): only "ok" when every S exited 0 AND the
+# fleet-level uploads succeed.
+if [[ ${FAIL_COUNT} -eq 0 ]]; then
+  upload_and_signal_done "ok"
+else
+  upload_and_signal_done "bench-failed-${FAIL_COUNT}"
+fi
 
-# ---------- 8. No in-VM self-delete ----------
-# Pilot proved this fails: default Compute SA lacks compute.instances.delete,
-# and bench-sweep cannot grant that role (no setIamPolicy). Orchestrator
-# (running as bench-sweep, which already has compute.instanceAdmin.v1) issues
-# the delete from outside once it sees the _DONE sentinel.
-# The --max-run-duration=10h --instance-termination-action=DELETE on the
-# instance is a belt-and-suspenders safety net if the orchestrator never sees
-# the sentinel.
+# ---------- 6. No in-VM self-delete ----------
+# The default Compute SA lacks compute.instances.delete by design. The
+# orchestrator (lib/monitor.sh) deletes the VM once it sees the _DONE
+# sentinel. --max-run-duration=10h --instance-termination-action=DELETE
+# on the instance is the belt-and-suspenders safety net.
 echo "FLEET_END $(date -Is) -- awaiting orchestrator delete or max-run-duration"
