@@ -55,10 +55,12 @@ run_worker_once() {
   /app/bench
 }
 
-# Returns the exit code of the LAST /app/bench invocation. Writes its
-# global into BENCH_EXIT_CODE so callers (the upload path) can read it
-# without needing to capture the function's return through a pipeline
-# (where PIPESTATUS would only see `echo WORKER_DONE`).
+# Runs ./bench REPEAT times. Returns the exit code of the LAST bench
+# invocation (0 if all succeeded). Also writes that code to
+# /tmp/.bench_rc so the BENCH_BUCKET-enabled caller can recover it
+# after this function runs inside a `tee` pipeline subshell — where
+# PIPESTATUS would only see the trailing `echo WORKER_DONE` (=0) and
+# mask any real failure.
 run_worker() {
   emit_header
   local i rc=0
@@ -156,10 +158,11 @@ case "${ROLE}" in
       echo "### BENCH_UPLOAD_ENABLED bucket=${BENCH_BUCKET} prefix=${BENCH_PREFIX:-}"
       # Disable `set -e` around the worker block: a non-zero bench
       # exit must NOT abort us before we get a chance to upload the
-      # panic log. We capture the exit code via BENCH_EXIT_CODE
-      # (set inside run_worker / inline below) rather than PIPESTATUS,
-      # because the pipeline's last command is `echo WORKER_DONE`
-      # which always exits 0 and would mask a real failure.
+      # panic log. We capture the exit code via /tmp/.bench_rc
+      # (written inside run_worker / inline below) rather than
+      # PIPESTATUS, because the pipeline's last command is
+      # `echo WORKER_DONE` which always exits 0 and would mask a
+      # real failure.
       set +e
       if (( $# > 0 )); then
         bench_rc=0
