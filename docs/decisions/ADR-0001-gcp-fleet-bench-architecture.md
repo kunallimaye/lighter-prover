@@ -224,3 +224,13 @@ After the initial scaffolding (commit `b0c6bb5`), the user relaxed two project-l
 The custom VPC (`ai-workstation-ws-net`/`ai-workstation-ws-subnet`) remains the only VPC in the project — `constraints/compute.skipDefaultNetworkCreation` is a one-shot policy enforced at project-creation time and relaxing it now does not retroactively create a `default` VPC. Toolkit continues to pass `--network` and `--subnet` flags.
 
 If this toolkit is ever ported to a different GCP project where the org policies are still enforced, restore the dropped flags from git history (commit `b0c6bb5`).
+
+## Addendum: Makefile operator interface
+
+Added a root-level `Makefile` with `fleet-*` targets wrapping `run-fleet.sh`:
+`fleet-quota-check`, `fleet-run-dry`, `fleet-run`, `fleet-status`,
+`fleet-collect`, `fleet-publish`, `fleet-teardown`. This is the recommended
+operator interface; `run-fleet.sh` remains directly callable for non-default
+flows (subset of machines, alternate git refs, custom confirmation behavior).
+The Makefile passes `--yes` to `fleet-run` to skip the prompt — the underlying
+script's cost-estimate print is the safety gate.

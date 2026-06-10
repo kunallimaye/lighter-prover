@@ -43,25 +43,56 @@ If any of the above is missing, every `gcloud ... compute ...` call in
 this toolkit will return `PERMISSION_DENIED`. Fix the IAM, don't patch
 the scripts.
 
-## One-command quickstart
+## Quickstart (via Makefile)
+
+The root `Makefile` is the recommended operator interface. After
+configuring prerequisites (see "Prereqs" above):
 
 ```sh
-# 1. Verify quotas (read-only; safe to re-run).
-./scripts/bench-fleet/run-fleet.sh quota-check
+# 1. Verify quotas (no spend)
+make fleet-quota-check
 
-# 2. Provision all 10 shapes, monitor, collect.
-./scripts/bench-fleet/run-fleet.sh run --yes
-# (prints a run_id like 20260610-153045-abc123 when finished)
+# 2. Dry-run to inspect the 10 gcloud commands (no spend)
+make fleet-run-dry
 
-# 3. Pull logs from GCS and parse into one TSV.
-./scripts/bench-fleet/run-fleet.sh collect --run-id <run_id>
+# 3. Provision + monitor + collect (~$18, ~1h wall, runs S in {1,2,4,6} on all 10 shapes)
+make fleet-run
+# Note the RUN_ID printed in the output — needed for the next two steps.
 
-# 4. Render markdown, post Discussion, comment on #6.
-./scripts/bench-fleet/run-fleet.sh publish --run-id <run_id>
+# 4. Parse logs to TSV
+make fleet-collect RUN_ID=<id-from-step-3>
+
+# 5. Publish Discussion + comment on Discussion #6
+make fleet-publish RUN_ID=<id-from-step-3>
+
+# Emergency cleanup if anything goes wrong:
+make fleet-teardown RUN_ID=<id>          # specific run only
+make fleet-teardown                       # all leftover fleet VMs
 ```
+
+`make` (no args) prints the full target list with descriptions.
 
 The whole pipeline (excluding wall-clock build+sweep time) takes seconds.
 A real fleet run takes ~1h wall-clock with all 10 VMs in parallel.
+
+`make fleet-run` passes `--yes` to skip the Make-level prompt; the
+underlying script still prints a per-machine cost estimate as the safety
+gate before any spend.
+
+### Calling the script directly
+
+For non-default flows (subset of machines, alternate git ref, interactive
+cost-estimate prompt), call `run-fleet.sh` directly:
+
+```sh
+# Only two machines, branch != main, interactive confirmation:
+./scripts/bench-fleet/run-fleet.sh run \
+    --machines c4a-highcpu-32,t2a-standard-32 \
+    --ref feature/some-branch
+
+# Force --yes:
+./scripts/bench-fleet/run-fleet.sh run --machines c4a-highcpu-32 --yes
+```
 
 ## Subcommand reference
 
