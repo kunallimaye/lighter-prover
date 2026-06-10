@@ -130,25 +130,30 @@ tldr = (
 
 # -------- methodology --------
 methodology = (
-    "Each machine ran an identical pipeline:\n\n"
-    "1. Cold `git clone` of `lighter-prover` at the pinned SHA.\n"
-    "2. Cold `cargo build --release -p bench --bin bench` with "
-    "`RUSTFLAGS=\"-C target-cpu=native\"`.\n"
-    "3. Sequential sweep `for S in 1 2 4 6: bench --tx-per-proof $S --tx-limit 480` "
-    "(per-S 4h timeout safety cap, per-shape 10h max-run-duration).\n"
-    "4. All bench logs + `machine-info.txt` uploaded to GCS, sentinel file "
-    "(`_DONE`) signals orchestrator to delete the VM.\n\n"
+    "Each machine ran an identical pipeline (container-based since #33 — "
+    "no on-VM builds):\n\n"
+    "1. Container-Optimized OS VM pulls the prebuilt bench image for its "
+    "microarch from Artifact Registry (`:<sha>-znver5` for AMD Turin, "
+    "`:<sha>-neoverse-v2` for Google Axion, `:<sha>-neoverse-n1` for "
+    "Ampere Altra — all cross-compiled on x86 Cloud Build workers).\n"
+    "2. Sequential sweep: one worker container per S value with "
+    "`LIGHTER_TX_PER_PROOF=$S` (per-S 4h timeout safety cap, per-shape "
+    "10h max-run-duration).\n"
+    "3. Each container uploads its own `bench.log` + `bench.jsonl` + per-S "
+    "`DONE` to GCS; the VM uploads `machine-info.txt` (image URI + digest "
+    "provenance) and the fleet-level `_DONE` sentinel that signals the "
+    "orchestrator to delete the VM.\n\n"
     "Cross-machine: all 10 shapes provisioned in parallel via `gcloud compute "
     "instances create`. Per-machine: each S value runs sequentially on its VM.\n\n"
     "Provisioning template (sanitized):\n\n"
     "```\n"
     "gcloud compute instances create <name>\n"
     "  --zone=<zone> --machine-type=<shape>\n"
-    "  --image-family=<debian-12[-arm64]> --image-project=debian-cloud\n"
+    "  --image-family=<cos-stable|cos-arm64-stable> --image-project=cos-cloud\n"
     "  --boot-disk-size=100GB --boot-disk-type=<per-shape>  # hyperdisk-balanced for C4/N4 families, pd-balanced for T2A\n"
     "  --service-account=<compute-sa> --scopes=cloud-platform\n"
     "  --max-run-duration=10h --instance-termination-action=DELETE\n"
-    "  --network=ai-workstation-ws-net --subnet=ai-workstation-ws-subnet\n"
+    "  --network=default --subnet=default\n"
     "  --metadata-from-file=startup-script=<rendered-template>\n"
     "  --labels=purpose=bench-fleet,owner=lighter,run-id=<run-id>,machine=<shape>\n"
     "```\n"
@@ -242,9 +247,9 @@ for mt in machine_order:
     else:
         raw_log_lines.append(f"- `{mt}`: (not uploaded)")
 raw_logs = (
-    "Downloads require `gcloud storage cp` with bench-sweep impersonation, e.g.:\n\n"
-    "```\ngcloud --impersonate-service-account=bench-sweep@kl-ai-workstation.iam.gserviceaccount.com "
-    "storage cp -r <uri> .\n```\n\n"
+    "Download with `gcloud storage cp` (requires read access to the "
+    "results bucket — see scripts/bench-fleet/README.md prereqs):\n\n"
+    "```\ngcloud storage cp -r <uri> . --project=kunal-scratch\n```\n\n"
     + "\n".join(raw_log_lines)
 )
 
@@ -258,8 +263,9 @@ repro = (
     "./scripts/bench-fleet/run-fleet.sh run --yes\n"
     "./scripts/bench-fleet/run-fleet.sh publish --run-id <id>\n"
     "```\n\n"
-    "See `scripts/bench-fleet/README.md` for prereqs (gcloud auth, GCS bucket, "
-    "bench-sweep SA + impersonation) and full subcommand reference.\n"
+    "See `scripts/bench-fleet/README.md` for prereqs (gcloud auth, "
+    "kunal-scratch project setup via `make admin-cloud-init`, prebuilt "
+    "image matrix via `make cloud-bench-build`) and full subcommand reference.\n"
 )
 
 # -------- assemble --------

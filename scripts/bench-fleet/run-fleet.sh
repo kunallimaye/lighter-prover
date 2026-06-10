@@ -11,7 +11,8 @@
 #   teardown [--run-id ID] [--all]             Force-delete any leftover VMs
 #
 # Hard rule: every gcloud/gcloud-storage call goes through gcloud_imp /
-# gstorage_imp wrappers in common.sh (impersonation enforced).
+# gstorage_imp wrappers in common.sh (project pinned; impersonation only
+# when BENCH_SWEEP_SA is set — default empty since #33).
 
 set -euo pipefail
 
@@ -26,7 +27,8 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "${_SCRIPT_DIR}/lib/monitor.sh"
 
-DEFAULT_SVALUES="1 2 4 6"
+# Default sweep values: config.toml [fleet].svalues > built-in.
+DEFAULT_SVALUES="${FLEET_SVALUES:-1 2 4 6}"
 
 # ---------------------------------------------------------------------------
 # Usage
@@ -49,8 +51,10 @@ Subcommands:
   publish --run-id ID                Create Discussion + comment on #6
   teardown [--run-id ID] [--all]     Force-delete leftover VMs
 
-Env overrides (rarely needed):
-  PROJECT, REGION, BENCH_SWEEP_SA, NETWORK, SUBNET, GCS_BUCKET
+Configuration: repo-root config.toml ([gcp.defaults] + [fleet]) is the
+source of truth. Env overrides (rarely needed):
+  PROJECT, REGION, NETWORK, SUBNET, GCS_BUCKET, AR_IMAGE_BASE, TX_LIMIT,
+  BENCH_SWEEP_SA (legacy impersonation -- empty/off by default since #33)
 EOF
 }
 
@@ -58,7 +62,7 @@ EOF
 # quota-check
 # ---------------------------------------------------------------------------
 cmd_quota_check() {
-  log_info "querying ${REGION} quotas (impersonating ${BENCH_SWEEP_SA})"
+  log_info "querying ${REGION} quotas in ${PROJECT} (as $(fleet_identity))"
 
   # Pull regional quotas as JSON, then summarize per family. Falls back to
   # ALL_QUOTAS when a specific family doesn't exist (e.g. older API).
@@ -130,11 +134,10 @@ PYEOF
   log_info "verifying GCS bucket ${GCS_BUCKET} exists"
   if ! gcloud_imp storage buckets describe "${GCS_BUCKET}" --format='value(name)' >/dev/null 2>&1; then
     log_err "bucket ${GCS_BUCKET} does not exist."
-    printf '  Create it with:\n' >&2
-    printf '    gcloud --impersonate-service-account=%s \\\n' "${BENCH_SWEEP_SA}" >&2
-    printf '      storage buckets create %s \\\n' "${GCS_BUCKET}" >&2
-    printf '      --location=%s --uniform-bucket-level-access \\\n' "${REGION}" >&2
-    printf '      --project=%s\n' "${PROJECT}" >&2
+    printf '  The bucket (plus its IAM grants) is created by the Owner-tier bootstrap:\n' >&2
+    printf '    make admin-cloud-init\n' >&2
+    printf '  (or manually: gcloud storage buckets create %s --location=%s \\\n' "${GCS_BUCKET}" "${REGION}" >&2
+    printf '     --uniform-bucket-level-access --project=%s)\n' "${PROJECT}" >&2
     printf '  Then re-run '\''make fleet-quota-check'\''.\n' >&2
     return 1
   fi
@@ -144,26 +147,24 @@ PYEOF
   # could provision and run but every upload got HTTP 403 — and the startup
   # script's `|| true` swallowed it. Two distinct checks are needed:
   #
-  #  1. Orchestrator-side: can bench-sweep (impersonated) write an object?
+  #  1. Orchestrator-side: can the orchestrator identity write an object?
   #  2. VM-side: does the bucket IAM policy grant the default Compute SA
   #     (what the VMs actually run as) roles/storage.objectAdmin? An
-  #     impersonated write from the orchestrator does NOT prove VM-side
-  #     metadata-server access, so we inspect the policy directly.
+  #     orchestrator-side write does NOT prove VM-side metadata-server
+  #     access, so we inspect the policy directly.
   log_info "write-probe: uploading test object to ${GCS_BUCKET}"
   local probe_obj
   probe_obj="${GCS_BUCKET}/_quota_check_$(date -u +%s)_$$"
   if ! printf 'bench-fleet quota-check write probe\n' \
         | gstorage_imp cp - "${probe_obj}" >/dev/null 2>&1; then
-    log_err "write-probe FAILED: ${BENCH_SWEEP_SA} cannot write to ${GCS_BUCKET}"
-    printf '  The orchestrator SA needs object write on the bucket. Grant with:\n' >&2
-    printf '    gcloud storage buckets add-iam-policy-binding %s \\\n' "${GCS_BUCKET}" >&2
-    printf '      --member=serviceAccount:%s \\\n' "${BENCH_SWEEP_SA}" >&2
-    printf '      --role=roles/storage.objectAdmin --project=%s\n' "${PROJECT}" >&2
+    log_err "write-probe FAILED: orchestrator ($(fleet_identity)) cannot write to ${GCS_BUCKET}"
+    printf '  The orchestrator identity needs object write on the bucket.\n' >&2
+    printf '  This grant is part of the Owner-tier bootstrap: make admin-cloud-init\n' >&2
     return 1
   fi
   gstorage_imp rm "${probe_obj}" >/dev/null 2>&1 \
     || log_warn "could not delete probe object ${probe_obj} (harmless; clean up manually)"
-  log_ok "write-probe passed (orchestrator-side, as ${BENCH_SWEEP_SA})"
+  log_ok "write-probe passed (orchestrator-side, $(fleet_identity))"
 
   # VM-side IAM assertion: the bucket policy must include the Compute SA
   # with objectAdmin, or every VM upload will 403 exactly like v3 (#23).
@@ -188,11 +189,10 @@ sys.exit(0 if ok else 1)
 ' "${compute_sa}"; then
     log_err "Compute SA ${compute_sa} lacks roles/storage.objectAdmin on ${GCS_BUCKET}"
     log_err "VM uploads WILL fail with HTTP 403 (v3 root cause — issue #23)."
-    printf '  Grant it with:\n' >&2
-    printf '    gcloud --impersonate-service-account=%s \\\n' "${BENCH_SWEEP_SA}" >&2
-    printf '      storage buckets add-iam-policy-binding %s \\\n' "${GCS_BUCKET}" >&2
-    printf '      --member=serviceAccount:%s \\\n' "${compute_sa}" >&2
-    printf '      --role=roles/storage.objectAdmin --project=%s\n' "${PROJECT}" >&2
+    printf '  This grant is part of the Owner-tier bootstrap: make admin-cloud-init\n' >&2
+    printf '  (or manually: gcloud storage buckets add-iam-policy-binding %s \\\n' "${GCS_BUCKET}" >&2
+    printf '     --member=serviceAccount:%s \\\n' "${compute_sa}" >&2
+    printf '     --role=roles/storage.objectAdmin --project=%s)\n' "${PROJECT}" >&2
     printf '  Then re-run quota-check.\n' >&2
     return 1
   fi
@@ -255,6 +255,29 @@ cmd_run() {
     fi
   fi
   log_info "ref=${ref} -> sha=${sha}"
+
+  # Image preflight (#33): the fleet pulls prebuilt per-microarch images —
+  # verify every needed tag exists in Artifact Registry BEFORE any spend.
+  # Build them with `make cloud-bench-build` (cicd/cloudbuild.yaml pushes
+  # :<sha>, :<sha>-znver5, :<sha>-neoverse-v2, :<sha>-neoverse-n1).
+  if [[ "${dry_run}" != "1" ]]; then
+    local -A _seen_tags=()
+    local img_tag image
+    for mt in "${machine_list[@]}"; do
+      img_tag="$(machine_field "$mt" "image_tag")" || die "no image_tag for ${mt}"
+      [[ -n "${_seen_tags[$img_tag]:-}" ]] && continue
+      _seen_tags[$img_tag]=1
+      image="${AR_IMAGE_BASE}:${sha}-${img_tag}"
+      log_info "verifying image exists: ${image}"
+      if ! gcloud_imp artifacts docker images describe "${image}" >/dev/null 2>&1; then
+        log_err "image not found: ${image}"
+        printf '  Build the matrix for this sha first:\n' >&2
+        printf '    make cloud-bench-build    # (submits cicd/cloudbuild.yaml)\n' >&2
+        return 1
+      fi
+    done
+    log_ok "all required per-microarch images exist for sha=${sha}"
+  fi
 
   # Cost estimate (per-shape, calibrated against v2 findings — issue #19).
   # Previous estimator assumed 1h per VM, which was 3-6× too low: realistic
@@ -365,17 +388,25 @@ cmd_collect() {
   local out_tsv="${local_dir}/parsed-results.tsv"
   printf 'machine_type\tgit_sha\thost\tcpu\tcores\tram_kb\tS\tchunks\tpre_exec_ms\ttotal_tx_ms\tavg_tx_ms\ttotal_chain_ms\tavg_chain_ms\twall_ms\trss_kb\texit_code\tstatus\n' > "${out_tsv}"
 
+  # Layout since #33 (container fleet): each S value ran in its own
+  # worker container, whose entrypoint uploaded
+  #   <run-id>/<machine>/S<N>/{bench.log,bench.jsonl,DONE}
+  # Fleet-level files (machine-info.txt, svalues-summary.txt, startup.log,
+  # status.txt, _DONE) live at <run-id>/<machine>/.
   local count=0 fail=0
   for mt_dir in "${local_dir}"/*/; do
     [[ -d "$mt_dir" ]] || continue
     local mt; mt="$(basename "$mt_dir")"
-    # If "results" subdir got included (from the VM's /opt/results upload),
-    # tunnel into it.
-    local search_dir="${mt_dir}"
-    [[ -d "${mt_dir}/results" ]] && search_dir="${mt_dir}/results"
 
-    for log_file in "${search_dir}"/bench-S*.log; do
-      [[ -r "$log_file" ]] || continue
+    local s_dir log_file
+    for s_dir in "${mt_dir}"S*/; do
+      [[ -d "$s_dir" ]] || continue
+      log_file="${s_dir}bench.log"
+      if [[ ! -r "$log_file" ]]; then
+        log_warn "no bench.log under ${s_dir}"
+        fail=$((fail+1))
+        continue
+      fi
       local row
       if row="$(bash "${FLEET_LIB}/parse-bench-log.sh" "$log_file")"; then
         printf '%s\t%s\n' "$mt" "$row" >> "${out_tsv}"

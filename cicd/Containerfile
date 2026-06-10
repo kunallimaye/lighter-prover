@@ -1,100 +1,125 @@
 # syntax=docker/dockerfile:1.6
 #
-# Lighter prover bench container (Phase 1 — fan-out throughput)
-# ─────────────────────────────────────────────────────────────
+# Lighter prover bench container — cross-compiled per-microarch matrix (#33)
+# ──────────────────────────────────────────────────────────────────────────
 #
 # Multi-stage build:
-#   1. builder — pinned nightly Rust toolchain (see rust-toolchain),
-#      cargo fetch + cargo build --release -p bench --bin bench.
-#   2. runtime — debian:stable-slim with the bench binary, the
-#      bench_test.json fixture, an entrypoint script (worker /
-#      orchestrator roles), and tini as PID 1.
+#   1. builder — ALWAYS runs natively on the build host ($BUILDPLATFORM,
+#      amd64 on Cloud Build). arm64 output is CROSS-COMPILED (rustc
+#      emitting aarch64 via gcc-aarch64-linux-gnu linker), never run
+#      under QEMU. Rationale: Cloud Build has no ARM workers (verified
+#      June 2026 — default pool is e2/n1 x86 only; private pools are
+#      e2/n2d/c3 x86 only), and a QEMU-emulated Rust compile is 10-20×
+#      slower than cross-compilation. See ADR-0001 addendum (#33).
+#   2. runtime — debian:stable-slim for the TARGET platform with the
+#      bench binary, bench_test.json fixture, entrypoint (worker /
+#      orchestrator), google-cloud-cli (GCS uploads, #25), and tini as
+#      PID 1. The arm64 runtime stage is the ONLY thing that runs under
+#      QEMU during a multi-platform build — it is apt installs only
+#      (minutes, not hours) and its layers are shared by every arm64
+#      variant in the same buildx builder.
 #
 # Build args:
-#   LIGHTER_REF       The git SHA of the source tree COPY'd into the
-#                     builder stage. Surfaces as the GIT_SHA env var
-#                     (read by the bench binary's machine-metadata
-#                     header) and as the OCI org.opencontainers.image.revision
-#                     label. The CI pipeline (cicd/cloudbuild.yaml)
-#                     derives this from Cloud Build's $COMMIT_SHA;
-#                     local builds (scripts/container.sh) derive it
-#                     from `git rev-parse HEAD`. Default is the literal
-#                     string "unknown" so an unset arg fails loudly
-#                     rather than silently lying about provenance.
-#   TARGET_CPU_NATIVE Set to "1" to compile with -C target-cpu=native
-#                     for ~10-15% throughput on the host machine. Default
-#                     "0" so the produced image is portable across CPUs
-#                     (Cloud Build → Cloud Run pushes images to machines
-#                     the builder never saw).
-#   RUST_TOOLCHAIN    Rust toolchain version (default: matches the
-#                     rust-toolchain file shipped in the source tree —
-#                     nightly-2025-12-06 at time of writing).
+#   LIGHTER_REF       Git SHA of the source tree COPY'd into the builder
+#                     stage. Surfaces as GIT_SHA env (read by bench's
+#                     machine-metadata header) and as the OCI
+#                     org.opencontainers.image.revision label. Default is
+#                     the literal "unknown" so an unset arg fails loudly.
+#   TARGET_CPU        rustc -C target-cpu value. Default "portable"
+#                     (no -C target-cpu flag — image runs anywhere of its
+#                     arch). The fleet matrix (cicd/cloudbuild.yaml) sets:
+#                       znver5       amd64 — GCP c4d / n4d (AMD Turin)
+#                       neoverse-v2  arm64 — GCP c4a / n4a (Google Axion)
+#                       neoverse-n1  arm64 — GCP t2a (Ampere Altra)
+#                     "native" is also accepted for local builds.
+#   TARGET_CPU_NATIVE DEPRECATED back-compat toggle (pre-#33). "1" maps
+#                     to TARGET_CPU=native when TARGET_CPU is portable.
+#   RUST_TOOLCHAIN    Rust toolchain version (default matches the
+#                     rust-toolchain file at the repo root).
 #
-# Acceptance: image < 1 GB. As of the bench commit, the runtime stage
-# is ~200 MB (debian-slim + tini + ~80 MB stripped bench binary + 1.5 MB
-# bench_test.json).
+# The builder asserts the produced binary's ELF architecture with
+# file(1) and FAILS THE BUILD on mismatch — an amd64 binary can never
+# ship in an arm64 image again (the pre-#30 "exec format error" class).
 
 ARG LIGHTER_REF=unknown
+ARG TARGET_CPU=portable
 ARG TARGET_CPU_NATIVE=0
 ARG RUST_TOOLCHAIN=nightly-2025-12-06
 
-# ─── Stage 1: builder ────────────────────────────────────────────────
-FROM rustlang/rust:nightly-bookworm AS builder
+# ─── Stage 1: builder (native on $BUILDPLATFORM, cross-compiles) ─────
+FROM --platform=$BUILDPLATFORM rustlang/rust:nightly-bookworm AS builder
 
 ARG LIGHTER_REF
+ARG TARGET_CPU
 ARG TARGET_CPU_NATIVE
 ARG RUST_TOOLCHAIN
+# Provided by buildx from --platform: "amd64" or "arm64" (the platform
+# of the image being PRODUCED, not the host this stage runs on).
+ARG TARGETARCH
 
-# Install the exact pinned toolchain. The rust-toolchain file in the
-# source tree would auto-trigger this on the first cargo invocation
-# anyway, but installing explicitly lets us cache the install layer.
-RUN rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
+# Pinned toolchain + both std targets. Adding the host's own target is
+# a no-op; the aarch64 target enables cross-compilation from the amd64
+# build host. file(1) backs the arch assertion; gcc-aarch64-linux-gnu
+# supplies the cross linker + cross strip (binutils dep).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      file gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
  && rustup default "${RUST_TOOLCHAIN}" \
- && rustup component add rustfmt clippy --toolchain "${RUST_TOOLCHAIN}" || true
+ && rustup target add --toolchain "${RUST_TOOLCHAIN}" \
+      x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+# Cross-link config for the aarch64 target. Harmless for amd64 builds.
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 
 WORKDIR /src
 
-# Copy the source tree. We rely on the repo-root .dockerignore to
-# keep target/, .git, and logs out of the build context. The LIGHTER_REF
-# arg is the git SHA of this source tree (set by the caller from
-# $COMMIT_SHA in Cloud Build or `git rev-parse HEAD` locally) and is
-# captured into an env so it shows up in `docker image inspect` and in
-# the binary's own startup log line (the bench `--version` /
-# machine-metadata header reads $GIT_SHA when set).
+# Copy the source tree. The repo-root .dockerignore keeps target/, .git,
+# and logs out of the build context.
 COPY . .
 
 ENV GIT_SHA=${LIGHTER_REF}
 
-# OCI standard labels — expose provenance via the canonical keys so
-# `docker image inspect` / `podman image inspect` / registry UIs all
-# show the SHA without consumers having to know about $GIT_SHA.
 LABEL org.opencontainers.image.revision="${LIGHTER_REF}"
 LABEL org.opencontainers.image.source="https://github.com/kunallimaye/lighter-prover"
 
-# RUSTFLAGS toggle — see header comment.
-ARG _RUSTFLAGS_DEFAULT=""
-ARG _RUSTFLAGS_NATIVE="-C target-cpu=native"
-RUN export RUSTFLAGS="$( [ "${TARGET_CPU_NATIVE}" = "1" ] && echo "${_RUSTFLAGS_NATIVE}" || echo "${_RUSTFLAGS_DEFAULT}" )" \
- && echo "Building with RUSTFLAGS=${RUSTFLAGS}, LIGHTER_REF=${LIGHTER_REF}" \
- && cargo +"${RUST_TOOLCHAIN}" fetch \
- && cargo +"${RUST_TOOLCHAIN}" build --release -p bench --bin bench \
- && strip target/release/bench || true
+# Build + arch-assert. The case statement maps the produced platform to
+# the rust target triple, the expected file(1) substring, and the right
+# strip binary. Cross-compiling for aarch64 here runs rustc NATIVELY on
+# the build host — only the emitted code is arm64.
+RUN set -eux; \
+    case "${TARGETARCH:-$(uname -m)}" in \
+      amd64|x86_64)  RUST_TARGET=x86_64-unknown-linux-gnu;  FILE_PAT='x86-64';      STRIP=strip ;; \
+      arm64|aarch64) RUST_TARGET=aarch64-unknown-linux-gnu; FILE_PAT='ARM aarch64'; STRIP=aarch64-linux-gnu-strip ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH:-unset}" >&2; exit 1 ;; \
+    esac; \
+    CPU="${TARGET_CPU}"; \
+    if [ "${CPU}" = "portable" ] && [ "${TARGET_CPU_NATIVE}" = "1" ]; then CPU=native; fi; \
+    if [ "${CPU}" != "portable" ]; then export RUSTFLAGS="-C target-cpu=${CPU}"; fi; \
+    echo "Building bench: arch=${TARGETARCH} target=${RUST_TARGET} cpu=${CPU} RUSTFLAGS=${RUSTFLAGS:-<none>} LIGHTER_REF=${LIGHTER_REF}"; \
+    cargo +"${RUST_TOOLCHAIN}" fetch; \
+    cargo +"${RUST_TOOLCHAIN}" build --release -p bench --bin bench --target "${RUST_TARGET}"; \
+    mkdir -p /out; \
+    cp "target/${RUST_TARGET}/release/bench" /out/bench; \
+    "${STRIP}" /out/bench || true; \
+    file /out/bench; \
+    file /out/bench | grep -q "${FILE_PAT}" \
+      || { echo "FATAL: /out/bench is not ${FILE_PAT} — arch mismatch" >&2; exit 1; }
 
-# ─── Stage 2: runtime ────────────────────────────────────────────────
+# ─── Stage 2: runtime (target platform; arm64 under QEMU, apt only) ──
 FROM debian:stable-slim AS runtime
 
-ARG LIGHTER_REF
-ARG TARGET_CPU_NATIVE
-
+# NOTE: keep the apt layer FIRST and free of ARG references so buildkit
+# shares it across all per-microarch variants of the same platform —
+# the QEMU-emulated arm64 apt install runs ONCE per build session.
+#
 # tini = PID 1 with proper signal handling. python3 = orchestrator role.
-# ca-certificates = HTTPS for the gcloud apt source + future fetches.
-# curl + gnupg are install-time only for the gcloud apt key/source setup
-# (per the official Debian install docs at
-# https://cloud.google.com/sdk/docs/install#deb); they're removed in the
-# same layer to keep the image small. google-cloud-cli ships gsutil +
-# `gcloud storage`, which the worker entrypoint uses to upload results
-# to GCS when BENCH_BUCKET is set (see #25). Slim variant is ~35-40 MB
-# installed; total runtime image stays well under the 1 GB acceptance bar.
+# google-cloud-cli ships `gcloud storage`, which the worker entrypoint
+# uses to upload results to GCS when BENCH_BUCKET is set (see #25).
+# Google publishes arm64 debs for google-cloud-cli, so the same recipe
+# works for both platforms.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
@@ -113,12 +138,20 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. Cloud Run will pick its own UID; we still want a sane
-# default for podman / local docker.
+# default for podman / local docker / COS.
 RUN useradd --create-home --shell /bin/bash --uid 1000 bench
+
+ARG LIGHTER_REF
+ARG TARGET_CPU
+ARG TARGET_CPU_NATIVE
+
+LABEL org.opencontainers.image.revision="${LIGHTER_REF}"
+LABEL org.opencontainers.image.source="https://github.com/kunallimaye/lighter-prover"
+LABEL io.lighter.bench.target-cpu="${TARGET_CPU}"
 
 WORKDIR /app
 
-COPY --from=builder /src/target/release/bench /app/bench
+COPY --from=builder /out/bench /app/bench
 COPY --from=builder /src/bench/bench_test.json /app/bench_test.json
 COPY cicd/entrypoint.sh /app/entrypoint.sh
 COPY cicd/orchestrator.py /app/orchestrator.py
@@ -127,7 +160,10 @@ RUN chmod +x /app/entrypoint.sh /app/orchestrator.py \
 
 USER bench
 
-# Defaults — every value is overridable at `podman run` / Cloud Run time.
+# Defaults — every value is overridable at `docker run` / Cloud Run time.
+# LIGHTER_TARGET_CPU_NATIVE is kept for back-compat with pre-#33
+# consumers of the entrypoint banner; LIGHTER_TARGET_CPU is the real
+# provenance signal now.
 ENV LIGHTER_ROLE=worker \
     LIGHTER_BENCH_INPUT=/app/bench_test.json \
     LIGHTER_BENCH_REPEAT=1 \
@@ -136,8 +172,7 @@ ENV LIGHTER_ROLE=worker \
     LIGHTER_TX_LIMIT=480 \
     RUST_LOG=info \
     LIGHTER_REF=${LIGHTER_REF} \
+    LIGHTER_TARGET_CPU=${TARGET_CPU} \
     LIGHTER_TARGET_CPU_NATIVE=${TARGET_CPU_NATIVE}
 
-# tini -- = pass everything after `--` straight to the entrypoint and
-# install tini as the signal-forwarding init.
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

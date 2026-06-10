@@ -3,7 +3,13 @@
 #
 # Polls GCS for _DONE sentinels every 60s. When a sentinel appears for a
 # machine, issues `gcloud compute instances delete` from the orchestrator
-# (we run as bench-sweep, which has compute.instanceAdmin.v1).
+# (whose identity holds compute.instanceAdmin.v1 — see README prereqs).
+#
+# Sentinel layout (unchanged by the #33 container pivot): the FLEET-level
+# sentinel is gs://<bucket>/<run-id>/<machine>/_DONE, written by the VM
+# startup script after all per-S containers finish. Per-S DONE files
+# (<run-id>/<machine>/S<N>/DONE) are written by each worker container's
+# entrypoint and are NOT what this monitor polls.
 #
 # Exits when:
 #  - every machine in <run_dir> is in state {complete, provision-failed}, OR

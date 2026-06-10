@@ -284,6 +284,80 @@ _step_grant_builder_roles() {
   fi
 }
 
+# ─── Fleet bootstrap steps (bench-fleet toolkit, #33) ────────────────
+# Appended to the admin-cloud-init step list. All idempotent. Note: the
+# run_detached_stepwise checkpoint hash invalidates when the step list
+# changes — by design; restart-from-1 is safe.
+#
+# Identities:
+#   FLEET_ORCHESTRATOR_SA — the principal that runs the fleet toolkit
+#       (gcloud builds submit, VM create/delete, GCS polling). Default
+#       is the agent workstation's runtime SA; override via env or .env.
+#   default Compute SA — what the fleet VMs run as (pull images, upload
+#       results from inside the worker containers).
+#
+# NOT granted here: roles/cloudbuild.builds.editor — the #33 submit test
+# proved the orchestrator SA can already submit builds to kunal-scratch.
+
+: "${FLEET_ORCHESTRATOR_SA:=ai-workstation-runtime@kl-ai-workstation.iam.gserviceaccount.com}"
+
+# Resolve the runtime project's default Compute SA email.
+_fleet_compute_sa() {
+  local pn
+  pn="$(gcloud projects describe "${RUNTIME_PROJECT}" --format='value(projectNumber)')" \
+    || die "could not resolve project number for ${RUNTIME_PROJECT}"
+  printf '%s-compute@developer.gserviceaccount.com\n' "${pn}"
+}
+
+_step_fleet_create_results_bucket() {
+  local bucket="${FLEET_RESULTS_BUCKET:-gs://${RUNTIME_PROJECT}-bench-fleet-runs}"
+  if gcloud storage buckets describe "${bucket}" --project="${RUNTIME_PROJECT}" &>/dev/null; then
+    log_ok "  fleet results bucket already exists: ${bucket}"
+    return 0
+  fi
+  gcloud storage buckets create "${bucket}" \
+    --project="${RUNTIME_PROJECT}" \
+    --location="${RUNTIME_REGION:-${GCP_REGION}}" \
+    --uniform-bucket-level-access \
+    --quiet
+}
+
+_step_fleet_grant_orchestrator() {
+  local bucket="${FLEET_RESULTS_BUCKET:-gs://${RUNTIME_PROJECT}-bench-fleet-runs}"
+  local member="serviceAccount:${FLEET_ORCHESTRATOR_SA}"
+  # actAs the Compute SA so `gcloud compute instances create
+  # --service-account=<compute-sa>` works. Project-level grant for
+  # simplicity (single-purpose scratch project).
+  log_info "  granting ${FLEET_ORCHESTRATOR_SA} iam.serviceAccountUser on ${RUNTIME_PROJECT}"
+  _grant_role "${RUNTIME_PROJECT}" "${member}" "roles/iam.serviceAccountUser"
+  # Bucket-scoped storage admin: write probes, artifact collection,
+  # sentinel polling, cleanup.
+  log_info "  granting ${FLEET_ORCHESTRATOR_SA} storage.admin on ${bucket}"
+  gcloud storage buckets add-iam-policy-binding "${bucket}" \
+    --project="${RUNTIME_PROJECT}" \
+    --member="${member}" \
+    --role="roles/storage.admin" \
+    --quiet
+}
+
+_step_fleet_grant_compute_sa() {
+  local bucket="${FLEET_RESULTS_BUCKET:-gs://${RUNTIME_PROJECT}-bench-fleet-runs}"
+  local compute_sa
+  compute_sa="$(_fleet_compute_sa)" || return 1
+  local member="serviceAccount:${compute_sa}"
+  # VM-side uploads (worker containers + fleet sentinels). Issue #23:
+  # without this every upload 403s and the monitor never sees _DONE.
+  log_info "  granting ${compute_sa} storage.objectAdmin on ${bucket}"
+  gcloud storage buckets add-iam-policy-binding "${bucket}" \
+    --project="${RUNTIME_PROJECT}" \
+    --member="${member}" \
+    --role="roles/storage.objectAdmin" \
+    --quiet
+  # Image pulls from Artifact Registry on the COS VMs (#33).
+  log_info "  granting ${compute_sa} artifactregistry.reader on ${RUNTIME_PROJECT}"
+  _grant_role "${RUNTIME_PROJECT}" "${member}" "roles/artifactregistry.reader"
+}
+
 admin_cloud_init() {
   log_info "Owner-tier bootstrap (${ENVIRONMENT})..."
   print_topology
@@ -293,7 +367,7 @@ admin_cloud_init() {
   [[ -z "${TF_STATE_BUCKET}" ]] && die "TF_STATE_BUCKET is not set."
 
   if [[ "${CONFIRM:-}" != "yes" ]]; then
-    confirm "Proceed with 8-step bootstrap?" || { log_warn "Aborted."; exit 0; }
+    confirm "Proceed with 11-step bootstrap?" || { log_warn "Aborted."; exit 0; }
   fi
 
   run_detached_stepwise "admin-cloud-init" \
@@ -304,10 +378,14 @@ admin_cloud_init() {
     _step_create_custom_role \
     _step_create_agent_sa_and_bind \
     _step_grant_agent_actas_builder \
-    _step_grant_builder_roles
+    _step_grant_builder_roles \
+    _step_fleet_create_results_bucket \
+    _step_fleet_grant_orchestrator \
+    _step_fleet_grant_compute_sa
 
   log_ok "admin-cloud-init complete."
   log_info "Next: 'make cloud-preflight' to verify, then 'make cloud-infra' to provision runtime resources."
+  log_info "Fleet: 'make fleet-quota-check' validates the bench-fleet bucket + IAM."
 }
 
 # ─── admin-cloud-destroy ──────────────────────────────────────────────
@@ -610,53 +688,58 @@ cloud_recover() {
 }
 
 # ─── cloud-bench-build ────────────────────────────────────────────────
-# Phase-1 specific (issue #2): build the bench container image via Cloud
-# Build and push to Artifact Registry.
+# Build the bench container matrix via Cloud Build (#33): one submit
+# produces the portable multi-arch manifest (:<sha> + :latest) plus the
+# three per-microarch variants (:<sha>-znver5, :<sha>-neoverse-v2,
+# :<sha>-neoverse-n1) that the bench-fleet VMs pull. All arm64 binaries
+# are CROSS-COMPILED on the x86 worker — see cicd/cloudbuild.yaml.
 #
-# This bypasses the generic cloud-app-deploy flow (which expects a
-# Cloud Run service to swap) because Phase 1 doesn't ship a long-lived
-# Cloud Run service — bench is invoked via Cloud Run Jobs on demand.
-#
-# Inputs (env overrides at make-invoke time):
-#   TARGET_CPU_NATIVE  Set "1" for non-portable image with -C target-cpu=native.
-#
-# Note: LIGHTER_REF is no longer an input. It's derived inside
-# cicd/cloudbuild.yaml from Cloud Build's built-in $COMMIT_SHA so the
-# value baked into the image truthfully matches the source COPY'd into
-# the builder stage. The same SHA also feeds the :ref-<short> image tag.
+# Note: LIGHTER_REF is derived from $COMMIT_SHA so the value baked into
+# the image truthfully matches the source COPY'd into the builder stage.
+# The same full SHA is the image tag the fleet resolves against
+# (machines.tsv image_tag column appends the microarch suffix).
 #
 # Required cloud topology (from config.toml/.env):
-#   BUILD_PROJECT, BUILD_REGION, AR_REPO, BUILDER_SA_EMAIL.
+#   BUILD_PROJECT, BUILD_REGION, AR_REPO.
+# Optional: BUILDER_SA_EMAIL — used only when the SA actually exists
+# (collapsed scratch topologies submit as the caller's default identity).
 
 cloud_bench_build() {
-  log_info "Cloud Build: bench container image..."
+  log_info "Cloud Build: bench container matrix (#33)..."
   require_cmd gcloud
   _require_topology
 
-  local target_cpu_native="${TARGET_CPU_NATIVE:-0}"
   local commit_sha
   commit_sha="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo manual)"
-  local short_sha
-  short_sha="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo manual)"
   local image_name="${BUILD_REGION:-us-central1}-docker.pkg.dev/${BUILD_PROJECT}/${AR_REPO}/bench"
 
   log_info "  image:        ${image_name}"
-  log_info "  tags:         :latest :sha-${short_sha} :ref-${short_sha}"
+  log_info "  tags:         :latest :${commit_sha} :${commit_sha}-{znver5,neoverse-v2,neoverse-n1}"
   log_info "  commit:       ${commit_sha}"
-  log_info "  native:       ${target_cpu_native}"
+
+  # Use the dedicated builder SA when it exists; otherwise fall back to
+  # the project's default Cloud Build identity (fine for collapsed
+  # personal topologies like kunal-scratch).
+  local sa_flag=()
+  if gcloud iam service-accounts describe "${BUILDER_SA_EMAIL}" \
+      --project="${BUILD_PROJECT}" &>/dev/null; then
+    sa_flag=(--service-account="projects/${BUILD_PROJECT}/serviceAccounts/${BUILDER_SA_EMAIL}")
+    log_info "  builder SA:   ${BUILDER_SA_EMAIL}"
+  else
+    log_warn "  builder SA ${BUILDER_SA_EMAIL} not found — submitting with default Cloud Build identity"
+  fi
 
   # `gcloud builds submit` from a local source directory does NOT
-  # auto-populate $COMMIT_SHA / $SHORT_SHA (those only fire on git
-  # triggers), so pass them explicitly via substitutions. The keys
-  # without underscore prefix override the built-in values.
+  # auto-populate $COMMIT_SHA (only git triggers do), so pass it
+  # explicitly via substitutions.
   gcloud builds submit "${PROJECT_ROOT}" \
     --project="${BUILD_PROJECT}" \
-    --service-account="projects/${BUILD_PROJECT}/serviceAccounts/${BUILDER_SA_EMAIL}" \
+    "${sa_flag[@]}" \
     --config="${PROJECT_ROOT}/cicd/cloudbuild.yaml" \
-    --substitutions="_IMAGE_NAME=${image_name},_TARGET_CPU_NATIVE=${target_cpu_native},COMMIT_SHA=${commit_sha},SHORT_SHA=${short_sha}" \
+    --substitutions="_IMAGE_NAME=${image_name},COMMIT_SHA=${commit_sha}" \
     --quiet
 
-  log_ok "Bench image built and pushed: ${image_name}:sha-${short_sha}"
+  log_ok "Bench image matrix built and pushed: ${image_name}:${commit_sha}{,-znver5,-neoverse-v2,-neoverse-n1}"
 }
 
 # Compatibility: legacy verbs from the pre-#141 scaffold. Stub out with a

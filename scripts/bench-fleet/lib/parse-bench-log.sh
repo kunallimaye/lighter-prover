@@ -129,8 +129,8 @@ for label, fld in metric_map:
         # Round to 3 decimal places (microsecond precision) and strip trailing zeros.
         fields[fld] = f"{v:.3f}"
 
-# ---------- wall + exit code (set by startup-script wrapper) ----------
-# S4_WALL_SECONDS=345
+# ---------- wall + exit code ----------
+# Legacy (pre-#33 startup-script wrapper) format: S4_WALL_SECONDS=345
 wall_re = re.compile(r'^S\d+_WALL_SECONDS=(\d+)\s*$', re.MULTILINE)
 m = wall_re.search(text)
 if m:
@@ -140,6 +140,14 @@ exit_re = re.compile(r'^S\d+_EXIT_CODE=(\d+)\s*$', re.MULTILINE)
 m = exit_re.search(text)
 if m:
     fields["exit_code"] = m.group(1)
+
+# Container format (#33): cicd/entrypoint.sh's worker role appends
+#   ### WORKER_DONE iterations=1 bench_exit_code=0
+# to bench.log. Fallback only — legacy wrapper lines win when present.
+if fields["exit_code"] == "NA":
+    m = re.search(r'^### WORKER_DONE\b.*\bbench_exit_code=(\d+)\s*$', text, re.MULTILINE)
+    if m:
+        fields["exit_code"] = m.group(1)
 
 # ---------- BENCH_EVENT JSONL (issue #21) ----------
 # Current main (PR #18) emits structured `BENCH_EVENT {json}` lines in
@@ -163,6 +171,10 @@ if summary is not None:
         fields["S"] = str(summary["tx_per_proof"])
     if fields["chunks"] == "NA" and summary.get("chunks") is not None:
         fields["chunks"] = str(summary["chunks"])
+    # Container logs (#33) carry no SX_WALL_SECONDS wrapper line; the
+    # summary event's total_wall_ms is the honest equivalent.
+    if fields["wall_ms"] == "NA" and summary.get("total_wall_ms") is not None:
+        fields["wall_ms"] = str(int(summary["total_wall_ms"]))
 
 # ---------- status ----------
 has_panic = "panicked at" in text

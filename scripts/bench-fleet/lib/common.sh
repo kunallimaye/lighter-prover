@@ -3,7 +3,11 @@
 # Source-only. Do not execute directly.
 #
 # Conventions:
-#  - All gcloud / gcloud storage calls use --impersonate-service-account="$BENCH_SWEEP_SA".
+#  - All gcloud / gcloud storage calls go through gcloud_imp / gstorage_imp,
+#    which add --project and (only when BENCH_SWEEP_SA is non-empty)
+#    --impersonate-service-account. Since #33 the default is NO
+#    impersonation: the active gcloud account is the orchestrator
+#    identity (the old bench-sweep SA was deleted — see #32).
 #  - All stdout from helper functions goes to stderr unless explicitly noted;
 #    primary tool output (e.g. emitted TSV) stays on stdout.
 
@@ -12,15 +16,6 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Globals
 # ---------------------------------------------------------------------------
-
-# Project + SA invariants for this toolkit. Override via env if you fork this
-# for a different GCP project, but the rest of the toolkit assumes these defaults.
-: "${PROJECT:=kl-ai-workstation}"
-: "${REGION:=us-central1}"
-: "${BENCH_SWEEP_SA:=bench-sweep@kl-ai-workstation.iam.gserviceaccount.com}"
-: "${NETWORK:=ai-workstation-ws-net}"
-: "${SUBNET:=ai-workstation-ws-subnet}"
-: "${GCS_BUCKET:=gs://kl-ai-workstation-bench-fleet-runs}"
 
 # Toolkit root paths (resolve based on this file's location).
 # These are deliberately exported so child processes (e.g. lib/render-discussion.sh
@@ -31,7 +26,50 @@ export FLEET_ROOT
 export FLEET_LIB="${FLEET_ROOT}/lib"
 export FLEET_TEMPLATES="${FLEET_ROOT}/templates"
 export FLEET_TESTS="${FLEET_ROOT}/tests"
-export FLEET_MACHINES_TSV="${FLEET_ROOT}/machines.tsv"
+_FLEET_REPO_ROOT="$(cd "${FLEET_ROOT}/../.." && pwd)"
+
+# ── config.toml resolution (#33) ──
+# Single source of truth is the repo-root config.toml, parsed by
+# scripts/config.py (same resolver the scaffold's cloud.sh uses). We eval
+# its exports here rather than sourcing scripts/common.sh, because that
+# file installs traps + log redirection that would fight this toolkit's
+# own logging. Env vars override everything below (`: "${VAR:=...}"`
+# only assigns when unset/empty).
+if [[ -f "${_FLEET_REPO_ROOT}/config.toml" ]]; then
+  eval "$(python3 "${_FLEET_REPO_ROOT}/scripts/config.py")"
+fi
+
+# Project invariants. Resolution: env var > config.toml > hardcoded default.
+# GCP_PROJECT / GCP_REGION / FLEET_* come from the config.py eval above.
+: "${PROJECT:=${GCP_PROJECT:-kunal-scratch}}"
+: "${REGION:=${GCP_REGION:-us-central1}}"
+# bench-sweep impersonation is GONE (#32: the SA was deleted). Empty =
+# use the active gcloud account directly. Set BENCH_SWEEP_SA only if you
+# fork this toolkit into an environment that still needs impersonation.
+: "${BENCH_SWEEP_SA:=}"
+# kunal-scratch uses the AUTO-mode `default` VPC.
+: "${NETWORK:=default}"
+: "${SUBNET:=default}"
+: "${GCS_BUCKET:=${FLEET_RESULTS_BUCKET:-gs://${PROJECT}-bench-fleet-runs}}"
+# Artifact Registry image base for the prebuilt bench containers (#33).
+# Per-machine tags resolve via machines.tsv's image_tag column:
+#   <sha>-znver5 | <sha>-neoverse-v2 | <sha>-neoverse-n1
+: "${AR_IMAGE_BASE:=${REGION}-docker.pkg.dev/${PROJECT}/lighter-prover/bench}"
+# --tx-limit handed to every bench container (LIGHTER_TX_LIMIT env).
+: "${TX_LIMIT:=${FLEET_TX_LIMIT:-480}}"
+
+export PROJECT REGION BENCH_SWEEP_SA NETWORK SUBNET GCS_BUCKET AR_IMAGE_BASE TX_LIMIT
+
+# Machine matrix: env > config.toml ([fleet].machines_tsv, repo-root
+# relative) > toolkit default.
+if [[ -z "${FLEET_MACHINES_TSV:-}" ]]; then
+  if [[ -n "${FLEET_MACHINES_TSV_CFG:-}" ]]; then
+    FLEET_MACHINES_TSV="${_FLEET_REPO_ROOT}/${FLEET_MACHINES_TSV_CFG}"
+  else
+    FLEET_MACHINES_TSV="${FLEET_ROOT}/machines.tsv"
+  fi
+fi
+export FLEET_MACHINES_TSV
 
 # ---------------------------------------------------------------------------
 # Color logging
@@ -62,22 +100,36 @@ log_debug() {
 die() { log_err "$*"; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Impersonation helpers
+# gcloud wrappers (impersonation only when BENCH_SWEEP_SA is set)
 # ---------------------------------------------------------------------------
 
-# Wraps `gcloud` with the mandatory impersonation flag + project.
+# Wraps `gcloud` with --project, adding --impersonate-service-account
+# ONLY when BENCH_SWEEP_SA is non-empty. Default since #33: empty (the
+# bench-sweep SA was deleted, #32) — calls run as the active account.
 gcloud_imp() {
-  gcloud --impersonate-service-account="${BENCH_SWEEP_SA}" \
-         --project="${PROJECT}" \
-         "$@"
+  if [[ -n "${BENCH_SWEEP_SA}" ]]; then
+    gcloud --impersonate-service-account="${BENCH_SWEEP_SA}" \
+           --project="${PROJECT}" \
+           "$@"
+  else
+    gcloud --project="${PROJECT}" "$@"
+  fi
 }
 
 # `gcloud storage` variant (rare separate code path in case we ever want to
 # tweak storage-specific flags).
 gstorage_imp() {
-  gcloud --impersonate-service-account="${BENCH_SWEEP_SA}" \
-         --project="${PROJECT}" \
-         storage "$@"
+  gcloud_imp storage "$@"
+}
+
+# Human-readable description of the identity gcloud_imp runs as. Used in
+# log lines so operators see which principal is acting.
+fleet_identity() {
+  if [[ -n "${BENCH_SWEEP_SA}" ]]; then
+    printf 'impersonating %s\n' "${BENCH_SWEEP_SA}"
+  else
+    printf 'active account %s\n' "$(gcloud config get-value account 2>/dev/null || echo '<unknown>')"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -108,7 +160,8 @@ machines_lookup() {
 }
 
 # Field extractors. Usage: machine_field <machine_type> <field_name>
-# Valid fields: machine_type vcpus arch image_family image_project quota_family preferred_zones
+# Valid fields: machine_type vcpus arch image_family image_project
+#               quota_family preferred_zones disk_type image_tag
 machine_field() {
   local mt="$1" field="$2"
   local row

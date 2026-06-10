@@ -64,12 +64,17 @@ TOTAL BlockTxCircuit::prove time                          4  245.100s   244.900s
 | `TX_LIMIT`         | `480`                                         | Tx cap; bench aligns down to multiple of `TX_PER_PROOF` |
 | `N`                | `1`                                           | Worker count for fan-out targets                        |
 | `BENCH_REPEAT`     | `1`                                           | Times each worker repeats the bench pipeline            |
-| `TARGET_CPU_NATIVE`| `0`                                           | `1` enables `-C target-cpu=native` (non-portable image) |
+| `TARGET_CPU_NATIVE`| `0`                                           | `1` enables `-C target-cpu=native` (non-portable image; deprecated alias for `TARGET_CPU=native`) |
 
-The image's `LIGHTER_REF` / `GIT_SHA` / OCI `image.revision` label and
-the `:ref-<short>` tag are derived from `git rev-parse HEAD` (local) or
-`$COMMIT_SHA` (Cloud Build), not from a user-supplied knob — so the tag
-always names the source actually baked in.
+Since #33 the CI pipeline (`make cloud-bench-build`) builds a full
+matrix: a portable multi-arch `:<sha>`/`:latest` manifest plus three
+cross-compiled per-microarch variants (`:<sha>-znver5`,
+`:<sha>-neoverse-v2`, `:<sha>-neoverse-n1`) consumed by the bench-fleet
+(see `scripts/bench-fleet/README.md`). The image's `LIGHTER_REF` /
+`GIT_SHA` / OCI `image.revision` label and the `:<sha>` tag are derived
+from `git rev-parse HEAD` (local) or `$COMMIT_SHA` (Cloud Build), not
+from a user-supplied knob — so the tag always names the source actually
+baked in.
 
 Example: 8-worker fan-out at chunk size 2 with native-CPU build:
 
