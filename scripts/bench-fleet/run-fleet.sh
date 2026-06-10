@@ -122,6 +122,23 @@ PYEOF
     log_err "quota-check FAILED"
     return 1
   fi
+
+  # Bucket existence assertion (added per issue #19). Previous v2 run burned
+  # ~$30 because VMs provisioned cleanly but had no bucket to upload to,
+  # so the monitor never saw _DONE sentinels and timed out.
+  log_info "verifying GCS bucket ${GCS_BUCKET} exists"
+  if ! gcloud_imp storage buckets describe "${GCS_BUCKET}" --format='value(name)' >/dev/null 2>&1; then
+    log_err "bucket ${GCS_BUCKET} does not exist."
+    printf '  Create it with:\n' >&2
+    printf '    gcloud --impersonate-service-account=%s \\\n' "${BENCH_SWEEP_SA}" >&2
+    printf '      storage buckets create %s \\\n' "${GCS_BUCKET}" >&2
+    printf '      --location=%s --uniform-bucket-level-access \\\n' "${REGION}" >&2
+    printf '      --project=%s\n' "${PROJECT}" >&2
+    printf '  Then re-run '\''make fleet-quota-check'\''.\n' >&2
+    return 1
+  fi
+  log_ok "bucket ${GCS_BUCKET} exists"
+
   log_ok "quota-check PASSED"
 }
 
@@ -171,9 +188,10 @@ cmd_run() {
   fi
   log_info "ref=${ref} -> sha=${sha}"
 
-  # Cost estimate
-  local cost
-  cost="$(estimate_cost 1.0 "${machine_list[@]}")"
+  # Cost estimate (per-shape, calibrated against v2 findings — issue #19).
+  # Previous estimator assumed 1h per VM, which was 3-6× too low: realistic
+  # full-sweep wall is 6h on T2A, 4h on Axion, 3h on Turin. The breakdown
+  # below lets the operator see where the spend goes.
   echo "" >&2
   echo "Fleet plan:" >&2
   echo "  ref:       ${ref} (${sha})" >&2
@@ -182,7 +200,13 @@ cmd_run() {
   for mt in "${machine_list[@]}"; do
     echo "             - ${mt}" >&2
   done
-  echo "  est. cost: ${cost} (assumes 1h wall per VM; build+sweep typically <1h)" >&2
+  echo "" >&2
+  echo "  Per-shape cost estimate (price × realistic full-sweep wall):" >&2
+  local cost
+  cost="$(estimate_cost_breakdown "${machine_list[@]}")"
+  echo "" >&2
+  echo "  est. cost: ${cost}  (T2A:6h, C4A/N4A:4h, C4D/N4D:3h — calibrated against v2)" >&2
+  echo "  wall:      ~6h (limited by slowest shape; 10h max-run-duration kill)" >&2
   echo "" >&2
 
   if (( ! auto_yes )); then

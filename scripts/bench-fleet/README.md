@@ -43,10 +43,29 @@ If any of the above is missing, every `gcloud ... compute ...` call in
 this toolkit will return `PERMISSION_DENIED`. Fix the IAM, don't patch
 the scripts.
 
+## Pre-run checklist
+
+Before typing `make fleet-run`, confirm all three:
+
+1. **GCS bucket exists.** `make fleet-quota-check` now asserts this for
+   you — if the bucket is missing it prints the exact `gcloud storage
+   buckets create` command to fix it. Do not skip this; the v2 run burned
+   ~$30 because VMs provisioned cleanly but had no bucket to upload to,
+   so the monitor never saw `_DONE` sentinels and timed out (issue #19).
+2. **Terminal survives the wall.** A full sweep takes ~6h. Run
+   `make fleet-run` under `tmux`, `screen`, or `nohup … &` so a dropped
+   SSH session does not orphan the orchestrator (and the VMs it should
+   delete).
+3. **You understand the spend commitment.** Realistic full-sweep cost is
+   $80-150 (the `fleet-run` cost estimate prints a per-shape breakdown
+   before any spend). The `--max-run-duration=10h` flag on each VM is the
+   final safety net; budget cap is the operator's responsibility.
+
 ## Quickstart (via Makefile)
 
 The root `Makefile` is the recommended operator interface. After
-configuring prerequisites (see "Prereqs" above):
+configuring prerequisites (see "Prereqs" above) and walking the Pre-run
+checklist:
 
 ```sh
 # 1. Verify quotas (no spend)
@@ -55,7 +74,7 @@ make fleet-quota-check
 # 2. Dry-run to inspect the 10 gcloud commands (no spend)
 make fleet-run-dry
 
-# 3. Provision + monitor + collect (~$18, ~1h wall, runs S in {1,2,4,6} on all 10 shapes)
+# 3. Provision + monitor + collect (~$80-150, ~6h wall, runs S in {1,2,4,6} on all 10 shapes)
 make fleet-run
 # Note the RUN_ID printed in the output — needed for the next two steps.
 
@@ -73,7 +92,9 @@ make fleet-teardown                       # all leftover fleet VMs
 `make` (no args) prints the full target list with descriptions.
 
 The whole pipeline (excluding wall-clock build+sweep time) takes seconds.
-A real fleet run takes ~1h wall-clock with all 10 VMs in parallel.
+A real fleet run takes ~6h wall-clock with all 10 VMs in parallel —
+limited by the slowest shape (T2A Neoverse-N1 at S=6). Faster shapes
+(C4D / N4D Turin) finish in ~3h.
 
 `make fleet-run` passes `--yes` to skip the Make-level prompt; the
 underlying script still prints a per-machine cost estimate as the safety
@@ -167,8 +188,9 @@ ones.
 The orchestrator polls GCS every `FLEET_POLL_INTERVAL=60` seconds (env
 override). If your orchestrator process died, run
 `./run-fleet.sh teardown --run-id <id>` to force-delete. The
-`--max-run-duration=8h --instance-termination-action=DELETE` flag on
-each VM serves as a final safety net.
+`--max-run-duration=10h --instance-termination-action=DELETE` flag on
+each VM serves as a final safety net (10h gives ~1.7× headroom over the
+6h realistic wall on the slowest shape).
 
 ### Discussion body > 65KB GitHub limit
 The renderer enforces ≤60KB via `tests/test-render.sh`. If a real run
