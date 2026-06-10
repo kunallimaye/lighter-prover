@@ -26,7 +26,9 @@
   cloud-preflight cloud-infra cloud-bench-build cloud-app-deploy \
   cloud-app-promote cloud-app-undeploy cloud-clean \
   cloud-status cloud-recover \
-  logs-list logs-last logs-clean
+  logs-list logs-last logs-clean \
+  fleet-quota-check fleet-run fleet-run-dry fleet-status \
+  fleet-collect fleet-publish fleet-teardown
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -144,6 +146,43 @@ logs-last: ## Show the most recent log file
 
 logs-clean: ## Remove all log files
 	@rm -rf logs/*.log && echo "Cleaned log files" || true
+
+# ─── GCP fleet benchmark (issue #11) ─────────────────────────────────
+# Wraps scripts/bench-fleet/run-fleet.sh for the 10-VM cross-architecture
+# bench sweep. See scripts/bench-fleet/README.md for prerequisites
+# (gcloud auth, bench-sweep SA, project setup) and
+# docs/decisions/ADR-0001-gcp-fleet-bench-architecture.md for the
+# architecture rationale.
+#
+# Note: `fleet-run` passes --yes to skip the Make-level prompt; the
+# underlying script's cost-estimate print remains the safety gate before
+# any spend. Call the script directly without --yes for the interactive
+# prompt.
+
+FLEET := scripts/bench-fleet/run-fleet.sh
+
+fleet-quota-check: ## Verify GCP quotas for all 10 machine types (read-only, no spend)
+	@$(FLEET) quota-check
+
+fleet-run-dry: ## Print the 10 gcloud create commands without executing (no spend)
+	@$(FLEET) run --dry-run --yes
+
+fleet-run: ## Provision 10 VMs in parallel, run S in {1,2,4,6} sweep, collect to GCS (~$18, ~1h wall)
+	@$(FLEET) run --yes
+
+fleet-status: ## Show current fleet state from GCS (use RUN_ID=<id> for a specific run)
+	@$(FLEET) status $(if $(RUN_ID),--run-id $(RUN_ID),)
+
+fleet-collect: ## Pull logs from GCS and parse to TSV (requires RUN_ID=<id>)
+	@test -n "$(RUN_ID)" || { echo "error: RUN_ID=<id> required"; exit 1; }
+	@$(FLEET) collect --run-id $(RUN_ID)
+
+fleet-publish: ## Render markdown, create Discussion, comment on #6 (requires RUN_ID=<id>)
+	@test -n "$(RUN_ID)" || { echo "error: RUN_ID=<id> required"; exit 1; }
+	@$(FLEET) publish --run-id $(RUN_ID)
+
+fleet-teardown: ## Force-delete any leftover fleet VMs (optional RUN_ID=<id>, or all)
+	@$(FLEET) teardown $(if $(RUN_ID),--run-id $(RUN_ID),--all)
 
 # ─── Operator notes ──────────────────────────────────────────────────
 # - ORCH_FORCE_RESTART=1 on any admin-cloud-* / cloud-* target invalidates

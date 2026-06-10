@@ -1,0 +1,29 @@
+[2026-06-10T03:05:08Z INFO  bench] BENCH_META host=phali cpu="AMD EPYC 7B13" cores=32 ram=131904212 kB git_sha=unknown tx_per_proof=4 tx_limit=480
+[2026-06-10T03:05:08Z INFO  bench] Tx and chain circuits are configured to prove 4 txs per proof in each iteration. There are 500 txs in the test block, using 480 (aligned to chunk size), so there will be 120 iterations of proving.
+    
+    
+[2026-06-10T03:05:14Z INFO  bench] BlockTxCircuit defined!
+[2026-06-10T03:05:14Z INFO  bench] BlockTxCircuit # public inputs = 13273
+[2026-06-10T03:05:14Z INFO  bench] BlockTxCircuit # num_gate_constraints = 136
+[2026-06-10T03:05:15Z INFO  bench] BlockPreExecutionCircuit defined!
+[2026-06-10T03:05:18Z INFO  bench] BlockTxChainCircuit defined!
+[2026-06-10T03:05:18Z INFO  bench] BlockTxChainCircuit # public inputs = 1609
+[2026-06-10T03:05:19Z INFO  bench] Dummy Tx Chain Circuit defined!
+[2026-06-10T03:05:23Z INFO  bench] tx chunk #0/120 BlockTxCircuit::prove time: 2.474215772s
+[2026-06-10T03:05:23Z INFO  bench] tx chunk #0/120 BlockTxChainCircuit::prove time: 497.296902ms
+    
+[2026-06-10T03:05:26Z INFO  bench] tx chunk #1/120 BlockTxCircuit::prove time: 2.378632535s
+[2026-06-10T03:05:26Z INFO  bench] tx chunk #1/120 BlockTxChainCircuit::prove time: 512.541991ms
+    
+[2026-06-10T03:10:51Z INFO  bench] tx chunk #119/120 BlockTxCircuit::prove time: 2.249419819s
+[2026-06-10T03:10:52Z INFO  bench] tx chunk #119/120 BlockTxChainCircuit::prove time: 508.203772ms
+    
+[2026-06-10T03:10:52Z INFO  bench] TOTAL BlockPreExecutionCircuit::prove time: 551.57082ms
+    
+[2026-06-10T03:10:52Z INFO  bench] TOTAL BlockTxCircuit::prove time:   271.530577497s
+[2026-06-10T03:10:52Z INFO  bench] AVERAGE BlockTxCircuit::prove time: 2.262754812s
+    
+[2026-06-10T03:10:52Z INFO  bench] TOTAL BlockTxChainCircuit::prove time: 59.875722241s
+[2026-06-10T03:10:52Z INFO  bench] AVERAGE BlockTxChainCircuit::prove time: 498.964352ms
+S4_WALL_SECONDS=345
+S4_EXIT_CODE=0
