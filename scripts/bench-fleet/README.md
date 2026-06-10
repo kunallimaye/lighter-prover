@@ -39,6 +39,24 @@ The orchestrator's active SA needs:
 - `roles/iam.serviceAccountTokenCreator` on `bench-sweep` (so it can
   impersonate).
 
+The **default Compute SA** (`<projectNumber>-compute@developer.gserviceaccount.com`
+— what the VMs actually run as) needs:
+
+- `roles/storage.objectAdmin` on `gs://kl-ai-workstation-bench-fleet-runs`
+  (issue #23: without this every VM-side `gcloud storage cp` gets HTTP 403
+  and no results or `_DONE` sentinels ever land — the v3 failure mode).
+  Grant with:
+
+  ```sh
+  gcloud --impersonate-service-account=bench-sweep@kl-ai-workstation.iam.gserviceaccount.com \
+    storage buckets add-iam-policy-binding gs://kl-ai-workstation-bench-fleet-runs \
+    --member=serviceAccount:$(gcloud projects describe kl-ai-workstation --format='value(projectNumber)')-compute@developer.gserviceaccount.com \
+    --role=roles/storage.objectAdmin --project=kl-ai-workstation
+  ```
+
+  `quota-check` verifies this binding (plus an orchestrator-side write
+  probe) before any money is spent.
+
 If any of the above is missing, every `gcloud ... compute ...` call in
 this toolkit will return `PERMISSION_DENIED`. Fix the IAM, don't patch
 the scripts.

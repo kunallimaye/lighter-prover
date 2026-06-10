@@ -20,13 +20,50 @@ SVALUES="__SVALUES__"          # e.g. "1 2 4 6"
 HOST_LABEL="__HOST_LABEL__"    # e.g. c4a-highcpu-32
 
 # ---------- Upload + sentinel helper (defined first so failure paths can call it) ----------
+# cp_retry <src...> <dst> -- gcloud storage cp with one retry after 5s.
+# Echoes the tail of cp output to serial; returns the final cp exit code.
+# Added per issue #23: v3's `|| true` here swallowed HTTP 403s on every
+# upload and still printed status=ok, hiding the root cause for a full run.
+cp_retry() {
+  local rc=0
+  gcloud storage cp "$@" 2>&1 | tail -20
+  rc=${PIPESTATUS[0]}
+  if [[ ${rc} -ne 0 ]]; then
+    echo "FLEET_UPLOAD_RETRY $(date -Is) rc=${rc} -- retrying in 5s: gcloud storage cp $*"
+    sleep 5
+    gcloud storage cp "$@" 2>&1 | tail -20
+    rc=${PIPESTATUS[0]}
+  fi
+  return "${rc}"
+}
+
 upload_and_signal_done() {
   local STATUS="${1:-ok}"
+  local UPLOAD_RC=0 rc=0
   echo "$STATUS" > /opt/results/status.txt
-  gcloud storage cp -r /opt/results "${BUCKET}/${RUN_PREFIX}" 2>&1 | tail -20 || true
-  gcloud storage cp /var/log/startup.log "${BUCKET}/${RUN_PREFIX}startup.log" 2>&1 | tail -5 || true
-  # SENTINEL — orchestrator polls for this file.
-  echo "${STATUS} @ $(date -Is)" | gcloud storage cp - "${BUCKET}/${RUN_PREFIX}_DONE" || true
+
+  cp_retry -r /opt/results "${BUCKET}/${RUN_PREFIX}"
+  rc=$?
+  if [[ ${rc} -ne 0 ]]; then UPLOAD_RC=${rc}; fi
+
+  cp_retry /var/log/startup.log "${BUCKET}/${RUN_PREFIX}startup.log"
+  rc=$?
+  if [[ ${rc} -ne 0 && ${UPLOAD_RC} -eq 0 ]]; then UPLOAD_RC=${rc}; fi
+
+  if [[ ${UPLOAD_RC} -ne 0 ]]; then
+    # Never report status=ok when uploads failed (issue #23 lesson).
+    echo "FLEET_UPLOAD_FAILED rc=${UPLOAD_RC}"
+    STATUS="${STATUS}+upload-failed-rc${UPLOAD_RC}"
+  fi
+
+  # SENTINEL — orchestrator polls for this file. Use a temp file (not a
+  # stdin pipe) so cp_retry's second attempt still has the content.
+  echo "${STATUS} @ $(date -Is)" > /tmp/_done_sentinel.txt
+  cp_retry /tmp/_done_sentinel.txt "${BUCKET}/${RUN_PREFIX}_DONE"
+  rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    echo "FLEET_UPLOAD_FAILED rc=${rc} (sentinel _DONE could not be written)"
+  fi
   echo "FLEET_UPLOAD_DONE $(date -Is) status=${STATUS}"
 }
 
@@ -83,14 +120,37 @@ echo "FLEET_CLONE_DONE $(date -Is)"
 } > /opt/results/machine-info.txt
 
 # ---------- 5. Build (cold) ----------
+# Toolchain provenance into build.log first (issue #24: v3 showed an
+# impossible 33s "build" with instant rc=101 runs; this makes the
+# toolchain + build output auditable from GCS and the serial console).
+{
+  echo "=== toolchain ==="
+  echo "which cargo: $(command -v cargo)"
+  cargo --version
+  rustc --version
+  echo "=== build ==="
+} > /opt/results/build.log
+
 BUILD_START=$(date +%s)
 echo "FLEET_BUILD_START $(date -Is)"
 RUSTFLAGS="-C target-cpu=native" cargo build --release -p bench --bin bench \
-  > /opt/results/build.log 2>&1
+  >> /opt/results/build.log 2>&1
 BUILD_RC=$?
 BUILD_WALL=$(( $(date +%s) - BUILD_START ))
 echo "BUILD_WALL_SECONDS=${BUILD_WALL}" | tee -a /opt/results/build.log
+
+# Consistency check (issue #24): cargo claiming success without producing
+# an executable binary is a hard inconsistency — flag it loudly.
+if [[ ${BUILD_RC} -eq 0 && ! -x /opt/lighter-prover/target/release/bench ]]; then
+  echo "FLEET_BUILD_INCONSISTENT $(date -Is) -- cargo rc=0 but target/release/bench missing or not executable"
+  BUILD_RC=99
+fi
+
 echo "FLEET_BUILD_DONE $(date -Is) rc=${BUILD_RC} wall=${BUILD_WALL}s"
+echo "FLEET_BUILD_LOG_BYTES=$(stat -c%s /opt/results/build.log 2>/dev/null || echo 0)"
+echo "----- build.log tail -30 -----"
+tail -30 /opt/results/build.log
+echo "----- end build.log tail -----"
 
 if [[ ${BUILD_RC} -ne 0 ]]; then
   echo "FLEET_BUILD_FAILED -- uploading partial artifacts and bailing"
@@ -99,6 +159,16 @@ if [[ ${BUILD_RC} -ne 0 ]]; then
 fi
 
 # ---------- 6. Sweep ----------
+# Sanity gate (issue #24): prove the binary can at least start before
+# burning sweep time. A broken binary (bad schema, missing dylib, wrong
+# arch) fails here in seconds instead of producing 4 × rc=101 mysteries.
+if ! /opt/lighter-prover/target/release/bench --help >/dev/null 2>&1; then
+  echo "FLEET_BENCH_SANITY_FAILED $(date -Is) -- 'bench --help' returned non-zero"
+  upload_and_signal_done "bench-binary-broken"
+  exit 1
+fi
+echo "FLEET_BENCH_SANITY_OK $(date -Is)"
+
 # bench reads ./bench_test.json from CWD, so we MUST cd into bench/ before each run.
 cd /opt/lighter-prover/bench || { upload_and_signal_done "cd-bench-failed"; exit 1; }
 for S in $SVALUES; do
@@ -115,6 +185,11 @@ for S in $SVALUES; do
   echo "S${S}_WALL_SECONDS=${S_WALL}" | tee -a "/opt/results/bench-S${S}.log"
   echo "S${S}_EXIT_CODE=${S_RC}" | tee -a "/opt/results/bench-S${S}.log"
   echo "FLEET_S${S}_DONE $(date -Is) rc=${S_RC} wall=${S_WALL}s"
+  # Tail to serial (issue #24): even if uploads later fail, the operator
+  # can see panics / abnormal exits straight from the serial console.
+  echo "----- bench-S${S}.log tail -20 -----"
+  tail -20 "/opt/results/bench-S${S}.log"
+  echo "----- end bench-S${S}.log tail -----"
 done
 cd /opt/lighter-prover || true
 

@@ -1,0 +1,35 @@
+[2026-06-10T20:30:20Z INFO  bench] BENCH_META host=phali cpu="AMD EPYC 7B13" cores=32 ram=131904200 kB git_sha=unknown tx_per_proof=4 tx_limit=8
+[2026-06-10T20:30:21Z INFO  bench] Tx and chain circuits are configured to prove 4 txs per proof in each iteration. There are 500 txs in the test block, using 8 (aligned to chunk size), so there will be 2 iterations of proving.
+    
+    
+BENCH_EVENT {"event":"circuit_define","layer":1,"name":"BlockTxCircuit","wall_ms":5591,"rss_mb_after":1300,"ts":"2026-06-10T20:30:26Z"}
+[2026-06-10T20:30:26Z INFO  bench] BlockTxCircuit defined!
+[2026-06-10T20:30:26Z INFO  bench] BlockTxCircuit # public inputs = 13273
+[2026-06-10T20:30:26Z INFO  bench] BlockTxCircuit # num_gate_constraints = 136
+BENCH_EVENT {"event":"circuit_define","layer":3,"name":"BlockPreExecutionCircuit","wall_ms":1116,"rss_mb_after":1306,"ts":"2026-06-10T20:30:27Z"}
+[2026-06-10T20:30:27Z INFO  bench] BlockPreExecutionCircuit defined!
+BENCH_EVENT {"event":"circuit_define","layer":2,"name":"BlockTxChainCircuit","wall_ms":3117,"rss_mb_after":1376,"ts":"2026-06-10T20:30:31Z"}
+[2026-06-10T20:30:31Z INFO  bench] BlockTxChainCircuit defined!
+[2026-06-10T20:30:31Z INFO  bench] BlockTxChainCircuit # public inputs = 1609
+[2026-06-10T20:30:31Z INFO  bench] Dummy Tx Chain Circuit defined!
+BENCH_EVENT {"event":"layer_prove","layer":3,"name":"BlockPreExecutionCircuit","chunk_idx":null,"chunk_total":null,"tx_per_proof":4,"wall_ms":544,"cpu_ms":8802,"rss_mb_peak":1654,"rss_mb_after":1654,"ts":"2026-06-10T20:30:33Z"}
+BENCH_EVENT {"event":"layer_prove","layer":1,"name":"BlockTxCircuit","chunk_idx":0,"chunk_total":2,"tx_per_proof":4,"wall_ms":2777,"cpu_ms":47054,"rss_mb_peak":2676,"rss_mb_after":2524,"ts":"2026-06-10T20:30:36Z"}
+[2026-06-10T20:30:36Z INFO  bench] tx chunk #0/2 BlockTxCircuit::prove time: 2.777454288s
+BENCH_EVENT {"event":"layer_prove","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":2,"tx_per_proof":4,"wall_ms":520,"cpu_ms":7715,"rss_mb_peak":2676,"rss_mb_after":2524,"ts":"2026-06-10T20:30:36Z"}
+[2026-06-10T20:30:36Z INFO  bench] tx chunk #0/2 BlockTxChainCircuit::prove time: 520.772533ms
+    
+BENCH_EVENT {"event":"layer_prove","layer":1,"name":"BlockTxCircuit","chunk_idx":1,"chunk_total":2,"tx_per_proof":4,"wall_ms":2561,"cpu_ms":41336,"rss_mb_peak":2687,"rss_mb_after":2537,"ts":"2026-06-10T20:30:39Z"}
+[2026-06-10T20:30:39Z INFO  bench] tx chunk #1/2 BlockTxCircuit::prove time: 2.561005387s
+BENCH_EVENT {"event":"layer_prove","layer":2,"name":"BlockTxChainCircuit","chunk_idx":1,"chunk_total":2,"tx_per_proof":4,"wall_ms":529,"cpu_ms":7968,"rss_mb_peak":2687,"rss_mb_after":2537,"ts":"2026-06-10T20:30:39Z"}
+[2026-06-10T20:30:39Z INFO  bench] tx chunk #1/2 BlockTxChainCircuit::prove time: 529.244313ms
+    
+[2026-06-10T20:30:39Z INFO  bench] TOTAL BlockPreExecutionCircuit::prove time: 544.306593ms
+    
+[2026-06-10T20:30:39Z INFO  bench] TOTAL BlockTxCircuit::prove time:   5.338459675s
+[2026-06-10T20:30:39Z INFO  bench] AVERAGE BlockTxCircuit::prove time: 2.669229837s
+    
+[2026-06-10T20:30:39Z INFO  bench] TOTAL BlockTxChainCircuit::prove time: 1.050016846s
+[2026-06-10T20:30:39Z INFO  bench] AVERAGE BlockTxChainCircuit::prove time: 525.008423ms
+BENCH_EVENT {"event":"summary","tx_per_proof":4,"tx_limit":8,"chunks":2,"total_wall_ms":18548,"total_cpu_ms":173124,"peak_rss_mb":2687,"ts":"2026-06-10T20:30:39Z"}
+S4_WALL_SECONDS=19
+S4_EXIT_CODE=0

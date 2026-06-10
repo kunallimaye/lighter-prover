@@ -3,7 +3,7 @@
 #
 # Subcommands:
 #   quota-check                                Verify GCP quotas (read-only)
-#   run [--machines L] [--ref R] [--yes] [--dry-run]
+#   run [--machines L] [--ref R] [--svalues "L"] [--yes] [--dry-run]
 #                                              Provision + monitor + collect
 #   status [--run-id ID]                       Print fleet state from GCS
 #   collect --run-id ID                        Pull logs from GCS, run parser
@@ -40,6 +40,7 @@ Subcommands:
   run [opts]                         Provision + monitor + collect (no publish)
     --machines L     Comma-separated machine_types (default: all 10)
     --ref R          Git ref (branch or SHA) to build (default: main)
+    --svalues "L"    Space-separated S sweep values (default: "1 2 4 6")
     --yes            Skip cost-estimate confirmation prompt
     --dry-run        Print create commands; do not provision
 
@@ -139,6 +140,64 @@ PYEOF
   fi
   log_ok "bucket ${GCS_BUCKET} exists"
 
+  # Write-probe (added per issue #23). v3 burned a full fleet because VMs
+  # could provision and run but every upload got HTTP 403 — and the startup
+  # script's `|| true` swallowed it. Two distinct checks are needed:
+  #
+  #  1. Orchestrator-side: can bench-sweep (impersonated) write an object?
+  #  2. VM-side: does the bucket IAM policy grant the default Compute SA
+  #     (what the VMs actually run as) roles/storage.objectAdmin? An
+  #     impersonated write from the orchestrator does NOT prove VM-side
+  #     metadata-server access, so we inspect the policy directly.
+  log_info "write-probe: uploading test object to ${GCS_BUCKET}"
+  local probe_obj
+  probe_obj="${GCS_BUCKET}/_quota_check_$(date -u +%s)_$$"
+  if ! printf 'bench-fleet quota-check write probe\n' \
+        | gstorage_imp cp - "${probe_obj}" >/dev/null 2>&1; then
+    log_err "write-probe FAILED: ${BENCH_SWEEP_SA} cannot write to ${GCS_BUCKET}"
+    printf '  The orchestrator SA needs object write on the bucket. Grant with:\n' >&2
+    printf '    gcloud storage buckets add-iam-policy-binding %s \\\n' "${GCS_BUCKET}" >&2
+    printf '      --member=serviceAccount:%s \\\n' "${BENCH_SWEEP_SA}" >&2
+    printf '      --role=roles/storage.objectAdmin --project=%s\n' "${PROJECT}" >&2
+    return 1
+  fi
+  gstorage_imp rm "${probe_obj}" >/dev/null 2>&1 \
+    || log_warn "could not delete probe object ${probe_obj} (harmless; clean up manually)"
+  log_ok "write-probe passed (orchestrator-side, as ${BENCH_SWEEP_SA})"
+
+  # VM-side IAM assertion: the bucket policy must include the Compute SA
+  # with objectAdmin, or every VM upload will 403 exactly like v3 (#23).
+  local compute_sa
+  compute_sa="$(get_compute_sa)" || return 1
+  log_info "verifying bucket IAM grants ${compute_sa} roles/storage.objectAdmin"
+  local policy
+  if ! policy="$(gcloud_imp storage buckets get-iam-policy "${GCS_BUCKET}" --format=json 2>/dev/null)"; then
+    log_err "could not read IAM policy on ${GCS_BUCKET} (need storage.buckets.getIamPolicy)"
+    return 1
+  fi
+  if ! printf '%s' "${policy}" | python3 -c '
+import json, sys
+sa = sys.argv[1]
+member = f"serviceAccount:{sa}"
+pol = json.load(sys.stdin)
+ok = any(
+    b.get("role") == "roles/storage.objectAdmin" and member in b.get("members", [])
+    for b in pol.get("bindings", [])
+)
+sys.exit(0 if ok else 1)
+' "${compute_sa}"; then
+    log_err "Compute SA ${compute_sa} lacks roles/storage.objectAdmin on ${GCS_BUCKET}"
+    log_err "VM uploads WILL fail with HTTP 403 (v3 root cause — issue #23)."
+    printf '  Grant it with:\n' >&2
+    printf '    gcloud --impersonate-service-account=%s \\\n' "${BENCH_SWEEP_SA}" >&2
+    printf '      storage buckets add-iam-policy-binding %s \\\n' "${GCS_BUCKET}" >&2
+    printf '      --member=serviceAccount:%s \\\n' "${compute_sa}" >&2
+    printf '      --role=roles/storage.objectAdmin --project=%s\n' "${PROJECT}" >&2
+    printf '  Then re-run quota-check.\n' >&2
+    return 1
+  fi
+  log_ok "bucket IAM grants ${compute_sa} objectAdmin (VM-side uploads authorized)"
+
   log_ok "quota-check PASSED"
 }
 
@@ -146,15 +205,24 @@ PYEOF
 # run
 # ---------------------------------------------------------------------------
 cmd_run() {
-  local machines="" ref="main" auto_yes=0 dry_run=0
+  local machines="" ref="main" auto_yes=0 dry_run=0 svalues="${DEFAULT_SVALUES}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --machines) machines="$2"; shift 2 ;;
       --ref)      ref="$2"; shift 2 ;;
+      --svalues)  svalues="$2"; shift 2 ;;
       --yes)      auto_yes=1; shift ;;
       --dry-run)  dry_run=1; shift ;;
       *) log_err "unknown run flag: $1"; usage; exit 2 ;;
     esac
+  done
+
+  # Validate svalues: non-empty, space-separated positive integers.
+  [[ -n "${svalues}" ]] || die "--svalues must not be empty"
+  local sv
+  for sv in ${svalues}; do
+    [[ "${sv}" =~ ^[0-9]+$ && "${sv}" != "0" ]] \
+      || die "--svalues must be space-separated positive integers (got: '${sv}')"
   done
 
   # Default machine list = all 10
@@ -195,7 +263,7 @@ cmd_run() {
   echo "" >&2
   echo "Fleet plan:" >&2
   echo "  ref:       ${ref} (${sha})" >&2
-  echo "  S sweep:   ${DEFAULT_SVALUES}" >&2
+  echo "  S sweep:   ${svalues}" >&2
   echo "  machines:  ${#machine_list[@]}" >&2
   for mt in "${machine_list[@]}"; do
     echo "             - ${mt}" >&2
@@ -222,6 +290,7 @@ cmd_run() {
   mkdir -p "${run_dir}"
   echo "${sha}"  > "${run_dir}/sha.txt"
   echo "${ref}"  > "${run_dir}/ref.txt"
+  echo "${svalues}" > "${run_dir}/svalues.txt"
   printf '%s\n' "${machine_list[@]}" > "${run_dir}/machines.txt"
 
   log_info "run_id=${run_id} (state in ${run_dir})"
@@ -230,7 +299,7 @@ cmd_run() {
   local pids=()
   for mt in "${machine_list[@]}"; do
     (
-      provision_one_vm "$mt" "$run_id" "$sha" "$DEFAULT_SVALUES" "$dry_run" "$run_dir" \
+      provision_one_vm "$mt" "$run_id" "$sha" "$svalues" "$dry_run" "$run_dir" \
         || log_warn "[${mt}] provision_one_vm returned non-zero"
     ) &
     pids+=($!)
