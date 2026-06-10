@@ -32,6 +32,14 @@ run_case() {
 
 run_case "S=4 from Discussion #6" "${FIXTURE}" "${EXPECTED}"
 
+# Current-main format (issue #21): BENCH_EVENT JSONL interleaved with the
+# legacy INFO lines, captured from a real local run of bench@main with the
+# startup-wrapper S4_WALL_SECONDS / S4_EXIT_CODE lines appended. Exercises
+# the BENCH_EVENT summary fallback (rss_kb from peak_rss_mb).
+run_case "S=4 current-main BENCH_EVENT format" \
+  "${THIS_DIR}/fixtures/bench-S4-current-main.log" \
+  "${THIS_DIR}/fixtures/expected-parsed-current-main.tsv"
+
 # Synthetic panic case: log with only BENCH_META + panic marker.
 PANIC_FIX="$(mktemp)"
 trap 'rm -f "${PANIC_FIX}"' EXIT

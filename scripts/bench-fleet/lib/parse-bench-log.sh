@@ -32,6 +32,7 @@ LOG="$1"
 # Use python3 for the whole parse. Bash regex + float math gets cumbersome
 # and python3 is on the Debian base image we target.
 python3 - "$LOG" <<'PYEOF'
+import json
 import re
 import sys
 from pathlib import Path
@@ -139,6 +140,29 @@ exit_re = re.compile(r'^S\d+_EXIT_CODE=(\d+)\s*$', re.MULTILINE)
 m = exit_re.search(text)
 if m:
     fields["exit_code"] = m.group(1)
+
+# ---------- BENCH_EVENT JSONL (issue #21) ----------
+# Current main (PR #18) emits structured `BENCH_EVENT {json}` lines in
+# addition to the legacy INFO text. The legacy regexes above still match
+# (validated against a real current-main run), so BENCH_EVENT is used to
+# fill fields the text scrape cannot provide (rss_kb from the summary
+# event's peak_rss_mb) and as a fallback for S / chunks.
+summary = None
+for line in text.splitlines():
+    if line.startswith("BENCH_EVENT "):
+        try:
+            ev = json.loads(line[len("BENCH_EVENT "):])
+        except json.JSONDecodeError:
+            continue
+        if ev.get("event") == "summary":
+            summary = ev  # last summary wins (there should be exactly one)
+if summary is not None:
+    if fields["rss_kb"] == "NA" and summary.get("peak_rss_mb") is not None:
+        fields["rss_kb"] = str(int(summary["peak_rss_mb"]) * 1024)
+    if fields["S"] == "NA" and summary.get("tx_per_proof") is not None:
+        fields["S"] = str(summary["tx_per_proof"])
+    if fields["chunks"] == "NA" and summary.get("chunks") is not None:
+        fields["chunks"] = str(summary["chunks"])
 
 # ---------- status ----------
 has_panic = "panicked at" in text

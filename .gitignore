@@ -35,6 +35,8 @@ tmp/
 .cache/
 *.log
 logs/
+# bench-fleet parser test fixtures are intentionally committed .log files
+!scripts/bench-fleet/tests/fixtures/*.log
 # Detached orchestration state (heartbeat/checkpoint/recovery files, #140)
 .orchestration/
 # Go
