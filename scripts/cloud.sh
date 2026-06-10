@@ -95,9 +95,13 @@ _grant_role() {
 }
 
 _require_topology() {
-  [[ -z "${ORCH_PROJECT}" ]]    && die "ORCH_PROJECT not set. Fill [gcp.defaults].project or [gcp.orchestration].project in config.toml."
-  [[ -z "${BUILD_PROJECT}" ]]   && die "BUILD_PROJECT not set. Fill [gcp.defaults].project or [gcp.build].project in config.toml."
-  [[ -z "${RUNTIME_PROJECT}" ]] && die "RUNTIME_PROJECT not set. Fill [gcp.defaults].project or [gcp.runtime].project in config.toml."
+  # NOTE: use explicit `if` guards, never `[[ ... ]] && die`. Under
+  # `set -e`, a false test in an AND-list as the FINAL statement of a
+  # function makes the function return 1 and silently kills the script
+  # precisely when the config is VALID (#36).
+  if [[ -z "${ORCH_PROJECT}" ]]; then die "ORCH_PROJECT not set. Fill [gcp.defaults].project or [gcp.orchestration].project in config.toml."; fi
+  if [[ -z "${BUILD_PROJECT}" ]]; then die "BUILD_PROJECT not set. Fill [gcp.defaults].project or [gcp.build].project in config.toml."; fi
+  if [[ -z "${RUNTIME_PROJECT}" ]]; then die "RUNTIME_PROJECT not set. Fill [gcp.defaults].project or [gcp.runtime].project in config.toml."; fi
 }
 
 # ─── help ─────────────────────────────────────────────────────────────
@@ -167,7 +171,7 @@ _step_create_ar_repo() {
 }
 
 _step_create_tfstate_bucket() {
-  [[ -z "${TF_STATE_BUCKET}" ]] && die "TF_STATE_BUCKET not set."
+  if [[ -z "${TF_STATE_BUCKET}" ]]; then die "TF_STATE_BUCKET not set."; fi
   if gcloud storage buckets describe "gs://${TF_STATE_BUCKET}" --project="${BUILD_PROJECT}" &>/dev/null; then
     log_ok "  TF state bucket already exists: gs://${TF_STATE_BUCKET}"
     return 0
@@ -364,7 +368,7 @@ admin_cloud_init() {
   require_cmd gcloud
   _require_topology
   _resolve_caller_project
-  [[ -z "${TF_STATE_BUCKET}" ]] && die "TF_STATE_BUCKET is not set."
+  if [[ -z "${TF_STATE_BUCKET}" ]]; then die "TF_STATE_BUCKET is not set."; fi
 
   if [[ "${CONFIRM:-}" != "yes" ]]; then
     confirm "Proceed with 11-step bootstrap?" || { log_warn "Aborted."; exit 0; }
@@ -584,7 +588,7 @@ cloud_infra() {
   log_info "Provisioning runtime infrastructure (${ENVIRONMENT})..."
   require_cmd gcloud
   _require_topology
-  [[ -z "${TF_STATE_BUCKET}" ]] && die "TF_STATE_BUCKET not set."
+  if [[ -z "${TF_STATE_BUCKET}" ]]; then die "TF_STATE_BUCKET not set."; fi
 
   gcloud builds submit "${PROJECT_ROOT}" \
     --project="${BUILD_PROJECT}" \
