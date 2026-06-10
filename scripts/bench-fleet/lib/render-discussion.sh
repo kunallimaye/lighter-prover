@@ -146,10 +146,11 @@ methodology = (
     "  --zone=<zone> --machine-type=<shape>\n"
     "  --image-family=<debian-12[-arm64]> --image-project=debian-cloud\n"
     "  --boot-disk-size=100GB --boot-disk-type=pd-balanced\n"
+    "  --service-account=<compute-sa> --scopes=cloud-platform\n"
     "  --max-run-duration=8h --instance-termination-action=DELETE\n"
-    "  --network=ai-workstation-ws-net --subnet=ai-workstation-ws-subnet --no-address\n"
-    "  --shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring\n"
+    "  --network=ai-workstation-ws-net --subnet=ai-workstation-ws-subnet\n"
     "  --metadata-from-file=startup-script=<rendered-template>\n"
+    "  --labels=purpose=bench-fleet,owner=lighter,run-id=<run-id>,machine=<shape>\n"
     "```\n"
 )
 
