@@ -1,11 +1,11 @@
-machine_type	vcpus	arch	image_family	image_project	quota_family	preferred_zones
-c4a-highcpu-32	32	arm64	debian-12-arm64	debian-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c
-c4a-highcpu-64	64	arm64	debian-12-arm64	debian-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c
-n4a-highcpu-32	32	arm64	debian-12-arm64	debian-cloud	N4A_CPUS	us-central1-a,us-central1-b,us-central1-c
-n4a-highcpu-64	64	arm64	debian-12-arm64	debian-cloud	N4A_CPUS	us-central1-a,us-central1-b,us-central1-c
-n4d-highcpu-32	32	x86_64	debian-12	debian-cloud	N4D_CPUS	us-central1-a,us-central1-b,us-central1-c
-n4d-highcpu-64	64	x86_64	debian-12	debian-cloud	N4D_CPUS	us-central1-a,us-central1-b,us-central1-c
-t2a-standard-32	32	arm64	debian-12-arm64	debian-cloud	T2A_CPUS	us-central1-a,us-central1-b,us-central1-f
-t2a-standard-48	48	arm64	debian-12-arm64	debian-cloud	T2A_CPUS	us-central1-a,us-central1-b,us-central1-f
-c4d-highcpu-32	32	x86_64	debian-12	debian-cloud	C4D_CPUS	us-central1-a,us-central1-b,us-central1-c
-c4d-highcpu-64	64	x86_64	debian-12	debian-cloud	C4D_CPUS	us-central1-a,us-central1-b,us-central1-c
+machine_type	vcpus	arch	image_family	image_project	quota_family	preferred_zones	disk_type
+c4a-highcpu-32	32	arm64	debian-12-arm64	debian-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced
+c4a-highcpu-64	64	arm64	debian-12-arm64	debian-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced
+n4a-highcpu-32	32	arm64	debian-12-arm64	debian-cloud	N4A_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced
+n4a-highcpu-64	64	arm64	debian-12-arm64	debian-cloud	N4A_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced
+n4d-highcpu-32	32	x86_64	debian-12	debian-cloud	N4D_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced
+n4d-highcpu-64	64	x86_64	debian-12	debian-cloud	N4D_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced
+t2a-standard-32	32	arm64	debian-12-arm64	debian-cloud	T2A_CPUS	us-central1-a,us-central1-b,us-central1-f	pd-balanced
+t2a-standard-48	48	arm64	debian-12-arm64	debian-cloud	T2A_CPUS	us-central1-a,us-central1-b,us-central1-f	pd-balanced
+c4d-highcpu-32	32	x86_64	debian-12	debian-cloud	C4D_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced
+c4d-highcpu-64	64	x86_64	debian-12	debian-cloud	C4D_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced

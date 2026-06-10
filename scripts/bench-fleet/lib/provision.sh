@@ -51,10 +51,15 @@ provision_one_vm() {
   local run_dir="${6:-/tmp/bench-fleet-runs/${run_id}}"
   mkdir -p "${run_dir}"
 
-  local image_family image_project preferred_zones
+  local image_family image_project preferred_zones disk_type
   image_family="$(machine_field "$mt" "image_family")"   || return 1
   image_project="$(machine_field "$mt" "image_project")" || return 1
   preferred_zones="$(machine_field "$mt" "preferred_zones")" || return 1
+  disk_type="$(machine_field "$mt" "disk_type")" || return 1
+  if [[ -z "${disk_type}" ]]; then
+    log_err "[${mt}] disk_type missing in machines.tsv"
+    return 1
+  fi
 
   local inst_name
   inst_name="$(instance_name "${run_id}" "${mt}")"
@@ -95,7 +100,7 @@ provision_one_vm() {
         --image-family="${image_family}"
         --image-project="${image_project}"
         --boot-disk-size=100GB
-        --boot-disk-type=pd-balanced
+        --boot-disk-type="${disk_type}"
         --service-account="${compute_sa}"
         --scopes=cloud-platform
         --max-run-duration=8h
