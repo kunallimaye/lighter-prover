@@ -170,7 +170,7 @@ fleet-quota-check: ## Verify GCP quotas for all 10 machine types (read-only, no 
 fleet-run-dry: ## Print the 10 gcloud create commands without executing (no spend)
 	@$(FLEET) run --dry-run --yes
 
-fleet-run: ## Provision 10 VMs in parallel, run S in {1,2,4,6} sweep, collect to GCS (~$18, ~1h wall)
+fleet-run: ## Provision 10 VMs in parallel, run S in {1,2,4,6} sweep, collect to GCS (~$$80-150, ~6h wall)
 	@$(FLEET) run --yes
 
 fleet-status: ## Show current fleet state from GCS (use RUN_ID=<id> for a specific run)

@@ -126,7 +126,7 @@ upload_and_signal_done "ok"
 # and bench-sweep cannot grant that role (no setIamPolicy). Orchestrator
 # (running as bench-sweep, which already has compute.instanceAdmin.v1) issues
 # the delete from outside once it sees the _DONE sentinel.
-# The --max-run-duration=8h --instance-termination-action=DELETE on the
+# The --max-run-duration=10h --instance-termination-action=DELETE on the
 # instance is a belt-and-suspenders safety net if the orchestrator never sees
 # the sentinel.
 echo "FLEET_END $(date -Is) -- awaiting orchestrator delete or max-run-duration"

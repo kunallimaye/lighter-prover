@@ -7,7 +7,7 @@
 #
 # Exits when:
 #  - every machine in <run_dir> is in state {complete, provision-failed}, OR
-#  - the overall 8h fleet timeout fires.
+#  - the overall 10h fleet timeout fires.
 #
 # On exit, force-deletes any VMs still labeled with this run-id (belt-and-
 # suspenders cleanup).
@@ -22,7 +22,7 @@ _MON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Defaults (overridable by env).
 : "${FLEET_POLL_INTERVAL:=60}"          # seconds between polls
 : "${FLEET_STATUS_INTERVAL:=300}"       # seconds between full status prints
-: "${FLEET_OVERALL_TIMEOUT:=28800}"     # 8h overall cap
+: "${FLEET_OVERALL_TIMEOUT:=36000}"     # 10h overall cap (matches --max-run-duration on the VMs)
 
 # Read current state for one machine: prints "<state>\t<zone>\t<instance>".
 _read_state() {
