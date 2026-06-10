@@ -49,7 +49,7 @@ RUN rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal \
 
 WORKDIR /src
 
-# Copy the source tree. We rely on .dockerignore (cicd/.dockerignore) to
+# Copy the source tree. We rely on the repo-root .dockerignore to
 # keep target/, .git, and logs out of the build context. The LIGHTER_REF
 # arg is captured into an env so it shows up in `docker image inspect`
 # and in the binary's own startup log line (the bench `--version` /
