@@ -145,7 +145,7 @@ methodology = (
     "gcloud compute instances create <name>\n"
     "  --zone=<zone> --machine-type=<shape>\n"
     "  --image-family=<debian-12[-arm64]> --image-project=debian-cloud\n"
-    "  --boot-disk-size=100GB --boot-disk-type=pd-balanced\n"
+    "  --boot-disk-size=100GB --boot-disk-type=<per-shape>  # hyperdisk-balanced for C4/N4 families, pd-balanced for T2A\n"
     "  --service-account=<compute-sa> --scopes=cloud-platform\n"
     "  --max-run-duration=8h --instance-termination-action=DELETE\n"
     "  --network=ai-workstation-ws-net --subnet=ai-workstation-ws-subnet\n"
