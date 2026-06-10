@@ -59,8 +59,10 @@ upload_and_signal_done() {
   # SENTINEL — orchestrator polls for this file. Use a temp file (not a
   # stdin pipe) so cp_retry's second attempt still has the content.
   echo "${STATUS} @ $(date -Is)" > /tmp/_done_sentinel.txt
-  if ! cp_retry /tmp/_done_sentinel.txt "${BUCKET}/${RUN_PREFIX}_DONE"; then
-    echo "FLEET_UPLOAD_FAILED rc=$? (sentinel _DONE could not be written)"
+  cp_retry /tmp/_done_sentinel.txt "${BUCKET}/${RUN_PREFIX}_DONE"
+  rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    echo "FLEET_UPLOAD_FAILED rc=${rc} (sentinel _DONE could not be written)"
   fi
   echo "FLEET_UPLOAD_DONE $(date -Is) status=${STATUS}"
 }
