@@ -1,0 +1,77 @@
+title: "lighter-prover Deployer"
+description: "Curated permissions for the lighter-prover agent SA (operator identity). Daily operation: Cloud Build submits, AR push/pull, GCS results/TF-state access, logs read, plus Cloud Run (Jobs) perms for the Phase 2 runtime. Bound with 30-day expiry by scripts/cloud.sh::admin-cloud-init step 6."
+stage: GA
+includedPermissions:
+  # Artifact Registry — push/pull bench images (cloud-bench-build matrix,
+  # fleet VMs pull the per-microarch variants).
+  - artifactregistry.repositories.uploadArtifacts
+  - artifactregistry.repositories.downloadArtifacts
+  - artifactregistry.repositories.get
+  - artifactregistry.repositories.list
+  - artifactregistry.dockerimages.get
+  - artifactregistry.dockerimages.list
+  - artifactregistry.tags.create
+  - artifactregistry.tags.update
+  - artifactregistry.tags.list
+  # Cloud Build — submit and monitor builds (cloud-bench-build,
+  # cloud-infra). Builds execute as the builder SA via --service-account;
+  # actAs on the builder SA is granted separately in step 7.
+  - cloudbuild.builds.create
+  - cloudbuild.builds.get
+  - cloudbuild.builds.list
+  # Cloud Run — Phase 1 ships no long-lived service, but
+  # cicd/cloudbuild.yaml documents Cloud Run Jobs as the future one-shot
+  # runtime (gcloud run jobs create/execute), and cloud-app-* verbs return
+  # in Phase 2 (#3). Services + Jobs perms kept so the role doesn't need
+  # an Owner round-trip when Phase 2 lands.
+  - run.services.create
+  - run.services.update
+  - run.services.delete
+  - run.services.get
+  - run.services.list
+  - run.services.getIamPolicy
+  - run.revisions.get
+  - run.revisions.list
+  - run.jobs.create
+  - run.jobs.update
+  - run.jobs.delete
+  - run.jobs.get
+  - run.jobs.list
+  - run.jobs.run
+  - run.executions.get
+  - run.executions.list
+  - run.operations.get
+  # IAM Service Accounts — read + actAs only. SA lifecycle (create/delete)
+  # is Owner-tier work done by admin-cloud-init, and the builder SA holds
+  # serviceAccountAdmin for Terraform-managed SAs. The agent never needs
+  # to mint or rewire identities — trimmed from the scaffold default to
+  # reduce privilege-escalation surface.
+  - iam.serviceAccounts.get
+  - iam.serviceAccounts.list
+  - iam.serviceAccounts.actAs
+  - iam.serviceAccounts.getIamPolicy
+  # GCS — TF state bucket, Cloud Build staging bucket, and the bench-fleet
+  # results bucket (read results, write probes, clean up run prefixes).
+  # buckets.setIamPolicy intentionally omitted: bucket IAM grants are
+  # Owner-tier (admin-cloud-init steps 10-11).
+  - storage.buckets.get
+  - storage.buckets.list
+  - storage.buckets.getIamPolicy
+  - storage.objects.create
+  - storage.objects.delete
+  - storage.objects.get
+  - storage.objects.list
+  - storage.objects.update
+  # Logging — inspect Cloud Build / fleet / future Cloud Run Jobs logs.
+  - logging.logEntries.list
+  - logging.logs.list
+  # Project metadata — read-only visibility for diagnostics
+  # (cloud-preflight reads the runtime project IAM policy).
+  - resourcemanager.projects.get
+  - resourcemanager.projects.getIamPolicy
+# NOTE: no compute.* permissions — the bench-fleet toolkit runs as
+# FLEET_ORCHESTRATOR_SA (see scripts/cloud.sh steps 10-11), a separate
+# identity from the agent SA this role binds to.
+#
+# Custom role ID used when this YAML is fed to gcloud iam roles
+# create/update (scripts/common.sh): lighterProverDeployer
