@@ -1,3 +1,12 @@
+# Repo-root .dockerignore.
+#
+# Both Docker and Podman look for this file at the BUILD CONTEXT root
+# (not next to the Dockerfile/Containerfile). Our build context is the
+# repo root (per `podman build -f cicd/Containerfile .`), so this file
+# lives here — moving it to cicd/.dockerignore would silently disable
+# every exclusion and ship the entire Rust target/ directory in the
+# build context (multi-GB upload).
+
 .git
 .gitignore
 .env
