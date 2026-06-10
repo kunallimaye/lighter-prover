@@ -44,7 +44,10 @@ build() {
   lighter_ref="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)"
   local lighter_ref_short
   lighter_ref_short="$(git -C "${PROJECT_ROOT}" rev-parse --short=7 HEAD 2>/dev/null || echo unknown)"
-  local ref_tag="localhost/lighter-bench:ref-${lighter_ref_short}"
+  # ref_tag = LOCAL_IMAGE's repo path with the :ref-<short> tag (so a
+  # caller who overrides LOCAL_IMAGE=foo/bar:latest still gets the
+  # extra tag at foo/bar:ref-<short>, not at the hardcoded default).
+  local ref_tag="${LOCAL_IMAGE%:*}:ref-${lighter_ref_short}"
 
   log_info "Building bench container (LIGHTER_REF=${lighter_ref}, native=${TARGET_CPU_NATIVE})..."
   podman build \
