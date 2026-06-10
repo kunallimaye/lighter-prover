@@ -1,0 +1,103 @@
+# Cloud Build pipeline — Lighter bench container (Phase 1).
+#
+# Builds cicd/Containerfile against the bench source pinned to
+# ${_LIGHTER_REF} (default: upstream 5bbb307, the last commit where
+# bench_test.json is schema-compatible — see upstream issue #9), then
+# pushes the image to Artifact Registry tagged with both :latest and
+# :sha-${SHORT_SHA}.
+#
+# Triggering paths:
+#   - Manual (operator workstation):
+#       gcloud builds submit --config cicd/cloudbuild.yaml \
+#         --substitutions=_LIGHTER_REF=<sha>,_SHORT_SHA=<git-sha>
+#   - Cloud Build trigger on git push: SHORT_SHA is auto-populated by
+#     Cloud Build; _LIGHTER_REF stays at its default unless the trigger
+#     overrides it.
+#
+# Three-role topology (see AGENTS.local.md / ADR-0001):
+#   * orchestration = operator workstation submits the build
+#   * build         = ${PROJECT_ID} (this Cloud Build project) compiles + pushes
+#   * runtime       = Cloud Run Jobs in a (possibly different) project pulls + executes
+#
+# Tier-2 detached orchestration: scripts/cloud.sh::cloud_app_deploy
+# submits this config in the background, writes a heartbeat, and the
+# operator can re-check status via `make cloud-status`.
+
+steps:
+  # ─── 1. Build the bench container image ─────────────────────────────
+  #
+  # The build context is the repo root (the source tree the bench binary
+  # is compiled from). The Containerfile is named explicitly because
+  # Cloud Build's default Dockerfile detection would miss it.
+  - id: build-bench-image
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'cicd/Containerfile'
+      - '--build-arg'
+      - 'LIGHTER_REF=${_LIGHTER_REF}'
+      - '--build-arg'
+      - 'TARGET_CPU_NATIVE=${_TARGET_CPU_NATIVE}'
+      - '-t'
+      - '${_IMAGE_NAME}:latest'
+      - '-t'
+      - '${_IMAGE_NAME}:sha-${_SHORT_SHA}'
+      - '-t'
+      - '${_IMAGE_NAME}:ref-${_LIGHTER_REF_SHORT}'
+      - '.'
+
+  # ─── 2. Push all tags to Artifact Registry ─────────────────────────
+  - id: push-bench-image
+    name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', '${_IMAGE_NAME}']
+
+# Declare the images so Cloud Build records them in the build history
+# (visible in console + queryable via `gcloud builds describe`).
+images:
+  - '${_IMAGE_NAME}:latest'
+  - '${_IMAGE_NAME}:sha-${_SHORT_SHA}'
+  - '${_IMAGE_NAME}:ref-${_LIGHTER_REF_SHORT}'
+
+substitutions:
+  # Artifact Registry image URI. Default matches the runtime-project AR
+  # repo provisioned by cicd/terraform. Override via --substitutions for
+  # promotion / cross-project pushes.
+  _IMAGE_NAME: 'us-central1-docker.pkg.dev/${PROJECT_ID}/lighter-prover/bench'
+
+  # Upstream lighter-prover commit the bench binary is compiled against.
+  # Default is the last commit where bench_test.json is schema-compatible
+  # (per upstream elliottech/lighter-prover#9). Override once #9 lands.
+  _LIGHTER_REF: '5bbb307dfb26276c48054f2c3ea9dcfe80d3678a'
+
+  # First 7 chars of _LIGHTER_REF — used as an extra image tag so
+  # operators can pin a specific upstream-ref image in production. Cloud
+  # Build substitutions don't support string slicing, so the caller MUST
+  # pass this when overriding _LIGHTER_REF. Defaults aligned with the
+  # default _LIGHTER_REF above.
+  _LIGHTER_REF_SHORT: '5bbb307'
+
+  # Toggle -C target-cpu=native. Default 0 (portable image). Set to 1
+  # only when building for a known fleet of identical CPU models.
+  _TARGET_CPU_NATIVE: '0'
+
+  # _SHORT_SHA has no default. Cloud Build auto-populates ${SHORT_SHA}
+  # when this config runs via a git trigger. For manual submission,
+  # scripts/cloud.sh passes --substitutions=_SHORT_SHA=$(git rev-parse --short HEAD).
+  # Leaving this default-less means a missing substitution fails the
+  # build LOUDLY instead of silently tagging :sha-unknown across
+  # successive builds.
+
+options:
+  # Required when the build's service account doesn't have a
+  # default-logging bucket bound. CLOUD_LOGGING_ONLY is the right choice
+  # for projects without a dedicated GCS log bucket.
+  logging: CLOUD_LOGGING_ONLY
+
+  # The bench compile is CPU-bound and benefits from a meatier worker.
+  # E2_HIGHCPU_32 is the right knee for the Rust nightly toolchain.
+  machineType: 'E2_HIGHCPU_32'
+
+# 90 min hard cap. Bench compile is ~10-15 min on E2_HIGHCPU_32; cap
+# protects against runaway downloads / DNS issues / network blips.
+timeout: '5400s'

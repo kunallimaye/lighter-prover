@@ -1,0 +1,97 @@
+# Project Configuration — three-role topology (#141)
+#
+# Copy this file to config.toml and fill in your values.
+# config.toml is gitignored — never commit it.
+# .env layered on top for sensitive overrides (see .env.example).
+#
+# Resolution order (handled by scripts/config.py):
+#   env-var > [gcp.<env>.<role>] > [gcp.<role>] > [gcp.<env>] > [gcp.defaults] > error
+#
+# The role axis (orchestration / build / runtime) is primary; the
+# environment axis (staging / production) layers on top.
+#
+# 90% case: fill in [gcp.defaults].project only. All three roles
+# collapse onto one project — fine for personal/hobby use.
+#
+# Split case: set [gcp.runtime].project to a separate prod project
+# while keeping orchestration + build on the dev project.
+
+[project]
+name = "app"
+
+# ─── REQUIRED: catch-all defaults ──────────────────────────────────
+#
+# Every role inherits from here when its own section is empty.
+# Set project + region; everything else has sensible defaults.
+
+[gcp.defaults]
+project = "your-gcp-project-id"
+region  = "us-central1"
+
+# ─── Role-axis sections ────────────────────────────────────────────
+#
+# Each role can override the defaults. Empty = inherit. The three roles
+# play distinct parts in the deploy lifecycle:
+#
+#   orchestration — where humans/agents *issue* commands. Hosts the
+#                   agent SA that runs daily deploys + operator CLI
+#                   tools. The custom role (cicd/iam/*-deployer-role.yaml)
+#                   is created here.
+#   build         — where CI runs. Hosts the builder SA, Cloud Build,
+#                   Artifact Registry, Terraform state bucket.
+#   runtime       — where deployed services run. Hosts the runtime SA,
+#                   Cloud Run services, and any service-managed resources.
+#
+# When all three resolve to the same project (the 90% case), the role
+# split is invisible to the operator but the bootstrap script and
+# Terraform are already structured to split later — no refactor needed.
+
+[gcp.orchestration]
+project = ""    # empty = inherit from [gcp.defaults]
+region  = ""
+# agent_sa = "..."             # default: {project-name}-agent
+# deployer_role_id = "..."     # default: {projectName}Deployer (camelCase)
+# agent_role_expiry_days = 30  # 30-day expiry on agent → custom-role binding
+
+[gcp.build]
+project = ""
+region  = ""
+# builder_sa   = "..."         # default: {project-name}-builder
+# ar_repo      = "..."         # default: {project-name}
+# state_bucket = "..."         # REQUIRED for cloud-infra; no sane default
+
+[gcp.runtime]
+project = ""
+region  = ""
+# runtime_sa     = "..."       # default: {project-name}-runtime
+# min_instances  = 0
+# max_instances  = 3
+# cpu            = "1"
+# memory         = "512Mi"
+# ingress        = "all"       # or "internal-and-cloud-load-balancing"
+# domain         = ""          # custom domain (LB+DNS opt-in)
+# dns_project_id = ""
+# dns_managed_zone = ""
+# dns_record_name = ""
+
+# ─── Environment-axis overrides (per #115) ─────────────────────────
+#
+# These layer ON TOP of the role axis. The resolver prefers
+# [gcp.<env>.<role>] > [gcp.<role>] for any key. Use them when an
+# environment changes WHICH project hosts a role (e.g. prod runtime
+# moves to a separate project for tenancy reasons).
+
+# [gcp.staging]
+# Inherits everything by default.
+
+# [gcp.production]
+# Override which project owns the runtime role in prod (split topology).
+# [gcp.production.runtime]
+# project        = "acme-prod"
+# region         = "us-east1"
+# min_instances  = 1
+# max_instances  = 10
+# domain         = "app.example.com"
+# dns_project_id = "acme-dns"
+# dns_managed_zone = "example-com"
+# dns_record_name  = "app.example.com."
