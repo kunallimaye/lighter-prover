@@ -1,0 +1,39 @@
+__TL_DR__
+
+## Methodology
+
+__METHODOLOGY__
+
+## Architectures swept
+
+__ARCH_TABLE__
+
+## Cross-shape comparison at S=4
+
+Reference baseline: Discussion #6 on AMD EPYC 7B13 = **345 s wall** at S=4.
+`speedup_vs_epyc` = 345 / wall_s.
+
+__COMPARISON_TABLE__
+
+## Full sweep results
+
+__FULL_TABLE__
+
+## Per-machine details
+
+__PER_MACHINE_DETAILS__
+
+## Raw logs
+
+__RAW_LOG_LINKS__
+
+## Reproduction
+
+__REPRO__
+
+## Caveats
+
+- S∈{7,8,16,32} are intentionally not included — the chain recursion circuit at current `main` panics with "Failed to build circuit" for `tx_per_proof > 6`. Tracked in issue #8 (one-line `log_gates=15` fix not yet landed). When #8 lands, rerun this toolkit with the extended sweep.
+- Build flag is `RUSTFLAGS="-C target-cpu=native"`, so per-shape numbers reflect the best the local CPU can deliver and are **not** directly comparable to cross-compiled or generic-x86_64 builds.
+- All numbers are from a **single run per (shape, S)**. No averaging across repeats. Treat ±5% as noise.
+- Build time is excluded from `wall_s` (build wall is captured separately in `machine-info.txt` per shape).
