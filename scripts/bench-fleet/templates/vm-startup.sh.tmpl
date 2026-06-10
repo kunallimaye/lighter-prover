@@ -1,0 +1,135 @@
+#!/bin/bash
+# GCE startup script for bench-fleet.
+# Runs as root on Debian 12 (or arm64 variant). Rendered by provision.sh
+# with the __PLACEHOLDER__ tokens substituted before being passed via
+# --metadata-from-file=startup-script.
+#
+# IMPORTANT: This script intentionally does NOT use `set -e`. We want every
+# phase to attempt to upload its partial results (even after a failure) so
+# the operator can diagnose what went wrong from GCS.
+
+set -uo pipefail
+exec > >(tee /var/log/startup.log) 2>&1
+echo "FLEET_START $(date -Is)"
+export DEBIAN_FRONTEND=noninteractive
+
+BUCKET="__BUCKET__"            # e.g. gs://kl-ai-workstation-bench-fleet-runs
+RUN_PREFIX="__RUN_PREFIX__"    # e.g. <run-id>/<machine_type>/  (trailing slash)
+SHA="__SHA__"                  # e.g. 0ae123bfbb7f79db890ce1e06881c4f118e51c19
+SVALUES="__SVALUES__"          # e.g. "1 2 4 6"
+HOST_LABEL="__HOST_LABEL__"    # e.g. c4a-highcpu-32
+
+# ---------- Upload + sentinel helper (defined first so failure paths can call it) ----------
+upload_and_signal_done() {
+  local STATUS="${1:-ok}"
+  echo "$STATUS" > /opt/results/status.txt
+  gcloud storage cp -r /opt/results "${BUCKET}/${RUN_PREFIX}" 2>&1 | tail -20 || true
+  gcloud storage cp /var/log/startup.log "${BUCKET}/${RUN_PREFIX}startup.log" 2>&1 | tail -5 || true
+  # SENTINEL — orchestrator polls for this file.
+  echo "${STATUS} @ $(date -Is)" | gcloud storage cp - "${BUCKET}/${RUN_PREFIX}_DONE" || true
+  echo "FLEET_UPLOAD_DONE $(date -Is) status=${STATUS}"
+}
+
+mkdir -p /opt/results
+
+# ---------- 0. Force IPv4 for apt (Cloud NAT is IPv4-only on this VPC) ----------
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+
+# ---------- 1. Apt deps ----------
+echo "FLEET_APT_START $(date -Is)"
+apt-get update -qq
+apt-get install -y -qq build-essential git curl pkg-config libssl-dev ca-certificates
+echo "FLEET_APT_DONE $(date -Is)"
+
+# ---------- 2. Rustup pinned toolchain ----------
+export HOME=/root CARGO_HOME=/root/.cargo RUSTUP_HOME=/root/.rustup
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+# shellcheck disable=SC1091
+source "$CARGO_HOME/env"
+# The toolchain pin matches the rust-toolchain file at repo root. If you bump
+# the toolchain in the repo, the orchestrator's --ref must point to a SHA that
+# has the new pin -- rustup will read the file again during build.
+rustup toolchain install nightly-2025-12-06 --profile minimal
+rustup default nightly-2025-12-06
+echo "FLEET_RUSTUP_DONE $(date -Is)"
+
+# ---------- 3. Clone at exact SHA ----------
+cd /opt || { upload_and_signal_done "cd-failed"; exit 1; }
+git clone https://github.com/kunallimaye/lighter-prover.git
+cd lighter-prover || { upload_and_signal_done "clone-failed"; exit 1; }
+git checkout "$SHA"
+git rev-parse HEAD > /opt/results/git-sha.txt
+echo "FLEET_CLONE_DONE $(date -Is)"
+
+# ---------- 4. Machine info ----------
+{
+  echo "=== host_label ==="
+  echo "$HOST_LABEL"
+  echo
+  echo "=== lscpu ==="
+  lscpu
+  echo
+  echo "=== free -h ==="
+  free -h
+  echo
+  echo "=== uname -a ==="
+  uname -a
+  echo
+  echo "=== rustc ==="
+  rustc --version
+  echo
+  echo "=== git sha ==="
+  cat /opt/results/git-sha.txt
+  echo
+  echo "=== target-cpu native cfg ==="
+  rustc --print cfg -C target-cpu=native 2>&1 | head -40
+} > /opt/results/machine-info.txt
+
+# ---------- 5. Build (cold) ----------
+BUILD_START=$(date +%s)
+echo "FLEET_BUILD_START $(date -Is)"
+RUSTFLAGS="-C target-cpu=native" cargo build --release -p bench --bin bench \
+  > /opt/results/build.log 2>&1
+BUILD_RC=$?
+BUILD_WALL=$(( $(date +%s) - BUILD_START ))
+echo "BUILD_WALL_SECONDS=${BUILD_WALL}" | tee -a /opt/results/build.log
+echo "FLEET_BUILD_DONE $(date -Is) rc=${BUILD_RC} wall=${BUILD_WALL}s"
+
+if [[ ${BUILD_RC} -ne 0 ]]; then
+  echo "FLEET_BUILD_FAILED -- uploading partial artifacts and bailing"
+  upload_and_signal_done "build-failed"
+  exit 1
+fi
+
+# ---------- 6. Sweep ----------
+# bench reads ./bench_test.json from CWD, so we MUST cd into bench/ before each run.
+cd /opt/lighter-prover/bench || { upload_and_signal_done "cd-bench-failed"; exit 1; }
+for S in $SVALUES; do
+  echo "FLEET_S${S}_START $(date -Is)"
+  S_START=$(date +%s)
+  if timeout 4h /opt/lighter-prover/target/release/bench \
+       --tx-per-proof "$S" --tx-limit 480 \
+       > "/opt/results/bench-S${S}.log" 2>&1; then
+    S_RC=0
+  else
+    S_RC=$?
+  fi
+  S_WALL=$(( $(date +%s) - S_START ))
+  echo "S${S}_WALL_SECONDS=${S_WALL}" | tee -a "/opt/results/bench-S${S}.log"
+  echo "S${S}_EXIT_CODE=${S_RC}" | tee -a "/opt/results/bench-S${S}.log"
+  echo "FLEET_S${S}_DONE $(date -Is) rc=${S_RC} wall=${S_WALL}s"
+done
+cd /opt/lighter-prover || true
+
+# ---------- 7. Upload + sentinel ----------
+upload_and_signal_done "ok"
+
+# ---------- 8. No in-VM self-delete ----------
+# Pilot proved this fails: default Compute SA lacks compute.instances.delete,
+# and bench-sweep cannot grant that role (no setIamPolicy). Orchestrator
+# (running as bench-sweep, which already has compute.instanceAdmin.v1) issues
+# the delete from outside once it sees the _DONE sentinel.
+# The --max-run-duration=8h --instance-termination-action=DELETE on the
+# instance is a belt-and-suspenders safety net if the orchestrator never sees
+# the sentinel.
+echo "FLEET_END $(date -Is) -- awaiting orchestrator delete or max-run-duration"

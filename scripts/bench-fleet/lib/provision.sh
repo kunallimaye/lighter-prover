@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# provision.sh -- provision_one_vm <machine_type> <run_id> <sha> <svalues> [dry_run=0]
+#
+# Renders the startup-script template, then runs `gcloud compute instances
+# create` with the toolkit's mandatory flag set. Tries each preferred zone
+# in order until one succeeds. On ZONE_RESOURCE_POOL_EXHAUSTED, advances to
+# the next zone.
+#
+# On success: prints "<instance_name> <zone>" to stdout, writes a status
+# record under <RUN_DIR>/<machine_type>.state.
+# On failure: writes "provision-failed" status, returns non-zero.
+#
+# Source-only.
+
+# Don't `set -e` here -- caller decides per-machine policy.
+
+_PROV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+# shellcheck disable=SC1091 # path is resolved at runtime from $BASH_SOURCE
+. "${_PROV_DIR}/common.sh"
+
+# render_startup <sha> <svalues> <host_label> <run_id> -> path of rendered file
+render_startup() {
+  local sha="$1" svalues="$2" host_label="$3" run_id="$4"
+  local tmpl="${FLEET_TEMPLATES}/vm-startup.sh.tmpl"
+  local out
+  out="$(mktemp -t bench-fleet-startup.XXXXXX)"
+  # Use awk for the substitution -- sed's delimiter escaping is brittle when
+  # the bucket URI contains "/".
+  awk \
+    -v bucket="${GCS_BUCKET}" \
+    -v run_prefix="${run_id}/${host_label}/" \
+    -v sha="${sha}" \
+    -v svalues="${svalues}" \
+    -v host_label="${host_label}" \
+    '{ gsub(/__BUCKET__/, bucket);
+       gsub(/__RUN_PREFIX__/, run_prefix);
+       gsub(/__SHA__/, sha);
+       gsub(/__SVALUES__/, svalues);
+       gsub(/__HOST_LABEL__/, host_label);
+       print }' "${tmpl}" > "${out}"
+  printf '%s\n' "${out}"
+}
+
+# provision_one_vm <machine_type> <run_id> <sha> <svalues> [<dry_run>] [<run_dir>]
+# dry_run: when "1", prints the gcloud command WITHOUT executing it.
+# run_dir: per-run state directory (defaults to /tmp/bench-fleet-runs/<run-id>).
+provision_one_vm() {
+  local mt="$1" run_id="$2" sha="$3" svalues="$4"
+  local dry_run="${5:-0}"
+  local run_dir="${6:-/tmp/bench-fleet-runs/${run_id}}"
+  mkdir -p "${run_dir}"
+
+  local image_family image_project preferred_zones
+  image_family="$(machine_field "$mt" "image_family")"   || return 1
+  image_project="$(machine_field "$mt" "image_project")" || return 1
+  preferred_zones="$(machine_field "$mt" "preferred_zones")" || return 1
+
+  local inst_name
+  inst_name="$(instance_name "${run_id}" "${mt}")"
+  if (( ${#inst_name} > 63 )); then
+    log_err "instance name >63 chars: ${inst_name}"
+    return 1
+  fi
+
+  local compute_sa
+  if [[ "${dry_run}" == "1" ]]; then
+    compute_sa="<PROJECT_NUMBER>-compute@developer.gserviceaccount.com"
+  else
+    compute_sa="$(get_compute_sa)" || return 1
+  fi
+
+  local startup_path
+  startup_path="$(render_startup "${sha}" "${svalues}" "${mt}" "${run_id}")"
+  # Stash the rendered script next to the run state for debugging.
+  cp "${startup_path}" "${run_dir}/${mt}.startup.sh"
+
+  local labels="purpose=bench-fleet,owner=lighter,run-id=${run_id},machine=${mt}"
+
+  # Try each preferred zone.
+  local ZONES IFS=,
+  read -r -a ZONES <<< "${preferred_zones}"
+  unset IFS
+
+  local zone
+  for zone in "${ZONES[@]}"; do
+    log_info "[${mt}] trying zone=${zone} instance=${inst_name}"
+
+    local create_cmd=(
+      gcloud --impersonate-service-account="${BENCH_SWEEP_SA}"
+             --project="${PROJECT}"
+        compute instances create "${inst_name}"
+        --zone="${zone}"
+        --machine-type="${mt}"
+        --image-family="${image_family}"
+        --image-project="${image_project}"
+        --boot-disk-size=100GB
+        --boot-disk-type=pd-balanced
+        --service-account="${compute_sa}"
+        --scopes=cloud-platform
+        --max-run-duration=8h
+        --instance-termination-action=DELETE
+        --network="${NETWORK}"
+        --subnet="${SUBNET}"
+        --no-address
+        --shielded-secure-boot
+        --shielded-vtpm
+        --shielded-integrity-monitoring
+        --metadata-from-file=startup-script="${startup_path}"
+        --labels="${labels}"
+    )
+
+    if [[ "${dry_run}" == "1" ]]; then
+      printf '# %s in %s\n' "${mt}" "${zone}"
+      # Print quoted command (one arg per line for readability).
+      printf '%q ' "${create_cmd[@]}"
+      printf '\n\n'
+      # Stash record so dry-run callers see the same state-file layout.
+      printf 'dry-run\t%s\t%s\n' "${zone}" "${inst_name}" > "${run_dir}/${mt}.state"
+      return 0
+    fi
+
+    local create_log; create_log="$(mktemp -t bench-fleet-create.XXXXXX)"
+    if "${create_cmd[@]}" > "${create_log}" 2>&1; then
+      log_ok "[${mt}] created instance=${inst_name} zone=${zone}"
+      printf 'running\t%s\t%s\n' "${zone}" "${inst_name}" > "${run_dir}/${mt}.state"
+      printf '%s\t%s\n' "${inst_name}" "${zone}"
+      rm -f "${create_log}"
+      return 0
+    fi
+
+    if grep -qE 'ZONE_RESOURCE_POOL_EXHAUSTED|does not have enough resources available' "${create_log}"; then
+      log_warn "[${mt}] zone ${zone} exhausted (stockout) -- trying next"
+      cat "${create_log}" >&2
+      rm -f "${create_log}"
+      continue
+    fi
+
+    log_err "[${mt}] create failed in ${zone} for non-stockout reason:"
+    cat "${create_log}" >&2
+    rm -f "${create_log}"
+    printf 'provision-failed\t%s\t%s\n' "${zone}" "${inst_name}" > "${run_dir}/${mt}.state"
+    return 1
+  done
+
+  log_err "[${mt}] all zones exhausted: ${preferred_zones}"
+  printf 'provision-failed\tNONE\t%s\n' "${inst_name}" > "${run_dir}/${mt}.state"
+  return 1
+}
