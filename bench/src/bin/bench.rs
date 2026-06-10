@@ -22,6 +22,7 @@ use circuit::types::config::{C, CIRCUIT_CONFIG, F};
 use circuit::types::constants::*;
 use circuit::types::state_metadata::StateMetadata;
 use circuit::types::{account_delta, state_metadata};
+use clap::Parser;
 use env_logger::{Builder, DEFAULT_FILTER_ENV, Env, try_init_from_env};
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, info};
 use plonky2::field::goldilocks_field::GoldilocksField;
@@ -30,27 +31,119 @@ use plonky2::plonk::proof::CompressedProofWithPublicInputs;
 use plonky2::recursion::dummy_circuit::{self, dummy_circuit};
 use rayon::vec;
 
-const TX_PER_PROOF: usize = 4;
+const DEFAULT_TX_PER_PROOF: usize = 4;
+const DEFAULT_TX_LIMIT: usize = 480;
 const CHAIN_ID: u32 = 304;
+
+/// Lighter prover benchmark.
+///
+/// Runs the full per-chunk tx-proof + chain-recursion pipeline against
+/// `bench_test.json`, configurable for chunk-size sweeps.
+#[derive(Parser, Debug)]
+#[command(name = "bench", about, long_about = None)]
+struct Args {
+    /// Number of transactions proven per `BlockTxCircuit` chunk. Each
+    /// value produces a different proving key.
+    #[arg(long, env = "LIGHTER_TX_PER_PROOF", default_value_t = DEFAULT_TX_PER_PROOF)]
+    tx_per_proof: usize,
+
+    /// Upper bound on transactions consumed from the test block. The
+    /// effective limit is aligned down to the nearest multiple of
+    /// `tx_per_proof` so no short final chunk is produced (which would
+    /// trip the `zip_eq` panic in `block_tx_constraints`).
+    #[arg(long, env = "LIGHTER_TX_LIMIT", default_value_t = DEFAULT_TX_LIMIT)]
+    tx_limit: usize,
+}
 
 fn main() {
     init_logger_no_warn();
 
+    let args = Args::parse();
+
+    const UPSTREAM_TESTED_MAX_TX_PER_PROOF: usize = 6;
+    if args.tx_per_proof > UPSTREAM_TESTED_MAX_TX_PER_PROOF {
+        eprintln!(
+            "error: --tx-per-proof {} exceeds the upstream-tested maximum of {}.\n\
+             \n\
+             Upstream lighter-prover (commit 5bbb307) sets log_gates = 14 in\n\
+             circuit/src/block_tx_chain_constraints.rs:128 when tx_per_proof > 6.\n\
+             That setting is insufficient: the chain-recursion verifier circuit\n\
+             requires more than 2^14 = 16384 rows for tx_per_proof in {{7, 8, 16, 32}}\n\
+             and panics at build time with 'Failed to build circuit'.\n\
+             \n\
+             Empirically validated chunk sizes on upstream 5bbb307: 1, 2, 3, 4, 5, 6.\n\
+             \n\
+             See https://github.com/kunallimaye/lighter-prover/issues/8 for the\n\
+             log_gates analysis and proposed fix paths (bump constant, tiered\n\
+             table, or dynamic computation from CommonCircuitData).",
+            args.tx_per_proof, UPSTREAM_TESTED_MAX_TX_PER_PROOF
+        );
+        std::process::exit(2);
+    }
+
+    if args.tx_per_proof == 0 {
+        eprintln!("error: --tx-per-proof must be > 0");
+        std::process::exit(2);
+    }
+    if args.tx_limit == 0 {
+        eprintln!("error: --tx-limit must be > 0");
+        std::process::exit(2);
+    }
+    if args.tx_per_proof > args.tx_limit {
+        eprintln!(
+            "error: --tx-per-proof ({}) must be <= --tx-limit ({}); a single chunk would not fit",
+            args.tx_per_proof, args.tx_limit
+        );
+        std::process::exit(2);
+    }
+
+    log_machine_metadata(&args);
+
     let block = get_test_block_json_file("bench_test.json");
-    let tx_chunks = block.txs.chunks(TX_PER_PROOF);
+
+    if block.txs.len() < args.tx_per_proof {
+        eprintln!(
+            "error: bench_test.json has {} txs but --tx-per-proof is {}; need at least one full chunk",
+            block.txs.len(),
+            args.tx_per_proof
+        );
+        std::process::exit(2);
+    }
+
+    // Align down to the largest multiple of tx_per_proof that fits within
+    // both tx_limit and the available txs. This guarantees every chunk has
+    // exactly tx_per_proof txs and BlockTxCircuit::prove never sees a
+    // short final chunk (which would panic via zip_eq).
+    let aligned_limit = (args.tx_limit / args.tx_per_proof) * args.tx_per_proof;
+    let effective_limit = aligned_limit.min(
+        (block.txs.len() / args.tx_per_proof) * args.tx_per_proof,
+    );
+    let txs: &[_] = &block.txs[..effective_limit];
+    let tx_chunks = txs.chunks(args.tx_per_proof);
     let chunks_count = tx_chunks.len();
+
+    if chunks_count == 0 {
+        eprintln!(
+            "error: aligned tx limit is 0 (tx_per_proof={}, tx_limit={}, txs_available={})",
+            args.tx_per_proof,
+            args.tx_limit,
+            block.txs.len()
+        );
+        std::process::exit(2);
+    }
 
     info!(
         concat!(
             "Tx and chain circuits are configured to prove {} txs per proof in each iteration. ",
-            "There are {} txs in the test block, so there will be {} iterations of proving.\n\n"
+            "There are {} txs in the test block, using {} (aligned to chunk size), so there will be {} iterations of proving.\n\n"
         ),
-        TX_PER_PROOF,
+        args.tx_per_proof,
         block.txs.len(),
+        effective_limit,
         chunks_count
     );
 
-    let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, TX_PER_PROOF, CHAIN_ID);
+    let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, CHAIN_ID);
     let bt = circuit.target;
     let data = circuit.builder.build::<C>();
     info!("BlockTxCircuit defined!");
@@ -68,7 +161,7 @@ fn main() {
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
     info!("BlockPreExecutionCircuit defined!");
 
-    let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, TX_PER_PROOF, 1);
+    let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, args.tx_per_proof, 1);
     let chain_circuit_t = chain_circuit.target;
     let chain_circuit_data = chain_circuit.builder.build::<C>();
     info!("BlockTxChainCircuit defined!");
@@ -248,4 +341,78 @@ fn init_logger_no_warn() {
 
     let _ = log::set_boxed_logger(Box::new(NoWarnLogger(inner)));
     log::set_max_level(LevelFilter::Info);
+}
+
+/// Emit a single info!() line that fully describes the host and the run
+/// configuration. Pure stdlib + /proc parsing -- no heavy crates.
+fn log_machine_metadata(args: &Args) {
+    let hostname = read_hostname();
+    let (cpu_model, cpu_cores) = read_cpu_info();
+    let mem_total = read_mem_total();
+    let git_sha = option_env!("GIT_SHA").unwrap_or("unknown");
+
+    info!(
+        "BENCH_META host={} cpu=\"{}\" cores={} ram={} git_sha={} tx_per_proof={} tx_limit={}",
+        hostname,
+        cpu_model,
+        cpu_cores,
+        mem_total,
+        git_sha,
+        args.tx_per_proof,
+        args.tx_limit,
+    );
+}
+
+fn read_hostname() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME") {
+        if !h.is_empty() {
+            return h;
+        }
+    }
+    if let Ok(h) = fs::read_to_string("/etc/hostname") {
+        let h = h.trim();
+        if !h.is_empty() {
+            return h.to_string();
+        }
+    }
+    match std::process::Command::new("uname").arg("-n").output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn read_cpu_info() -> (String, usize) {
+    let mut model = String::from("unknown");
+    let mut cores = 0usize;
+    if let Ok(content) = fs::read_to_string("/proc/cpuinfo") {
+        for line in content.lines() {
+            if model == "unknown" && line.starts_with("model name") {
+                if let Some(idx) = line.find(':') {
+                    model = line[idx + 1..].trim().to_string();
+                }
+            }
+            if line.starts_with("processor") {
+                cores += 1;
+            }
+        }
+    }
+    if cores == 0 {
+        if let Ok(out) = std::process::Command::new("nproc").output() {
+            if let Ok(s) = String::from_utf8(out.stdout) {
+                cores = s.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    (model, cores)
+}
+
+fn read_mem_total() -> String {
+    if let Ok(content) = fs::read_to_string("/proc/meminfo") {
+        for line in content.lines() {
+            if line.starts_with("MemTotal:") {
+                return line.split(':').nth(1).map(|s| s.trim().to_string()).unwrap_or_default();
+            }
+        }
+    }
+    "unknown".to_string()
 }

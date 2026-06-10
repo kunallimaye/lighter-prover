@@ -33,7 +33,7 @@ env_logger = { workspace = true }
 bincode = { workspace = true }
 ff = { workspace = true }
 hashbrown = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
 clap_derive = { workspace = true }
 tiny-keccak =  { workspace = true }
 paste = { workspace = true }
