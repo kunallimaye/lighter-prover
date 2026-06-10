@@ -8,6 +8,9 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use bench::events::{
+    self, BenchEvent, cpu_time_ms, current_rss_mb, now_iso8601, peak_rss_mb,
+};
 use circuit::block::{Block, BlockWitness};
 use circuit::block_constraints::{BlockCircuit, Circuit as _};
 use circuit::block_pre_execution::{BlockPreExec, BlockPreExecWitness};
@@ -143,9 +146,21 @@ fn main() {
         chunks_count
     );
 
+    let bench_start = Instant::now();
+    let bench_cpu_start = cpu_time_ms();
+
+    let l1_define_t = Instant::now();
     let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, CHAIN_ID);
     let bt = circuit.target;
     let data = circuit.builder.build::<C>();
+    let l1_define_ms = l1_define_t.elapsed().as_millis() as u64;
+    events::emit(&BenchEvent::CircuitDefine {
+        layer: 1,
+        name: "BlockTxCircuit",
+        wall_ms: l1_define_ms,
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
     info!("BlockTxCircuit defined!");
     info!(
         "BlockTxCircuit # public inputs = {:?}",
@@ -156,14 +171,32 @@ fn main() {
         data.common.num_gate_constraints
     );
 
+    let l3_define_t = Instant::now();
     let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
     let pbt = pre_exec_circuit.target;
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
+    let l3_define_ms = l3_define_t.elapsed().as_millis() as u64;
+    events::emit(&BenchEvent::CircuitDefine {
+        layer: 3,
+        name: "BlockPreExecutionCircuit",
+        wall_ms: l3_define_ms,
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
     info!("BlockPreExecutionCircuit defined!");
 
+    let l2_define_t = Instant::now();
     let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, args.tx_per_proof, 1);
     let chain_circuit_t = chain_circuit.target;
     let chain_circuit_data = chain_circuit.builder.build::<C>();
+    let l2_define_ms = l2_define_t.elapsed().as_millis() as u64;
+    events::emit(&BenchEvent::CircuitDefine {
+        layer: 2,
+        name: "BlockTxChainCircuit",
+        wall_ms: l2_define_ms,
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
     info!("BlockTxChainCircuit defined!");
     info!(
         "BlockTxChainCircuit # public inputs = {:?}",
@@ -184,12 +217,26 @@ fn main() {
     let block_pre_exec = BlockPreExec::from_block(&block);
 
     let pre_execution_time = Instant::now();
+    let l3_cpu_start = cpu_time_ms();
     let pre_proof = BlockPreExecutionCircuit::prove(&pre_exec_data, &block_pre_exec, &pbt);
     if let Err(err) = pre_proof {
         panic!("Block pre-exec failed to prove. err = {:?}", err);
     }
     let pre_proof = pre_proof.unwrap();
     let pre_execution_total = pre_execution_time.elapsed();
+    let l3_cpu_end = cpu_time_ms();
+    events::emit(&BenchEvent::LayerProve {
+        layer: 3,
+        name: "BlockPreExecutionCircuit",
+        chunk_idx: None,
+        chunk_total: None,
+        tx_per_proof: args.tx_per_proof,
+        wall_ms: pre_execution_total.as_millis() as u64,
+        cpu_ms: diff_ms(l3_cpu_start, l3_cpu_end),
+        rss_mb_peak: peak_rss_mb(),
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
 
     let pre_exec_witness =
         BlockPreExecWitness::from_public_inputs(&pre_proof.clone().public_inputs);
@@ -236,11 +283,26 @@ fn main() {
         };
 
         let tx_dt = Instant::now();
+        let l1_cpu_start = cpu_time_ms();
         let tx_proof = BlockTxCircuit::prove(&data, &block_tx, &bt);
         let tx_dt = tx_dt.elapsed();
+        let l1_cpu_end = cpu_time_ms();
         if let Err(err) = tx_proof {
             panic!("Failed to prove tx chunk #{}. err = {:?}", index, err);
         }
+
+        events::emit(&BenchEvent::LayerProve {
+            layer: 1,
+            name: "BlockTxCircuit",
+            chunk_idx: Some(index),
+            chunk_total: Some(chunks_count),
+            tx_per_proof: args.tx_per_proof,
+            wall_ms: tx_dt.as_millis() as u64,
+            cpu_ms: diff_ms(l1_cpu_start, l1_cpu_end),
+            rss_mb_peak: peak_rss_mb(),
+            rss_mb_after: current_rss_mb(),
+            ts: now_iso8601(),
+        });
 
         info!(
             "tx chunk #{index}/{} BlockTxCircuit::prove time: {:?}",
@@ -261,6 +323,7 @@ fn main() {
         market_tree_root = tx_witness.new_market_tree_root;
 
         let chain_dt = Instant::now();
+        let l2_cpu_start = cpu_time_ms();
         let chain_proof = BlockTxChainCircuit::prove(
             &chain_circuit_t,
             &chain_circuit_data,
@@ -270,9 +333,23 @@ fn main() {
             &tx_proof,
         );
         let chain_dt = chain_dt.elapsed();
+        let l2_cpu_end = cpu_time_ms();
         if let Err(err) = chain_proof {
             panic!("Block Chain circuit failed to prove. err = {:?}", err);
         }
+
+        events::emit(&BenchEvent::LayerProve {
+            layer: 2,
+            name: "BlockTxChainCircuit",
+            chunk_idx: Some(index),
+            chunk_total: Some(chunks_count),
+            tx_per_proof: args.tx_per_proof,
+            wall_ms: chain_dt.as_millis() as u64,
+            cpu_ms: diff_ms(l2_cpu_start, l2_cpu_end),
+            rss_mb_peak: peak_rss_mb(),
+            rss_mb_after: current_rss_mb(),
+            ts: now_iso8601(),
+        });
 
         chain_prove_total += chain_dt;
         info!(
@@ -302,6 +379,28 @@ fn main() {
         "AVERAGE BlockTxChainCircuit::prove time: {:?}",
         chain_prove_total / chunks_count as u32
     );
+
+    let total_wall_ms = bench_start.elapsed().as_millis() as u64;
+    let total_cpu_ms = diff_ms(bench_cpu_start, cpu_time_ms());
+    events::emit(&BenchEvent::Summary {
+        tx_per_proof: args.tx_per_proof,
+        tx_limit: args.tx_limit,
+        chunks: chunks_count,
+        total_wall_ms,
+        total_cpu_ms,
+        peak_rss_mb: peak_rss_mb(),
+        ts: now_iso8601(),
+    });
+}
+
+/// Compute the delta between two CPU-time samples. Returns `None` if
+/// either sample is unavailable (e.g. non-Linux) or if the end sample
+/// is somehow earlier than the start.
+fn diff_ms(start: Option<u64>, end: Option<u64>) -> Option<u64> {
+    match (start, end) {
+        (Some(s), Some(e)) if e >= s => Some(e - s),
+        _ => None,
+    }
 }
 
 pub fn get_test_block_json_file(file_name: &str) -> Block<F> {
