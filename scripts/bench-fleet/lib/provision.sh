@@ -102,10 +102,6 @@ provision_one_vm() {
         --instance-termination-action=DELETE
         --network="${NETWORK}"
         --subnet="${SUBNET}"
-        --no-address
-        --shielded-secure-boot
-        --shielded-vtpm
-        --shielded-integrity-monitoring
         --metadata-from-file=startup-script="${startup_path}"
         --labels="${labels}"
     )

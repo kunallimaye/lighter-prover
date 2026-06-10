@@ -32,9 +32,6 @@ upload_and_signal_done() {
 
 mkdir -p /opt/results
 
-# ---------- 0. Force IPv4 for apt (Cloud NAT is IPv4-only on this VPC) ----------
-echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
-
 # ---------- 1. Apt deps ----------
 echo "FLEET_APT_START $(date -Is)"
 apt-get update -qq

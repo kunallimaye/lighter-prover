@@ -211,3 +211,16 @@ operators don't relearn the same lessons.
 - Consider spot-VM mode (`--provisioning-model=SPOT`) for ~60%
   savings. Requires monitor.sh to handle preemption gracefully (retry
   on new instance, possibly different zone).
+
+## Addendum: Org-policy relaxations (post-initial-scaffold)
+
+After the initial scaffolding (commit `b0c6bb5`), the user relaxed two project-level org policies on `kl-ai-workstation` to simplify the toolkit:
+
+| Constraint | Previous state | New state | Effect on toolkit |
+|---|---|---|---|
+| `constraints/compute.requireShieldedVm` | enforced | disabled | Dropped `--shielded-secure-boot --shielded-vtpm --shielded-integrity-monitoring` from `provision.sh` |
+| `constraints/compute.vmExternalIpAccess` | "Deny All" | "Allow All" | Dropped `--no-address` from `provision.sh`; dropped `Acquire::ForceIPv4` hack from `vm-startup.sh.tmpl` (apt now reaches mirrors directly over the VM's public IP, no Cloud NAT hop) |
+
+The custom VPC (`ai-workstation-ws-net`/`ai-workstation-ws-subnet`) remains the only VPC in the project — `constraints/compute.skipDefaultNetworkCreation` is a one-shot policy enforced at project-creation time and relaxing it now does not retroactively create a `default` VPC. Toolkit continues to pass `--network` and `--subnet` flags.
+
+If this toolkit is ever ported to a different GCP project where the org policies are still enforced, restore the dropped flags from git history (commit `b0c6bb5`).

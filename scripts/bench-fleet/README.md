@@ -132,11 +132,6 @@ Click the URL printed in the error message — it deep-links to the
 Typical lead time is minutes to hours for small bumps, days for large
 ones.
 
-### Build hangs on `apt-get update`
-The VPC's Cloud NAT is IPv4-only. The startup script writes
-`/etc/apt/apt.conf.d/99force-ipv4` **before** running `apt-get update`,
-which fixes this. If you fork the template, do NOT remove that line.
-
 ### VMs aren't being deleted after upload
 The orchestrator polls GCS every `FLEET_POLL_INTERVAL=60` seconds (env
 override). If your orchestrator process died, run
