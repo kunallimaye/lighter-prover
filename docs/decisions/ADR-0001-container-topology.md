@@ -167,3 +167,61 @@ resources go back into Terraform via a new ADR.
   everything in one GCP project. We keep the topology scaffolded but
   collapse all three roles to one project by default (see
   `config.toml.example`).
+
+## Revision 1 (2026-06-10): tag provenance fix
+
+- **Tracking issue**: [#15](https://github.com/kunallimaye/lighter-prover/issues/15)
+
+### What changed
+
+The original Phase 1 build (PR #13) treated `LIGHTER_REF` as a **label
+of intent**: the operator passed an upstream commit SHA via
+`--build-arg LIGHTER_REF=<sha>` and the image was tagged
+`:ref-<short-of-that-sha>`. The Containerfile then `COPY . .`'d the
+build context — i.e. *this* repo's working tree — into the builder
+stage. The label and the source disagreed: a build of this repo's
+`main` could still produce an image tagged `:ref-5bbb307`, lying about
+the bench code inside.
+
+The fix shifts `LIGHTER_REF` from "label of intent" to **label of
+provenance**:
+
+- `cicd/cloudbuild.yaml` derives `LIGHTER_REF` from Cloud Build's
+  built-in `$COMMIT_SHA` and tags the image `:ref-$SHORT_SHA`. The
+  `_LIGHTER_REF` / `_LIGHTER_REF_SHORT` user substitutions are gone.
+- `cicd/Containerfile` adds the OCI standard
+  `org.opencontainers.image.revision` and `image.source` labels so
+  any registry UI / `docker image inspect` consumer sees the SHA via
+  the canonical keys.
+- `scripts/container.sh::build` derives the same SHA from
+  `git rev-parse HEAD` for the local podman path and tags the image
+  both `:latest` and `:ref-<short>` so local and CI semantics match.
+- `scripts/cloud.sh::cloud_bench_build` passes `COMMIT_SHA` /
+  `SHORT_SHA` explicitly via `--substitutions` (manual
+  `gcloud builds submit` does not auto-populate Cloud Build built-ins
+  the way git triggers do).
+
+### Why "derive from build context" over "git clone inside"
+
+The alternative — adding `git clone <upstream>@<ref>` inside the
+Containerfile so the label and the source agree because the source IS
+fetched from `<ref>` — was considered and rejected:
+
+- Heavier: needs `git` in the builder stage and a fresh fetch on every
+  build (no Docker layer cache benefit because the SHA varies).
+- Slower: a clone of `elliottech/lighter-prover` adds ~30–60 s to every
+  build that would otherwise be a cached no-op.
+- Breaks offline / air-gapped builds.
+- Makes `COPY . .` actively confusing — why is there a build context
+  at all if the source comes from git?
+
+"This repo is the source of truth for our bench binary" is the
+honest framing. Cross-repo pinning to a literal upstream SHA belongs
+in a separate discussion if it's ever needed.
+
+### Consequence: the old `:ref-5bbb307` tag is gone
+
+Any operator who was pinning to `:ref-5bbb307` should now pin to a
+specific `:sha-<short>` instead. The `:ref-*` tag still exists but now
+equals `:sha-*` for any single build (we keep both for backward-compat
+with anyone scripting against `:ref-*`).

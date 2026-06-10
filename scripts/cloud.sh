@@ -618,9 +618,12 @@ cloud_recover() {
 # Cloud Run service — bench is invoked via Cloud Run Jobs on demand.
 #
 # Inputs (env overrides at make-invoke time):
-#   LIGHTER_REF        Upstream commit the bench binary is compiled
-#                      against (default: 5bbb307, see Containerfile).
 #   TARGET_CPU_NATIVE  Set "1" for non-portable image with -C target-cpu=native.
+#
+# Note: LIGHTER_REF is no longer an input. It's derived inside
+# cicd/cloudbuild.yaml from Cloud Build's built-in $COMMIT_SHA so the
+# value baked into the image truthfully matches the source COPY'd into
+# the builder stage. The same SHA also feeds the :ref-<short> image tag.
 #
 # Required cloud topology (from config.toml/.env):
 #   BUILD_PROJECT, BUILD_REGION, AR_REPO, BUILDER_SA_EMAIL.
@@ -630,23 +633,27 @@ cloud_bench_build() {
   require_cmd gcloud
   _require_topology
 
-  local lighter_ref="${LIGHTER_REF:-5bbb307dfb26276c48054f2c3ea9dcfe80d3678a}"
-  local lighter_ref_short="${lighter_ref:0:7}"
   local target_cpu_native="${TARGET_CPU_NATIVE:-0}"
+  local commit_sha
+  commit_sha="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo manual)"
   local short_sha
   short_sha="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo manual)"
   local image_name="${BUILD_REGION:-us-central1}-docker.pkg.dev/${BUILD_PROJECT}/${AR_REPO}/bench"
 
   log_info "  image:        ${image_name}"
-  log_info "  tags:         :latest :sha-${short_sha} :ref-${lighter_ref_short}"
-  log_info "  lighter ref:  ${lighter_ref}"
+  log_info "  tags:         :latest :sha-${short_sha} :ref-${short_sha}"
+  log_info "  commit:       ${commit_sha}"
   log_info "  native:       ${target_cpu_native}"
 
+  # `gcloud builds submit` from a local source directory does NOT
+  # auto-populate $COMMIT_SHA / $SHORT_SHA (those only fire on git
+  # triggers), so pass them explicitly via substitutions. The keys
+  # without underscore prefix override the built-in values.
   gcloud builds submit "${PROJECT_ROOT}" \
     --project="${BUILD_PROJECT}" \
     --service-account="projects/${BUILD_PROJECT}/serviceAccounts/${BUILDER_SA_EMAIL}" \
     --config="${PROJECT_ROOT}/cicd/cloudbuild.yaml" \
-    --substitutions="_IMAGE_NAME=${image_name},_LIGHTER_REF=${lighter_ref},_LIGHTER_REF_SHORT=${lighter_ref_short},_TARGET_CPU_NATIVE=${target_cpu_native},_SHORT_SHA=${short_sha}" \
+    --substitutions="_IMAGE_NAME=${image_name},_TARGET_CPU_NATIVE=${target_cpu_native},COMMIT_SHA=${commit_sha},SHORT_SHA=${short_sha}" \
     --quiet
 
   log_ok "Bench image built and pushed: ${image_name}:sha-${short_sha}"
