@@ -10,10 +10,12 @@ with throughput-benchmarking infrastructure layered on top.
   hard-coded constants.
 - **Containerized fan-out throughput benchmark** (#2, Phase 1) — one
   OCI image, two roles (worker / orchestrator), local and GCP runners.
-- **Pinned upstream ref** (`5bbb307`) for `bench_test.json`
-  compatibility. Upstream `main` panics on the bundled fixture; see
-  [upstream #9](https://github.com/elliottech/lighter-prover/issues/9).
-  Override with `LIGHTER_REF=<sha>` once upstream lands the fix.
+- **Truthful image provenance** — every container build derives its
+  `LIGHTER_REF` / `GIT_SHA` env var, OCI `image.revision` label, and
+  `:ref-<short>` tag from the actual git SHA of the source tree baked
+  in (Cloud Build uses `$COMMIT_SHA`; local podman uses
+  `git rev-parse HEAD`). See
+  [ADR-0001 §Revision 1](docs/decisions/ADR-0001-container-topology.md#revision-1-2026-06-10-tag-provenance-fix).
 
 Phase 2 (#3) will replace the embarrassingly-parallel fan-out with true
 work-sharding across layer-1 chunks. Phase 1 ships fan-out only.
@@ -62,8 +64,12 @@ TOTAL BlockTxCircuit::prove time                          4  245.100s   244.900s
 | `TX_LIMIT`         | `480`                                         | Tx cap; bench aligns down to multiple of `TX_PER_PROOF` |
 | `N`                | `1`                                           | Worker count for fan-out targets                        |
 | `BENCH_REPEAT`     | `1`                                           | Times each worker repeats the bench pipeline            |
-| `LIGHTER_REF`      | `5bbb307dfb26276c48054f2c3ea9dcfe80d3678a`    | Upstream commit the image is built against              |
 | `TARGET_CPU_NATIVE`| `0`                                           | `1` enables `-C target-cpu=native` (non-portable image) |
+
+The image's `LIGHTER_REF` / `GIT_SHA` / OCI `image.revision` label and
+the `:ref-<short>` tag are derived from `git rev-parse HEAD` (local) or
+`$COMMIT_SHA` (Cloud Build), not from a user-supplied knob — so the tag
+always names the source actually baked in.
 
 Example: 8-worker fan-out at chunk size 2 with native-CPU build:
 

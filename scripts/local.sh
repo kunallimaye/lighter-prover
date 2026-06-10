@@ -43,26 +43,22 @@ test() {
   # Host smoke test: cargo build + bench --help only.
   #
   # We deliberately do NOT run the bench end-to-end on the host. The
-  # bundled bench_test.json is schema-compatible with upstream commit
-  # 5bbb307 only (per upstream elliottech/lighter-prover#9); building
-  # against this fork's HEAD and then trying to prove against the
-  # fixture panics with "index out of bounds" in circuit deserializers.
-  # The container path (make container-test) sidesteps this by building
-  # against LIGHTER_REF=5bbb307.
+  # bundled bench_test.json is schema-compatible with the source tree
+  # vendored in this fork; running it against an arbitrary upstream
+  # toolchain combo panics in circuit deserializers. The runtime smoke
+  # test (which actually exercises plonky2 end-to-end) lives at
+  # `make container-test` and runs against the in-repo source.
   #
   # The host smoke test therefore verifies:
   #   1. cargo build succeeds at HEAD (catches Rust syntax/build regressions).
   #   2. The bench binary's CLI surface is intact (--help works).
-  # The runtime smoke test (which actually exercises plonky2) lives at
-  # `make container-test`.
   log_info "Running host smoke test (build + --help)..."
   build
   if ! "${PROJECT_ROOT}/target/release/bench" --help >/dev/null 2>&1; then
     die "bench --help failed; CLI surface is broken."
   fi
   log_ok "Host smoke test passed (bench builds + CLI works)"
-  log_info "Note: for an end-to-end runtime test, run 'make container-test'"
-  log_info "      (the bundled bench_test.json requires building against upstream 5bbb307)."
+  log_info "Note: for an end-to-end runtime test, run 'make container-test'."
 }
 
 bench() {
