@@ -43,7 +43,7 @@ config.toml
 
 # Go and node artifacts the upstream repo doesn't actually have but
 # which we exclude pre-emptively to keep the context small.
-bin/
+/bin/
 dist/
 node_modules/
 vendor/

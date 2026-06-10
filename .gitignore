@@ -38,5 +38,5 @@ logs/
 # Detached orchestration state (heartbeat/checkpoint/recovery files, #140)
 .orchestration/
 # Go
-bin/
+/bin/
 /vendor/
