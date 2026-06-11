@@ -125,6 +125,22 @@ struct Args {
     #[arg(long, value_enum, default_value_t = LeafOrder::Forward)]
     leaf_order: LeafOrder,
 
+    /// Issue #73 (cell slice B): intra-cell parallel tree scheduler.
+    /// `M` worker threads share the resident `CircuitData` (Arc) and prove
+    /// leaves/merges concurrently. Default `1` keeps the historical
+    /// sequential driver byte-for-byte (zero regression). M > 1 builds a
+    /// dedicated rayon thread pool of M workers; leaves and per-level
+    /// merges are dispatched into that pool, realizing the critical-path
+    /// latency PR #69's sequential bench only reports. Tree-fold only.
+    ///
+    /// Open question (issue #73, ADR-0003 §D1): plonky2 already saturates
+    /// all cores per proof via the global rayon pool, so M concurrent
+    /// proves contend for cores. The sweep M ∈ {1,2,4,8,16} measures the
+    /// real M / wall-clock curve; the `l2_tree_schedule` event in the
+    /// JSONL stream is the headline.
+    #[arg(long, default_value_t = 1)]
+    l2_workers: usize,
+
     /// Issue #78: run the 8-way L5 (`CyclicRecursionCircuit`) segment
     /// scheduler. Synthesizes a `--blocks` continuation-consistent block
     /// sequence from `bench_test.json`, splits it into `--segments`
@@ -196,6 +212,27 @@ enum L5FoldMode {
     Serial,
     Tree,
 }
+
+/// Issue #73: a tree-fold node = (proof, is_merge). `is_merge` selects
+/// the conditional-VK verifier slot in `BlockTxChainMergeCircuit`
+/// (leaf VK if false, merge VK if true).
+type TreeNode = (ProofWithPublicInputs<F, C, D>, bool);
+
+/// Issue #73: a single merge pair at one tree level. `None` on the
+/// right child marks an odd-count carry-up: the left child is promoted
+/// to the next level unchanged.
+type MergePair = (TreeNode, Option<TreeNode>);
+
+/// Issue #73: result of attempting one merge pair. `Some(wall_ms)`
+/// when a merge actually fired; `None` for an odd carry-up (no merge
+/// circuit was run, so no per-node timing is recorded).
+type PairResult = (TreeNode, Option<u64>);
+
+/// Issue #73: result of proving one leaf chain proof. Returned by
+/// `prove_leaf` and collected in deterministic order by Phase 2's
+/// parallel + serial paths. Tuple layout:
+/// `(index, leaf_proof, base_proof_duration, full_leaf_duration)`.
+type LeafResult = (usize, ProofWithPublicInputs<F, C, D>, Duration, Duration);
 
 fn main() {
     init_logger_no_warn();
@@ -287,6 +324,18 @@ fn main() {
     }
     if args.leaf_order != LeafOrder::Forward && args.l2_fold != L2FoldMode::Tree {
         eprintln!("error: --leaf-order requires --l2-fold tree");
+        std::process::exit(2);
+    }
+    if args.l2_workers == 0 {
+        eprintln!("error: --l2-workers must be > 0");
+        std::process::exit(2);
+    }
+    if args.l2_workers > 1 && args.l2_fold != L2FoldMode::Tree {
+        eprintln!(
+            "error: --l2-workers > 1 requires --l2-fold tree (issue #73; the parallel scheduler \
+             dispatches leaves and merges across M worker threads, which only makes sense in the \
+             tree-fold driver)"
+        );
         std::process::exit(2);
     }
     if args.l5_fold == L5FoldMode::Tree && args.stream {
@@ -1273,113 +1322,181 @@ fn run_tree_fold(
     // (its seed is pre-derived), so the iteration order is a free
     // parameter. `--leaf-order reverse` exercises that independence by
     // proving N-1..0; both orders must produce identical results.
-    let mut leaf_prove_total = Duration::ZERO; // includes per-leaf base-proof generation
-    let mut base_proof_total = Duration::ZERO;
-    let mut leaves_by_index: Vec<Option<ProofWithPublicInputs<F, C, D>>> =
-        (0..chunks_count).map(|_| None).collect();
+    //
+    // Issue #73 (cell slice B): when `--l2-workers M` > 1, build a
+    // dedicated rayon ThreadPool of M workers and dispatch the leaves
+    // (and the per-level merges below) into it. CircuitData is shared
+    // by reference -- it is Send+Sync and immutable after build, so
+    // every worker sees the same resident proving key without copying.
+    // M = 1 takes the byte-for-byte serial path below to guarantee
+    // zero regression against the pre-#73 driver.
+    let workers = args.l2_workers;
+    let l2_pool: Option<rayon::ThreadPool> = if workers > 1 {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|i| format!("l2-worker-{i}"))
+            .build()
+            .unwrap_or_else(|err| {
+                panic!("issue #73: failed to build rayon pool of {workers} l2 workers: {err:?}")
+            });
+        info!(
+            "L2_WORKERS: built rayon pool of {} worker threads (CircuitData shared by reference; \
+             plonky2's global rayon pool still saturates cores per individual proof)",
+            workers
+        );
+        Some(pool)
+    } else {
+        info!("L2_WORKERS: workers=1 (serial driver; zero regression vs pre-#73)");
+        None
+    };
 
     let leaf_indices: Vec<usize> = match args.leaf_order {
         LeafOrder::Forward => (0..chunks_count).collect(),
         LeafOrder::Reverse => (0..chunks_count).rev().collect(),
     };
     info!(
-        "leaf prove order: {:?} ({} leaves)",
-        args.leaf_order, chunks_count
+        "leaf prove order: {:?} ({} leaves, {} workers)",
+        args.leaf_order, chunks_count, workers
     );
 
-    for &index in &leaf_indices {
-        let seed = seeds[index];
-        let tx_proof = &tx_proofs[index];
+    let leaves_phase_start = Instant::now();
+    let mut leaf_prove_total = Duration::ZERO; // includes per-leaf base-proof generation
+    let mut base_proof_total = Duration::ZERO;
+    let mut leaf_wall_per_node: Vec<u64> = vec![0; chunks_count];
+    let leaves: Vec<ProofWithPublicInputs<F, C, D>> = if let Some(pool) = l2_pool.as_ref() {
+        // Parallel leaf prove: dispatch into the dedicated pool. We collect
+        // (index, leaf_proof, base_dt, leaf_dt) so totals + assertions
+        // remain deterministic regardless of the worker that produced the
+        // proof. Per-node `layer_prove` events fire from the worker thread.
+        let results: Vec<LeafResult> = pool.install(|| {
+            leaf_indices
+                .par_iter()
+                .map(|&index| {
+                    prove_leaf(
+                        index,
+                        chunks_count,
+                        args.tx_per_proof,
+                        seeds[index],
+                        &tx_proofs[index],
+                        chain_target,
+                        chain_data,
+                        dummy_chain_circuit,
+                        dummy_proof,
+                        block.block_number,
+                        block.created_at,
+                        block_tx_witness_size,
+                        state_metadata,
+                    )
+                })
+                .collect()
+        });
+        let mut leaves_by_index: Vec<Option<ProofWithPublicInputs<F, C, D>>> =
+            (0..chunks_count).map(|_| None).collect();
+        for (index, proof, base_dt, leaf_dt) in results {
+            base_proof_total += base_dt;
+            leaf_prove_total += leaf_dt;
+            leaf_wall_per_node[index] = leaf_dt.as_millis() as u64;
+            leaves_by_index[index] = Some(proof);
+        }
+        leaves_by_index
+            .into_iter()
+            .enumerate()
+            .map(|(i, opt)| opt.unwrap_or_else(|| panic!("missing leaf proof at index {i}")))
+            .collect()
+    } else {
+        // Serial path: byte-for-byte the pre-#73 driver (workers=1).
+        let mut leaves_by_index: Vec<Option<ProofWithPublicInputs<F, C, D>>> =
+            (0..chunks_count).map(|_| None).collect();
+        for &index in &leaf_indices {
+            let (idx, proof, base_dt, leaf_dt) = prove_leaf(
+                index,
+                chunks_count,
+                args.tx_per_proof,
+                seeds[index],
+                &tx_proofs[index],
+                chain_target,
+                chain_data,
+                dummy_chain_circuit,
+                dummy_proof,
+                block.block_number,
+                block.created_at,
+                block_tx_witness_size,
+                state_metadata,
+            );
+            base_proof_total += base_dt;
+            leaf_prove_total += leaf_dt;
+            leaf_wall_per_node[idx] = leaf_dt.as_millis() as u64;
+            leaves_by_index[idx] = Some(proof);
+        }
+        leaves_by_index
+            .into_iter()
+            .enumerate()
+            .map(|(i, opt)| opt.unwrap_or_else(|| panic!("missing leaf proof at index {i}")))
+            .collect()
+    };
+    let leaves_wall = leaves_phase_start.elapsed();
 
-        let leaf_dt = Instant::now();
-        let l2_cpu_start = cpu_time_ms();
-        let base_t = Instant::now();
-        let base_proof = BlockTxChainCircuit::cyclic_base_proof(
-            chain_data,
-            dummy_chain_circuit,
-            block.block_number,
-            block.created_at,
-            seed.pre_state_root,
-            seed.pre_state_root,
-            seed.pre_validium_root,
-            seed.pre_delta_root,
-            block_tx_witness_size,
-            state_metadata,
+    // Transitional assertion (issue #72 plan step 3): the leaf's proven
+    // post-state must equal the NEXT chunk's witness-derived pre-state.
+    // The pre-#73 driver interleaved this with the serial prove loop;
+    // here we run it after Phase 2 so the parallel and serial code paths
+    // share the same invariant check. Equivalent because every leaf is
+    // proven before any seam is checked, and the witness derivation is
+    // pure (no proven-output dependency).
+    for index in 0..chunks_count.saturating_sub(1) {
+        let leaf_witness =
+            BlockTxChainWitness::from_public_inputs(&leaves[index].public_inputs, 1, 1);
+        assert_eq!(
+            leaf_witness.new_state_root,
+            seeds[index + 1].pre_state_root,
+            "leaf {index} proved new_state_root != witness-derived seed for chunk {} \
+             (seed-derivation drift; check bench::seed against \
+              BlockTxChainCircuit::perform_sanity_checks)",
+            index + 1
         );
-        base_proof_total += base_t.elapsed();
-        let leaf_proof = BlockTxChainCircuit::prove(
-            chain_target,
-            chain_data,
-            0, // every leaf is the first (and only) step of its own chain
-            &base_proof,
-            dummy_proof,
-            tx_proof,
-        )
-        .unwrap_or_else(|err| panic!("Leaf chain proof #{index} failed. err = {err:?}"));
-        let leaf_dt = leaf_dt.elapsed();
-        events::emit(&BenchEvent::LayerProve {
-            layer: 2,
-            name: "BlockTxChainCircuit",
-            chunk_idx: Some(index),
-            chunk_total: Some(chunks_count),
-            tx_per_proof: args.tx_per_proof,
-            wall_ms: leaf_dt.as_millis() as u64,
-            cpu_ms: diff_ms(l2_cpu_start, cpu_time_ms()),
+        assert_eq!(
+            leaf_witness.new_validium_root,
+            seeds[index + 1].pre_validium_root,
+            "leaf {index} proved new_validium_root != witness-derived seed for chunk {} \
+             (seed-derivation drift)",
+            index + 1
+        );
+        assert_eq!(
+            leaf_witness.new_account_delta_tree_root,
+            seeds[index + 1].pre_delta_root,
+            "leaf {index} proved new_account_delta_tree_root != witness-derived seed for \
+             chunk {} (seed-derivation drift)",
+            index + 1
+        );
+    }
+
+    // Per-level leaf summary (issue #73). The leaf "level" is `0` -- the
+    // base of the tree, populated entirely by `BlockTxChainCircuit::prove`
+    // (not the merge circuit). `level_wall_ms` is the start-to-end
+    // wall-clock of Phase 2, which equals the slowest leaf only when M
+    // saturates the leaf set; otherwise it reflects scheduling reality.
+    {
+        let (sum, mx, mn) = wall_stats(&leaf_wall_per_node);
+        events::emit(&BenchEvent::L2TreeLevel {
+            level: 0,
+            nodes: chunks_count as u64,
+            level_wall_ms: leaves_wall.as_millis() as u64,
+            node_wall_sum_ms: sum,
+            node_wall_max_ms: mx,
+            node_wall_min_ms: mn,
+            workers: workers as u32,
             rss_mb_peak: peak_rss_mb(),
             rss_mb_after: current_rss_mb(),
             ts: now_iso8601(),
         });
-        info!(
-            "tx chunk #{index}/{} leaf BlockTxChainCircuit::prove time (incl. base proof): {:?}\n",
-            chunks_count, leaf_dt
-        );
-        leaf_prove_total += leaf_dt;
-
-        // Transitional assertion (issue #72 plan step 3): the leaf's
-        // proven post-state must equal the NEXT chunk's witness-derived
-        // pre-state. This is the moral equivalent of the pre-#72 code's
-        // implicit "seed chunk k from leaf k-1's outputs" -- here we
-        // assert the equality after the fact, so the witness derivation
-        // is provably consistent with every leaf the circuit produces.
-        if index + 1 < chunks_count {
-            let leaf_witness =
-                BlockTxChainWitness::from_public_inputs(&leaf_proof.public_inputs, 1, 1);
-            assert_eq!(
-                leaf_witness.new_state_root,
-                seeds[index + 1].pre_state_root,
-                "leaf {index} proved new_state_root != witness-derived seed for chunk {} \
-                 (seed-derivation drift; check bench::seed against \
-                  BlockTxChainCircuit::perform_sanity_checks)",
-                index + 1
-            );
-            assert_eq!(
-                leaf_witness.new_validium_root,
-                seeds[index + 1].pre_validium_root,
-                "leaf {index} proved new_validium_root != witness-derived seed for chunk {} \
-                 (seed-derivation drift)",
-                index + 1
-            );
-            assert_eq!(
-                leaf_witness.new_account_delta_tree_root,
-                seeds[index + 1].pre_delta_root,
-                "leaf {index} proved new_account_delta_tree_root != witness-derived seed for \
-                 chunk {} (seed-derivation drift)",
-                index + 1
-            );
-        }
-
-        leaves_by_index[index] = Some(leaf_proof);
     }
 
-    // Reassemble leaves in chunk order for the pairwise merge -- the
-    // proving order above is decoupled from the tree topology.
-    let leaves: Vec<ProofWithPublicInputs<F, C, D>> = leaves_by_index
-        .into_iter()
-        .enumerate()
-        .map(|(i, opt)| opt.unwrap_or_else(|| panic!("missing leaf proof at index {i}")))
-        .collect();
-
     // ---- Pairwise merge up the tree. Each entry carries (proof, is_merge).
+    // Issue #73: parallelize each level across the M-worker pool. Odd
+    // proofs at any level still carry up unchanged (the merge circuit
+    // accepts leaf and merge children in any mix). Critical path remains
+    // depth × longest-per-level merge.
+    let merges_phase_start = Instant::now();
     let mut merge_prove_total = Duration::ZERO;
     let mut merges = 0usize;
     let mut depth = 0usize;
@@ -1388,10 +1505,21 @@ fn run_tree_fold(
 
     while level.len() > 1 {
         depth += 1;
-        let mut next = Vec::with_capacity(level.len() / 2 + 1);
+        let level_start = Instant::now();
+        let mut pairs: Vec<MergePair> = Vec::with_capacity(level.len() / 2 + 1);
         let mut iter = level.into_iter();
         while let Some(left) = iter.next() {
             match iter.next() {
+                Some(right) => pairs.push((left, Some(right))),
+                None => pairs.push((left, None)),
+            }
+        }
+
+        // Stable index per pair within the level for event identity.
+        let pair_count = pairs.len();
+        let prove_pair = |i: usize, pair: MergePair| -> PairResult {
+            let (left, right_opt) = pair;
+            match right_opt {
                 Some(right) => {
                     let merge_dt = Instant::now();
                     let merge_cpu_start = cpu_time_ms();
@@ -1404,37 +1532,85 @@ fn run_tree_fold(
                         right.1,
                     )
                     .unwrap_or_else(|err| {
-                        panic!("Merge #{merges} (level {depth}) failed. err = {err:?}")
+                        panic!("Merge pair #{i} (level {depth}) failed. err = {err:?}")
                     });
                     let merge_dt = merge_dt.elapsed();
+                    let wall_ms = merge_dt.as_millis() as u64;
                     events::emit(&BenchEvent::LayerProve {
                         layer: 2,
                         name: "BlockTxChainMergeCircuit",
-                        chunk_idx: Some(merges),
-                        chunk_total: Some(chunks_count.saturating_sub(1)),
+                        chunk_idx: Some(i),
+                        chunk_total: Some(pair_count),
                         tx_per_proof: args.tx_per_proof,
-                        wall_ms: merge_dt.as_millis() as u64,
+                        wall_ms,
                         cpu_ms: diff_ms(merge_cpu_start, cpu_time_ms()),
                         rss_mb_peak: peak_rss_mb(),
                         rss_mb_after: current_rss_mb(),
                         ts: now_iso8601(),
                     });
                     info!(
-                        "merge #{merges} (level {depth}) BlockTxChainMergeCircuit::prove time: {:?}",
+                        "merge pair #{i}/{pair_count} (level {depth}) \
+                         BlockTxChainMergeCircuit::prove time: {:?}",
                         merge_dt
                     );
-                    merge_prove_total += merge_dt;
-                    merges += 1;
-                    next.push((proof, true));
+                    ((proof, true), Some(wall_ms))
                 }
                 None => {
-                    info!("level {depth}: odd proof carried up to the next level");
-                    next.push(left);
+                    info!(
+                        "level {depth}: odd proof at pair #{i}/{pair_count} \
+                         carried up to the next level"
+                    );
+                    (left, None)
                 }
             }
+        };
+
+        let level_results: Vec<PairResult> = if let Some(pool) = l2_pool.as_ref() {
+            pool.install(|| {
+                pairs
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(i, p)| prove_pair(i, p))
+                    .collect()
+            })
+        } else {
+            pairs
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| prove_pair(i, p))
+                .collect()
+        };
+
+        let mut node_walls: Vec<u64> = Vec::with_capacity(level_results.len());
+        let mut next: Vec<(ProofWithPublicInputs<F, C, D>, bool)> =
+            Vec::with_capacity(level_results.len());
+        for (node, opt_wall) in level_results {
+            if let Some(w) = opt_wall {
+                merges += 1;
+                merge_prove_total += Duration::from_millis(w);
+                node_walls.push(w);
+            }
+            next.push(node);
+        }
+        let level_wall = level_start.elapsed();
+        if !node_walls.is_empty() {
+            let (sum, mx, mn) = wall_stats(&node_walls);
+            events::emit(&BenchEvent::L2TreeLevel {
+                level: depth as u32,
+                nodes: node_walls.len() as u64,
+                level_wall_ms: level_wall.as_millis() as u64,
+                node_wall_sum_ms: sum,
+                node_wall_max_ms: mx,
+                node_wall_min_ms: mn,
+                workers: workers as u32,
+                rss_mb_peak: peak_rss_mb(),
+                rss_mb_after: current_rss_mb(),
+                ts: now_iso8601(),
+            });
         }
         level = next;
     }
+    let merges_wall = merges_phase_start.elapsed();
     let (final_proof, final_is_merge) = level.pop().expect("tree fold produced no final proof");
 
     // ---- Reporting (existing TOTAL/AVERAGE stdout idiom + TREEFOLD line).
@@ -1481,6 +1657,44 @@ fn run_tree_fold(
         critical_path,
         leaf_prove_total + merge_prove_total,
     );
+
+    // Issue #73: scheduler-level summary. Reports the realized parallel
+    // wall-clock (Phase 2 + Phase 3) alongside the reported
+    // critical_path so the sweep can tabulate the M / wall-clock curve
+    // directly from the JSONL stream.
+    let realized_wall = leaves_wall + merges_wall;
+    let leaf_avg = if chunks_count > 0 {
+        leaf_prove_total / chunks_count as u32
+    } else {
+        Duration::ZERO
+    };
+    info!(
+        "L2_SCHEDULE workers={} leaves={} depth={} merges={} leaves_wall={:?} \
+         merges_wall={:?} realized_wall={:?} critical_path={:?} (depth x avg merge)",
+        workers,
+        chunks_count,
+        depth,
+        merges,
+        leaves_wall,
+        merges_wall,
+        realized_wall,
+        critical_path,
+    );
+    events::emit(&BenchEvent::L2TreeSchedule {
+        workers: workers as u32,
+        leaves: chunks_count as u64,
+        depth: depth as u32,
+        merges: merges as u64,
+        leaves_wall_ms: leaves_wall.as_millis() as u64,
+        merges_wall_ms: merges_wall.as_millis() as u64,
+        realized_wall_ms: realized_wall.as_millis() as u64,
+        critical_path_ms: critical_path.as_millis() as u64,
+        leaf_avg_ms: leaf_avg.as_millis() as u64,
+        merge_avg_ms: merge_avg.as_millis() as u64,
+        rss_mb_peak: peak_rss_mb(),
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
 
     // ---- A/B: serial fold over the SAME L1 proofs; final PIs must match.
     if args.ab_check {
@@ -1580,6 +1794,88 @@ fn run_tree_fold(
         peak_rss_mb: peak_rss_mb(),
         ts: now_iso8601(),
     });
+}
+
+/// Issue #73: prove one LEAF chain proof (= 1-chunk chain: base proof seeded
+/// at the chunk's pre-state + one chain step at tx_index = 0). Pulled out
+/// of `run_tree_fold`'s Phase 2 so the same body serves both the M=1 serial
+/// path and the M>1 parallel path (rayon `par_iter`). Per-node `layer_prove`
+/// events fire from the calling worker thread.
+///
+/// Returns `(index, leaf_proof, base_proof_duration, full_leaf_duration)`.
+/// `full_leaf_duration` includes the base-proof generation cost (matching the
+/// pre-#73 driver's `leaf_dt` accounting).
+#[allow(clippy::too_many_arguments)]
+fn prove_leaf(
+    index: usize,
+    chunks_count: usize,
+    tx_per_proof: usize,
+    seed: ChunkSeed,
+    tx_proof: &ProofWithPublicInputs<F, C, D>,
+    chain_target: &BlockTxChainTarget,
+    chain_data: &CircuitData<F, C, D>,
+    dummy_chain_circuit: &CircuitData<F, C, D>,
+    dummy_proof: &ProofWithPublicInputs<F, C, D>,
+    block_number: u64,
+    block_created_at: i64,
+    block_tx_witness_size: usize,
+    state_metadata: &StateMetadata,
+) -> LeafResult {
+    let leaf_dt = Instant::now();
+    let l2_cpu_start = cpu_time_ms();
+    let base_t = Instant::now();
+    let base_proof = BlockTxChainCircuit::cyclic_base_proof(
+        chain_data,
+        dummy_chain_circuit,
+        block_number,
+        block_created_at,
+        seed.pre_state_root,
+        seed.pre_state_root,
+        seed.pre_validium_root,
+        seed.pre_delta_root,
+        block_tx_witness_size,
+        state_metadata,
+    );
+    let base_dt = base_t.elapsed();
+    let leaf_proof = BlockTxChainCircuit::prove(
+        chain_target,
+        chain_data,
+        0, // every leaf is the first (and only) step of its own chain
+        &base_proof,
+        dummy_proof,
+        tx_proof,
+    )
+    .unwrap_or_else(|err| panic!("Leaf chain proof #{index} failed. err = {err:?}"));
+    let leaf_dt = leaf_dt.elapsed();
+    events::emit(&BenchEvent::LayerProve {
+        layer: 2,
+        name: "BlockTxChainCircuit",
+        chunk_idx: Some(index),
+        chunk_total: Some(chunks_count),
+        tx_per_proof,
+        wall_ms: leaf_dt.as_millis() as u64,
+        cpu_ms: diff_ms(l2_cpu_start, cpu_time_ms()),
+        rss_mb_peak: peak_rss_mb(),
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
+    info!(
+        "tx chunk #{index}/{} leaf BlockTxChainCircuit::prove time (incl. base proof): {:?}",
+        chunks_count, leaf_dt
+    );
+    (index, leaf_proof, base_dt, leaf_dt)
+}
+
+/// Issue #73: compute `(sum, max, min)` over a slice of per-node wall_ms
+/// for the `L2TreeLevel` event. Returns `(0, 0, 0)` for an empty input.
+fn wall_stats(walls: &[u64]) -> (u64, u64, u64) {
+    if walls.is_empty() {
+        return (0, 0, 0);
+    }
+    let sum: u64 = walls.iter().sum();
+    let mx = walls.iter().copied().max().unwrap_or(0);
+    let mn = walls.iter().copied().min().unwrap_or(0);
+    (sum, mx, mn)
 }
 
 /// Issue #67 acceptance: define+build L4 (`BlockCircuit`) against the

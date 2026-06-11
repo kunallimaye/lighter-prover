@@ -133,6 +133,68 @@ pub enum BenchEvent<'a> {
         rss_mb_peak: Option<u64>,
         ts: String,
     },
+    /// Intra-cell parallel L2 tree scheduler per-level summary (issue #73).
+    /// Emitted once per tree level (including the leaf level, `level = 0`)
+    /// when running with `--l2-workers M`. Carries the per-level wall-clock
+    /// stats that establish how close M workers get to the depth × longest-
+    /// merge critical-path floor that PR #69's sequential bench only reports.
+    L2TreeLevel {
+        /// `0` = leaf chain proofs; `1..` = merge levels (1 is closest to
+        /// leaves, depth is the root merge).
+        level: u32,
+        /// Number of proofs at this level (= number of nodes proven here).
+        nodes: u64,
+        /// Wall-clock from level start to level end (= longest in-flight
+        /// proof at this level when M workers are saturated; bounded above
+        /// by the level's per-node max).
+        level_wall_ms: u64,
+        /// Sum of per-node wall_ms at this level (= total CPU-bound work
+        /// the level dispatched, ignoring contention).
+        node_wall_sum_ms: u64,
+        /// Maximum per-node wall_ms at this level.
+        node_wall_max_ms: u64,
+        /// Minimum per-node wall_ms at this level.
+        node_wall_min_ms: u64,
+        /// Number of worker threads installed for this run
+        /// (`--l2-workers`).
+        workers: u32,
+        rss_mb_peak: Option<u64>,
+        rss_mb_after: Option<u64>,
+        ts: String,
+    },
+    /// Intra-cell parallel L2 tree-scheduler run summary (issue #73). Emitted
+    /// once at the end of a `--l2-workers M` tree-fold. Reports the realized
+    /// wall-clock latency alongside the reported `critical_path = depth × avg
+    /// merge` so the M / wall-clock curve can be tabulated directly from the
+    /// JSONL stream without re-parsing the per-level lines.
+    L2TreeSchedule {
+        /// `--l2-workers` value.
+        workers: u32,
+        /// Leaf count (= number of L1 chunks).
+        leaves: u64,
+        /// Tree depth (= number of merge levels; 0 for single-leaf tree).
+        depth: u32,
+        /// Total merge nodes across all levels (= leaves - 1 for a
+        /// balanced tree; less when odd carries occur).
+        merges: u64,
+        /// Wall-clock for Phase 2 (leaf chain proofs) start-to-end.
+        leaves_wall_ms: u64,
+        /// Wall-clock for Phase 3 (all merge levels) start-to-end.
+        merges_wall_ms: u64,
+        /// Total realized wall-clock for the parallel tree fold
+        /// (leaves + merges). This is the headline the sweep records
+        /// against the reported critical_path.
+        realized_wall_ms: u64,
+        /// `depth × avg_merge` from the existing TREEFOLD line.
+        critical_path_ms: u64,
+        /// Per-leaf average wall_ms (across all leaves).
+        leaf_avg_ms: u64,
+        /// Per-merge average wall_ms (across all merge levels).
+        merge_avg_ms: u64,
+        rss_mb_peak: Option<u64>,
+        rss_mb_after: Option<u64>,
+        ts: String,
+    },
 }
 
 /// Serialize an event as `BENCH_EVENT <json>\n` and write+flush it to
@@ -356,5 +418,51 @@ mod tests {
         // On Linux these should return Some; elsewhere None. Either is fine.
         let _ = peak_rss_mb();
         let _ = current_rss_mb();
+    }
+
+    #[test]
+    fn l2_tree_level_serialization() {
+        let level = BenchEvent::L2TreeLevel {
+            level: 0,
+            nodes: 8,
+            level_wall_ms: 512,
+            node_wall_sum_ms: 4000,
+            node_wall_max_ms: 510,
+            node_wall_min_ms: 495,
+            workers: 4,
+            rss_mb_peak: Some(2048),
+            rss_mb_after: Some(2000),
+            ts: "2026-06-11T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&level).unwrap();
+        assert!(json.contains("\"event\":\"l2_tree_level\""));
+        assert!(json.contains("\"level\":0"));
+        assert!(json.contains("\"nodes\":8"));
+        assert!(json.contains("\"workers\":4"));
+        assert!(json.contains("\"level_wall_ms\":512"));
+    }
+
+    #[test]
+    fn l2_tree_schedule_serialization() {
+        let sched = BenchEvent::L2TreeSchedule {
+            workers: 4,
+            leaves: 8,
+            depth: 3,
+            merges: 7,
+            leaves_wall_ms: 600,
+            merges_wall_ms: 900,
+            realized_wall_ms: 1500,
+            critical_path_ms: 1417,
+            leaf_avg_ms: 500,
+            merge_avg_ms: 472,
+            rss_mb_peak: Some(2048),
+            rss_mb_after: Some(2000),
+            ts: "2026-06-11T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&sched).unwrap();
+        assert!(json.contains("\"event\":\"l2_tree_schedule\""));
+        assert!(json.contains("\"workers\":4"));
+        assert!(json.contains("\"realized_wall_ms\":1500"));
+        assert!(json.contains("\"critical_path_ms\":1417"));
     }
 }
