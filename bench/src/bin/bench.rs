@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bench::events::{self, BenchEvent, cpu_time_ms, current_rss_mb, now_iso8601, peak_rss_mb};
+use bench::seed::{ChunkSeed, seed_from_state};
 use circuit::block::{Block, BlockWitness};
 use circuit::block_constraints::{BlockCircuit, Circuit as _};
 use circuit::block_pre_execution::{BlockPreExec, BlockPreExecWitness};
@@ -21,15 +22,20 @@ use circuit::block_tx_constraints::{BlockTxCircuit, BlockTxTarget, Circuit as _}
 use circuit::builder::custom::cyclic_base_proof;
 use circuit::keccak::helpers::keccak;
 use circuit::tx;
+use circuit::types::asset::Asset;
 use circuit::types::config::{C, CIRCUIT_CONFIG, D, F};
 use circuit::types::constants::*;
+use circuit::types::market_details::MarketDetails;
+use circuit::types::register::RegisterStack;
 use circuit::types::state_metadata::{STATE_METADATA_SIZE, StateMetadata};
+use circuit::types::system_config::SystemConfig;
 use circuit::types::{account_delta, state_metadata};
 use clap::{Parser, ValueEnum};
 use env_logger::{Builder, DEFAULT_FILTER_ENV, Env, try_init_from_env};
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, info};
 use plonky2::field::goldilocks_field::GoldilocksField;
 use plonky2::field::types::PrimeField64;
+use plonky2::hash::hash_types::HashOut;
 use plonky2::plonk::circuit_data::CircuitData;
 use plonky2::plonk::proof::{CompressedProofWithPublicInputs, ProofWithPublicInputs};
 use plonky2::recursion::dummy_circuit::{self, dummy_circuit};
@@ -105,6 +111,14 @@ struct Args {
     /// Batch mode only.
     #[arg(long, default_value_t = false)]
     l4_check: bool,
+
+    /// Issue #72 (cell slice A): order in which the tree-fold driver
+    /// proves LEAF chain proofs. `forward` (default) preserves today's
+    /// 0..N order; `reverse` proves N-1..0 to demonstrate that the
+    /// sequential seeding seam has been removed (leaves no longer depend
+    /// on the previous leaf's proven outputs). Tree-fold only.
+    #[arg(long, value_enum, default_value_t = LeafOrder::Forward)]
+    leaf_order: LeafOrder,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -112,6 +126,16 @@ struct Args {
 enum L2FoldMode {
     Serial,
     Tree,
+}
+
+/// Issue #72: tree-fold leaf-proving order. The default `Forward` order
+/// keeps the historical 0..N traversal; `Reverse` exists purely as an
+/// acceptance check that the witness-native seeding has decoupled leaf k
+/// from leaf k-1's proven outputs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum LeafOrder {
+    Forward,
+    Reverse,
 }
 
 fn main() {
@@ -177,6 +201,10 @@ fn main() {
     }
     if args.ab_check && args.l2_fold != L2FoldMode::Tree {
         eprintln!("error: --ab-check requires --l2-fold tree");
+        std::process::exit(2);
+    }
+    if args.leaf_order != LeafOrder::Forward && args.l2_fold != L2FoldMode::Tree {
+        eprintln!("error: --leaf-order requires --l2-fold tree");
         std::process::exit(2);
     }
 
@@ -864,6 +892,22 @@ fn run_stream(args: &Args) {
     // returning from main terminates the process regardless. Exit 0.
 }
 
+/// Issue #72: per-chunk witness snapshot captured BEFORE the chunk's
+/// L1 is proven. This is the only input the witness-native seed
+/// derivation in `bench::seed` needs -- it carries every "old" field
+/// the in-circuit `BlockTxChainCircuit::perform_sanity_checks` hashes
+/// to recover the chunk's pre-state state + validium roots.
+struct ChunkPreState {
+    register_stack: RegisterStack,
+    all_assets: [Asset; ASSET_LIST_SIZE],
+    all_market_details: [MarketDetails; POSITION_LIST_SIZE],
+    system_config: SystemConfig,
+    account_tree_root: HashOut<F>,
+    account_pub_data_tree_root: HashOut<F>,
+    account_delta_tree_root: HashOut<F>,
+    market_tree_root: HashOut<F>,
+}
+
 /// Issue #67: tree-fold L2 driver (batch mode).
 ///
 /// Per chunk: prove the L1 chunk proof, then a LEAF chain proof (a 1-chunk
@@ -874,11 +918,14 @@ fn run_stream(args: &Args) {
 /// mix). Sequential execution throughout -- parallel scheduling is the cell
 /// implementation's job (#3).
 ///
-/// Per-leaf base-proof seeding: chunk k's base proof needs the state and
-/// validium roots BEFORE chunk k. Chunk 0 takes them from L3 (pre-exec);
-/// chunk k > 0 takes them from leaf k-1's proven outputs (the driver is
-/// sequential, so they are always available). A parallel driver would
-/// compute them natively from witness data instead.
+/// Per-leaf base-proof seeding (issue #72, cell slice A): chunk k's base
+/// proof needs the state and validium roots BEFORE chunk k. These are now
+/// derived natively from witness data (`bench::seed`) for every chunk in
+/// one pre-pass, so no leaf depends on any other leaf's proven outputs.
+/// L1 chunks are still proven sequentially in this slice (their post-state
+/// rolls forward via `BlockTxWitness::from_public_inputs`, which is the
+/// same data plane used to build the seed table); L1 parallelism is a
+/// separate slice tracked under the parallel-leaf-proving work.
 #[allow(clippy::too_many_arguments)]
 fn run_tree_fold(
     args: &Args,
@@ -934,7 +981,14 @@ fn run_tree_fold(
         "BlockTxChainMergeCircuit common data matches the leaf chain circuit's (fixed point closed)"
     );
 
-    // ---- Per-chunk: L1 proof + LEAF chain proof (rolling state, as batch).
+    // ---- Phase 1: prove all L1 chunks sequentially, rolling chunk-input
+    // state forward via the L1 proofs' public inputs. For each chunk we
+    // also snapshot the pre-chunk witness state -- that snapshot is the
+    // ONLY data the witness-native seed derivation in Phase 1.5 needs.
+    // Issue #72: leaves no longer consume the previous leaf's PROVEN
+    // outputs, so L1 is the only thing still threaded sequentially here
+    // (a separate slice will parallelise L1; this slice only severs the
+    // leaf-to-leaf seam, which is what blocks parallel leaf proving).
     let mut all_assets = block.all_assets.clone();
     let mut all_market_details = pre_exec_witness.new_market_details.clone();
     let mut system_config = block.old_system_config;
@@ -945,19 +999,28 @@ fn run_tree_fold(
     let mut market_tree_root = block.old_market_tree_root;
     let created_at = block.created_at;
 
-    let mut pre_state_root = pre_exec_witness.new_state_root;
-    let mut pre_validium_root = pre_exec_witness.new_validium_root;
-
     let mut tx_prove_total = Duration::ZERO;
-    let mut leaf_prove_total = Duration::ZERO; // includes per-leaf base-proof generation
-    let mut base_proof_total = Duration::ZERO;
     let mut tx_proofs: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(chunks_count);
-    let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(chunks_count);
+    // Per-chunk pre-state snapshots, captured BEFORE the chunk's L1 is
+    // proven. Each snapshot drives one `ChunkSeed` in Phase 1.5; chunk
+    // 0's snapshot matches L3's post-state by construction.
+    let mut pre_states: Vec<ChunkPreState> = Vec::with_capacity(chunks_count);
 
     for (index, tx) in block.txs[..effective_limit]
         .chunks(args.tx_per_proof)
         .enumerate()
     {
+        pre_states.push(ChunkPreState {
+            register_stack,
+            all_assets: all_assets.clone(),
+            all_market_details: all_market_details.clone(),
+            system_config,
+            account_tree_root,
+            account_pub_data_tree_root,
+            account_delta_tree_root,
+            market_tree_root,
+        });
+
         let block_tx = BlockTx {
             created_at,
             old_system_config: system_config,
@@ -970,7 +1033,6 @@ fn run_tree_fold(
             old_market_tree_root: market_tree_root,
             txs: tx.to_vec(),
         };
-        let pre_delta_root = account_delta_tree_root;
 
         let tx_dt = Instant::now();
         let l1_cpu_start = cpu_time_ms();
@@ -1005,7 +1067,80 @@ fn run_tree_fold(
         account_delta_tree_root = tx_witness.new_account_delta_tree_root;
         market_tree_root = tx_witness.new_market_tree_root;
 
-        // LEAF chain proof: 1-chunk chain seeded at this chunk's pre-state.
+        tx_proofs.push(tx_proof);
+    }
+
+    // ---- Phase 1.5: derive every chunk's base-proof seed natively from
+    // the pre-state snapshots. No proven outputs feed this -- seeds are
+    // a pure function of witness data, the L3 state-metadata constants,
+    // and the chunk's `old_*` ledger slice.
+    let seed_t = Instant::now();
+    let seeds: Vec<ChunkSeed> = pre_states
+        .iter()
+        .map(|s| {
+            seed_from_state(
+                &s.register_stack,
+                s.account_tree_root,
+                s.account_pub_data_tree_root,
+                s.market_tree_root,
+                s.account_delta_tree_root,
+                &s.all_assets,
+                &s.all_market_details,
+                state_metadata,
+                &s.system_config,
+            )
+        })
+        .collect();
+    info!(
+        "witness-native seed derivation: {} seeds in {:?}",
+        seeds.len(),
+        seed_t.elapsed()
+    );
+
+    // Transitional assertion (issue #72 plan step 3): chunk 0's seed
+    // must match the L3 (pre-exec) outputs. This is the same equality
+    // the pre-#72 driver relied on implicitly when chunk 0 took its
+    // seed from `pre_exec_witness.{new_state_root, new_validium_root}`,
+    // promoted here to an explicit always-on guard so a future drift
+    // in `compute_state_and_validium_roots` (or its `*_hash_parameters`
+    // mirrors) is caught immediately instead of corrupting every leaf.
+    assert_eq!(
+        seeds[0].pre_state_root, pre_exec_witness.new_state_root,
+        "witness-derived seed for chunk 0 disagrees with L3 new_state_root \
+         (bench::seed mirror has drifted from BlockTxChainCircuit::perform_sanity_checks)"
+    );
+    assert_eq!(
+        seeds[0].pre_validium_root, pre_exec_witness.new_validium_root,
+        "witness-derived seed for chunk 0 disagrees with L3 new_validium_root \
+         (bench::seed mirror has drifted from BlockTxChainCircuit::perform_sanity_checks)"
+    );
+    assert_eq!(
+        seeds[0].pre_delta_root, block.old_account_delta_tree_root,
+        "witness-derived seed for chunk 0 disagrees with the block's old_account_delta_tree_root"
+    );
+
+    // ---- Phase 2: prove LEAF chain proofs. Each leaf is independent
+    // (its seed is pre-derived), so the iteration order is a free
+    // parameter. `--leaf-order reverse` exercises that independence by
+    // proving N-1..0; both orders must produce identical results.
+    let mut leaf_prove_total = Duration::ZERO; // includes per-leaf base-proof generation
+    let mut base_proof_total = Duration::ZERO;
+    let mut leaves_by_index: Vec<Option<ProofWithPublicInputs<F, C, D>>> =
+        (0..chunks_count).map(|_| None).collect();
+
+    let leaf_indices: Vec<usize> = match args.leaf_order {
+        LeafOrder::Forward => (0..chunks_count).collect(),
+        LeafOrder::Reverse => (0..chunks_count).rev().collect(),
+    };
+    info!(
+        "leaf prove order: {:?} ({} leaves)",
+        args.leaf_order, chunks_count
+    );
+
+    for &index in &leaf_indices {
+        let seed = seeds[index];
+        let tx_proof = &tx_proofs[index];
+
         let leaf_dt = Instant::now();
         let l2_cpu_start = cpu_time_ms();
         let base_t = Instant::now();
@@ -1014,10 +1149,10 @@ fn run_tree_fold(
             dummy_chain_circuit,
             block.block_number,
             block.created_at,
-            pre_state_root,
-            pre_state_root,
-            pre_validium_root,
-            pre_delta_root,
+            seed.pre_state_root,
+            seed.pre_state_root,
+            seed.pre_validium_root,
+            seed.pre_delta_root,
             block_tx_witness_size,
             state_metadata,
         );
@@ -1028,7 +1163,7 @@ fn run_tree_fold(
             0, // every leaf is the first (and only) step of its own chain
             &base_proof,
             dummy_proof,
-            &tx_proof,
+            tx_proof,
         )
         .unwrap_or_else(|err| panic!("Leaf chain proof #{index} failed. err = {err:?}"));
         let leaf_dt = leaf_dt.elapsed();
@@ -1050,15 +1185,49 @@ fn run_tree_fold(
         );
         leaf_prove_total += leaf_dt;
 
-        // The next chunk's base proof is seeded from this leaf's proven
-        // outputs (state + validium roots after this chunk).
-        let leaf_witness = BlockTxChainWitness::from_public_inputs(&leaf_proof.public_inputs, 1, 1);
-        pre_state_root = leaf_witness.new_state_root;
-        pre_validium_root = leaf_witness.new_validium_root;
+        // Transitional assertion (issue #72 plan step 3): the leaf's
+        // proven post-state must equal the NEXT chunk's witness-derived
+        // pre-state. This is the moral equivalent of the pre-#72 code's
+        // implicit "seed chunk k from leaf k-1's outputs" -- here we
+        // assert the equality after the fact, so the witness derivation
+        // is provably consistent with every leaf the circuit produces.
+        if index + 1 < chunks_count {
+            let leaf_witness =
+                BlockTxChainWitness::from_public_inputs(&leaf_proof.public_inputs, 1, 1);
+            assert_eq!(
+                leaf_witness.new_state_root,
+                seeds[index + 1].pre_state_root,
+                "leaf {index} proved new_state_root != witness-derived seed for chunk {} \
+                 (seed-derivation drift; check bench::seed against \
+                  BlockTxChainCircuit::perform_sanity_checks)",
+                index + 1
+            );
+            assert_eq!(
+                leaf_witness.new_validium_root,
+                seeds[index + 1].pre_validium_root,
+                "leaf {index} proved new_validium_root != witness-derived seed for chunk {} \
+                 (seed-derivation drift)",
+                index + 1
+            );
+            assert_eq!(
+                leaf_witness.new_account_delta_tree_root,
+                seeds[index + 1].pre_delta_root,
+                "leaf {index} proved new_account_delta_tree_root != witness-derived seed for \
+                 chunk {} (seed-derivation drift)",
+                index + 1
+            );
+        }
 
-        tx_proofs.push(tx_proof);
-        leaves.push(leaf_proof);
+        leaves_by_index[index] = Some(leaf_proof);
     }
+
+    // Reassemble leaves in chunk order for the pairwise merge -- the
+    // proving order above is decoupled from the tree topology.
+    let leaves: Vec<ProofWithPublicInputs<F, C, D>> = leaves_by_index
+        .into_iter()
+        .enumerate()
+        .map(|(i, opt)| opt.unwrap_or_else(|| panic!("missing leaf proof at index {i}")))
+        .collect();
 
     // ---- Pairwise merge up the tree. Each entry carries (proof, is_merge).
     let mut merge_prove_total = Duration::ZERO;
