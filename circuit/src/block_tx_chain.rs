@@ -105,6 +105,11 @@ where
     F: Field + Extendable<5> + RichField,
 {
     /// Parse public inputs from proof into BlockTxChainWitness
+    ///
+    /// Issue #67: the range-start `old_account_delta_tree_root` PI (4
+    /// elements) sits after the chain witness and state metadata sections,
+    /// so the offsets parsed here are unaffected. See
+    /// [`BlockTxChainWitnessTarget::from_public_inputs`] for the full layout.
     pub fn from_public_inputs(public_inputs: &[F], _: usize, _: usize) -> Self {
         let new_public_market_details_index = 18;
 
@@ -256,6 +261,15 @@ impl BlockTxChainWitnessTarget {
     /// Similar to [`BlockTxChainWitness::from_public_inputs`], parses proof target.
     /// Returns the number of public inputs.
     /// Assumes _on_chain_operations_limit and _priority_ops_limit are 1.
+    ///
+    /// Issue #67: a chain proof's full PI layout is
+    /// `[chain witness (the `total_pis_size` parsed here)] [state metadata (3)]
+    /// [range-start old_account_delta_tree_root (4)] [verifier data]`.
+    /// The range-start delta root added by #67 sits AFTER everything this
+    /// function parses, so all offsets here (shared with L4's
+    /// `BlockCircuit::handle_proofs`) are unaffected; consumers that need the
+    /// trailing sections index from the returned `total_pis_size`
+    /// (+`STATE_METADATA_SIZE` for the range-start root).
     pub fn from_public_inputs(
         pis: &[Target],
         _on_chain_operations_limit: usize,

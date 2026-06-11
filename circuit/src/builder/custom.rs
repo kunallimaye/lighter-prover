@@ -12,7 +12,9 @@ use log::warn;
 use plonky2::field::extension::Extendable;
 use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
-use plonky2::plonk::circuit_data::{CircuitData, CommonCircuitData, VerifierOnlyCircuitData};
+use plonky2::plonk::circuit_data::{
+    CircuitData, CommonCircuitData, VerifierCircuitTarget, VerifierOnlyCircuitData,
+};
 use plonky2::plonk::config::{AlgebraicHasher, GenericConfig};
 use plonky2::plonk::proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget};
 use plonky2::recursion::dummy_circuit::dummy_proof;
@@ -205,6 +207,76 @@ where
             common_data,
         )?;
         Ok(dummy_proof_with_pis_target)
+    }
+
+    /// Issue #67 (L2 tree-fold): verify a child proof that is either a LEAF
+    /// chain proof (against the constant `leaf_verifier_data`) or a proof of
+    /// THIS circuit's own shape (cyclic, against `self_verifier_data` -- the
+    /// verifier data registered in the public inputs), selected by
+    /// `is_cyclic`.
+    ///
+    /// This is the conditional-VK variant of plonky2's
+    /// `conditionally_verify_cyclic_proof`: the stock helper HARD-connects the
+    /// child's trailing VK public inputs to the circuit's own verifier data,
+    /// which forces every proof in the cycle to share one verification key
+    /// and would reject leaf children. Here the child's VK-PIs are connected
+    /// to the SELECTED verifier data instead, which
+    ///   (a) for cyclic (merge) children, pins them to the same cyclic VK --
+    ///       the standard cyclic-recursion trust chain -- and
+    ///   (b) for leaf children, performs the equivalent of
+    ///       `check_cyclic_proof_verifier_data` in-circuit against the
+    ///       constant leaf VK.
+    /// There is no dummy path: a tree-fold merge node always has two real
+    /// children (odd counts are handled by carrying the odd proof up a
+    /// level), so the fork's `dummy_circuit()` shape limitation is never hit.
+    ///
+    /// NOTE: unlike `conditionally_verify_cyclic_proof`, this function cannot
+    /// set the builder's `goal_common_data` (it is `pub(crate)` in the fork),
+    /// so the self-referential fixed-point shape is NOT checked at build
+    /// time. Callers MUST assert after building that the built
+    /// `CommonCircuitData` equals `common_data` (the bench driver asserts
+    /// `merge.common == leaf.common`).
+    pub fn verify_leaf_or_cyclic_proof<C: GenericConfig<D, F = F>>(
+        &mut self,
+        is_cyclic: BoolTarget,
+        proof_with_pis: &ProofWithPublicInputsTarget<D>,
+        self_verifier_data: &VerifierCircuitTarget,
+        leaf_verifier_data: &VerifierCircuitTarget,
+        common_data: &CommonCircuitData<F, D>,
+    ) where
+        C::Hasher: AlgebraicHasher<F>,
+    {
+        let selected_vd =
+            self.builder
+                .select_verifier_data(is_cyclic, self_verifier_data, leaf_verifier_data);
+
+        // Connect the child's trailing VK public inputs to the selected
+        // verifier data. PI layout (see `VerifierCircuitTarget::from_slice`):
+        // `[..., circuit_digest (4), constants_sigmas_cap (4 * cap_len)]`.
+        let cap_len = common_data.config.fri_config.num_cap_elements();
+        let pis = &proof_with_pis.public_inputs;
+        let digest_start = pis.len() - 4 - 4 * cap_len;
+        for i in 0..4 {
+            self.builder.connect(
+                pis[digest_start + i],
+                selected_vd.circuit_digest.elements[i],
+            );
+        }
+        for (i, cap) in selected_vd.constants_sigmas_cap.0.iter().enumerate() {
+            let start = digest_start + 4 + 4 * i;
+            for j in 0..4 {
+                self.builder.connect(pis[start + j], cap.elements[j]);
+            }
+        }
+
+        self.builder
+            .verify_proof::<C>(proof_with_pis, &selected_vd, common_data);
+
+        // Mirror `conditionally_verify_cyclic_proof`: budget every gate of
+        // the self-referential shape so the fixed point can close.
+        for g in &common_data.gates {
+            self.builder.add_gate_to_gate_set(g.clone());
+        }
     }
 
     #[must_use]
