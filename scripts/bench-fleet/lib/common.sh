@@ -137,9 +137,11 @@ fleet_identity() {
 # ---------------------------------------------------------------------------
 
 # Print the data rows of machines.tsv (header stripped) to stdout.
-# One row = one machine type.
+# One row = one machine type. Lines starting with '#' are comments
+# (used by machines-calibrate.tsv for the metal-fallback note; the
+# historical machines.tsv contains none, so behavior there is identical).
 machines_all_rows() {
-  tail -n +2 "${FLEET_MACHINES_TSV}"
+  tail -n +2 "${FLEET_MACHINES_TSV}" | grep -v '^#' || true
 }
 
 # Print just the machine_type column.
@@ -198,6 +200,10 @@ declare -A _PRICE_PER_HR=(
   [t2a-standard-48]=1.95
   [c4d-highcpu-32]=1.40
   [c4d-highcpu-64]=2.80
+  # Calibration shapes (issue #85). Memory-heavy SKUs; estimates from the
+  # same 2026-06-10 pricing pull -- verify before relying on for budgeting.
+  [c4a-highmem-64]=3.70
+  [c4a-highmem-96-metal]=7.40
 )
 
 # Per-shape realistic full-sweep wall-time estimates (hours), calibrated
@@ -218,6 +224,10 @@ declare -A _HOURS_PER_SHAPE=(
   [t2a-standard-48]=6
   [c4d-highcpu-32]=3
   [c4d-highcpu-64]=3
+  # Calibration runs are short (~3-5 probe runs of minutes each, circuit
+  # build dominating): ~1-1.5h per shape, NOT a full comparison sweep.
+  [c4a-highmem-64]=2
+  [c4a-highmem-96-metal]=2
 )
 
 # estimate_cost <hours> <machine_type...> -> prints "$X.XX"
@@ -291,6 +301,8 @@ instance_name() {
   # c4a-highcpu-32 -> c4ah32, n4a-highcpu-64 -> n4ah64, t2a-standard-48 -> t2as48.
   local short_mt
   case "$mt" in
+    c4a-highmem-96-metal) short_mt="c4am96m" ;;
+    c4a-highmem-*) short_mt="c4am${mt##*-}" ;;
     c4a-highcpu-*) short_mt="c4ah${mt##*-}" ;;
     c4d-highcpu-*) short_mt="c4dh${mt##*-}" ;;
     n4a-highcpu-*) short_mt="n4ah${mt##*-}" ;;
