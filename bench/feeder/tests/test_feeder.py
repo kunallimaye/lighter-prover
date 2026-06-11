@@ -327,6 +327,20 @@ class TestSchemaAndMonotonicity(unittest.TestCase):
         self.assertIn("seam_ms", header["provenance"]["params"])
 
 
+class TestArgValidation(unittest.TestCase):
+    def test_nonpositive_rates_rejected(self):
+        for argv in (["replay", "--in", str(FIXTURE), "--speed", "0",
+                      "--dry-run"],
+                     ["replay", "--in", str(FIXTURE), "--target-rate", "-5",
+                      "--dry-run"],
+                     ["synth-peak", "--rate", "0", "--duration", "60s",
+                      "--dry-run"]):
+            with self.subTest(argv=" ".join(argv)):
+                with self.assertRaises(SystemExit) as cm:
+                    feeder.main(argv)
+                self.assertEqual(cm.exception.code, 2)  # argparse usage error
+
+
 class TestDurationParsing(unittest.TestCase):
     def test_forms(self):
         self.assertEqual(feeder.parse_duration("15m"), 900.0)

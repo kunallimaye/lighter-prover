@@ -582,6 +582,14 @@ def cmd_record(args):
 # CLI
 # ──────────────────────────────────────────────────────────────────────
 
+def positive_float(text):
+    """argparse type: strictly positive float (rates, speeds)."""
+    v = float(text)
+    if v <= 0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {text}")
+    return v
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="feeder.py",
@@ -600,9 +608,9 @@ def build_parser():
     pp.add_argument("--in", dest="input", required=True,
                     help="input trace path (JSONL)")
     g = pp.add_mutually_exclusive_group()
-    g.add_argument("--speed", type=float, default=1.0,
+    g.add_argument("--speed", type=positive_float, default=1.0,
                    help="speed multiplier (2 = twice as fast; default 1)")
-    g.add_argument("--target-rate", type=float, default=None,
+    g.add_argument("--target-rate", type=positive_float, default=None,
                    help="scale so the aggregate rate (P1) hits this tx/s")
     pp.add_argument("--loop", action="store_true",
                     help="repeat the trace; seam per policy P3")
@@ -616,7 +624,7 @@ def build_parser():
     ps = sub.add_parser("synth-peak",
                         help="fabricate idealized trace from a rate "
                              "(offline, no inputs)")
-    ps.add_argument("--rate", type=float, required=True,
+    ps.add_argument("--rate", type=positive_float, required=True,
                     help="target tx/s (cadence = 500/rate seconds)")
     ps.add_argument("--duration", required=True,
                     help="trace duration (e.g. 15m, 900s)")
