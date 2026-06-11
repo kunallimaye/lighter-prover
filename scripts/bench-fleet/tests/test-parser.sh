@@ -54,7 +54,7 @@ S8_WALL_SECONDS=18
 S8_EXIT_CODE=101
 PANIC_EOF
 
-EXPECTED_PANIC=$'0ae123b\tvm1\tAmpere Altra\t32\t131904212\t8\tNA\tNA\tNA\tNA\tNA\tNA\t18000\tNA\t101\tpanic'
+EXPECTED_PANIC=$'0ae123b\tvm1\tAmpere Altra\t32\t131904212\t8\tNA\tNA\tNA\tNA\tNA\tNA\t18000\tNA\tNA\tNA\t101\tpanic'
 actual_panic="$(bash "${PARSER}" "${PANIC_FIX}")"
 printf 'CASE panic detection ... '
 if [[ "${actual_panic}" == "${EXPECTED_PANIC}" ]]; then
@@ -77,7 +77,9 @@ S6_WALL_SECONDS=14400
 S6_EXIT_CODE=124
 TIMEOUT_EOF
 
-EXPECTED_TIMEOUT=$'0ae123b\tvm2\tAxion\t32\t65536000\t6\t80\tNA\tNA\tNA\tNA\tNA\t14400000\tNA\t124\ttimeout'
+# ms_per_tx/tx_per_sec are computed even for timeout rows (chunks=80 × S=6 =
+# 480 tx over the capped wall) — status communicates the cap, data stays data.
+EXPECTED_TIMEOUT=$'0ae123b\tvm2\tAxion\t32\t65536000\t6\t80\tNA\tNA\tNA\tNA\tNA\t14400000\t30000.000\t0.033\tNA\t124\ttimeout'
 actual_timeout="$(bash "${PARSER}" "${TIMEOUT_FIX}")"
 printf 'CASE timeout detection ... '
 if [[ "${actual_timeout}" == "${EXPECTED_TIMEOUT}" ]]; then

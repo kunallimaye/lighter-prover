@@ -390,7 +390,7 @@ cmd_collect() {
 
   # Build parsed-results.tsv
   local out_tsv="${local_dir}/parsed-results.tsv"
-  printf 'machine_type\tgit_sha\thost\tcpu\tcores\tram_kb\tS\tchunks\tpre_exec_ms\ttotal_tx_ms\tavg_tx_ms\ttotal_chain_ms\tavg_chain_ms\twall_ms\trss_kb\texit_code\tstatus\n' > "${out_tsv}"
+  printf 'machine_type\tgit_sha\thost\tcpu\tcores\tram_kb\tS\tchunks\tpre_exec_ms\ttotal_tx_ms\tavg_tx_ms\ttotal_chain_ms\tavg_chain_ms\twall_ms\tms_per_tx\ttx_per_sec\trss_kb\texit_code\tstatus\n' > "${out_tsv}"
 
   # Layout since #33 (container fleet): each S value ran in its own
   # worker container, whose entrypoint uploaded

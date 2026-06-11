@@ -3,7 +3,12 @@
 #
 # Output columns (tab-separated, NO header — header is added by collect step):
 #   git_sha host cpu cores ram_kb S chunks pre_exec_ms total_tx_ms avg_tx_ms \
-#   total_chain_ms avg_chain_ms wall_ms rss_kb exit_code status
+#   total_chain_ms avg_chain_ms wall_ms ms_per_tx tx_per_sec rss_kb exit_code status
+#
+# Derived metrics (issue #42): the total transaction count of a sweep is
+# chunks × S (never hardcoded). When wall_ms, chunks and S are all present:
+#   ms_per_tx  = wall_ms / (chunks × S)        end-to-end pipeline time per tx
+#   tx_per_sec = (chunks × S × 1000) / wall_ms throughput
 #
 # Missing fields are emitted as "NA". Status semantics:
 #   ok      = all metrics present + exit_code=0
@@ -55,6 +60,8 @@ fields = {
     "total_chain_ms": "NA",
     "avg_chain_ms": "NA",
     "wall_ms": "NA",
+    "ms_per_tx": "NA",
+    "tx_per_sec": "NA",
     "rss_kb": "NA",
     "exit_code": "NA",
     "status": "error",
@@ -176,6 +183,18 @@ if summary is not None:
     if fields["wall_ms"] == "NA" and summary.get("total_wall_ms") is not None:
         fields["wall_ms"] = str(int(summary["total_wall_ms"]))
 
+# ---------- derived per-transaction metrics (issue #42) ----------
+# Total tx for the sweep = chunks × S (derived from the data, not hardcoded).
+if all(fields[k] != "NA" for k in ("wall_ms", "chunks", "S")):
+    try:
+        total_tx = int(fields["chunks"]) * int(fields["S"])
+        wall = float(fields["wall_ms"])
+        if total_tx > 0 and wall > 0:
+            fields["ms_per_tx"] = f"{wall / total_tx:.3f}"
+            fields["tx_per_sec"] = f"{total_tx * 1000.0 / wall:.3f}"
+    except ValueError:
+        pass
+
 # ---------- status ----------
 has_panic = "panicked at" in text
 all_metrics_present = all(
@@ -208,7 +227,8 @@ order = [
     "S", "chunks",
     "pre_exec_ms", "total_tx_ms", "avg_tx_ms",
     "total_chain_ms", "avg_chain_ms",
-    "wall_ms", "rss_kb", "exit_code", "status",
+    "wall_ms", "ms_per_tx", "tx_per_sec",
+    "rss_kb", "exit_code", "status",
 ]
 print("\t".join(fields[k] for k in order))
 PYEOF
