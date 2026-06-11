@@ -146,6 +146,17 @@ impl WrapperInnerCircuit {
             recursion_circuit,
         );
 
+        // Anchor the first (always-enabled) cyclic recursion proof's trailing VK
+        // public inputs to the constant `chain_verifier` it is verified against.
+        // The L5 recursion proof is cyclic and carries its own VK in its trailing
+        // 68 PIs; `verify_proof` alone does not constrain that embedded VK. See the
+        // reasoned argument at the L4 anchor in `block_constraints.rs` / issue #70.
+        self.builder.connect_proof_vk_pis_to_constant(
+            &self.target.chain_proofs[0],
+            recursion_circuit,
+            &self.target.chain_verifier,
+        );
+
         // First segment must be empty
         let first_segment = SegmentInfoTarget::from_public_inputs(
             &self.target.chain_proofs[0].public_inputs[BATCH_TARGET_INDEX..],
@@ -184,6 +195,20 @@ impl WrapperInnerCircuit {
                 &self.target.chain_proofs[0],
                 &self.target.chain_verifier,
                 recursion_circuit,
+            );
+
+            // Anchor the (enabled) cyclic recursion proof's trailing VK public inputs
+            // to the constant `chain_verifier`. This must be gated by `is_enabled`:
+            // disabled slots are "redundant and not selected so they can be anything"
+            // (their PIs are arbitrary in the witness), so an unconditional connect
+            // would over-constrain placeholder slots. For enabled slots, this closes
+            // the same gap as the L4 anchor -- a chain proof whose embedded cyclic VK
+            // differs from the pinned `chain_verifier` is rejected. See issue #70.
+            self.builder.conditional_connect_proof_vk_pis_to_constant(
+                is_enabled,
+                &self.target.chain_proofs[i],
+                recursion_circuit,
+                &self.target.chain_verifier,
             );
 
             let current_batch = BatchTarget::from_public_inputs(
