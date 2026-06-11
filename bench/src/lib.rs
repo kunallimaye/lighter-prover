@@ -1,8 +1,11 @@
 // Copyright (c) Elliot Technologies, Inc.
 // SPDX-License-Identifier: BUSL-1.1
 
-//! Library crate for the `bench` binary. Currently exposes the
-//! structured-event emitter so the binary (and any future helper tools)
-//! can share the same schema.
+//! Library crate for the `bench` binary. Exposes the structured-event
+//! emitter plus the streaming-mode machinery (trace-contract parsing
+//! and the bounded-queue scheduler), so the binary and tests share the
+//! same plonky2-free code paths.
 
 pub mod events;
+pub mod stream;
+pub mod trace;
