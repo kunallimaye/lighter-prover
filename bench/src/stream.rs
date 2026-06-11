@@ -237,16 +237,24 @@ impl Enqueuer {
                 chunk_in_block: i,
                 enqueued_at: Instant::now(),
             };
+            // Increment depth BEFORE sending (rolling back on failure)
+            // so the consumer's post-recv decrement can never observe
+            // a job whose increment has not landed yet (which would
+            // underflow the usize counter).
+            self.shared.queue_depth.fetch_add(1, Ordering::Relaxed);
             match self.tx.try_send(job) {
                 Ok(()) => {
-                    self.shared.queue_depth.fetch_add(1, Ordering::Relaxed);
                     enqueued += 1;
                 }
                 Err(TrySendError::Full(_)) => {
+                    self.shared.queue_depth.fetch_sub(1, Ordering::Relaxed);
                     self.shared.dropped_chunks.fetch_add(1, Ordering::Relaxed);
                     dropped += 1;
                 }
-                Err(TrySendError::Disconnected(_)) => break,
+                Err(TrySendError::Disconnected(_)) => {
+                    self.shared.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                    break;
+                }
             }
         }
         if dropped > 0 {
