@@ -38,3 +38,26 @@ stream-peak: ## Synthesize peak-load trace: RATE=TXS DURATION=15m
 feeder-test: ## Run the offline feeder test suite (no network, <1 min)
 	python3 -m unittest discover -s feeder/tests -v
 # --- end feeder (producer, #48) ---
+
+# --- streaming consumer (#49) ---
+# stream-smoke: MANUAL real-proving smoke test for `bench --stream`.
+# NOT part of any automated test target: circuit define alone takes
+# minutes and each L1+L2 proof seconds. It pipes a tiny inline trace
+# (3 small blocks at tx_per_proof=1) into the stream consumer and
+# should produce stream_arrival, chunk_proven, and stream_summary
+# events plus real proofs before exiting at trace EOF (--duration 120s
+# is only a safety cap).
+stream-smoke:
+	@printf '%s\n' \
+	  '{"provenance": {"generator": "replay --target-rate", "params": {"note": "inline stream-smoke"}, "generated_at": "2026-01-01T00:00:00Z"}}' \
+	  '{"ts_ms": 1, "height": 1001, "tx_count": 2}' \
+	  '{"ts_ms": 2, "height": 1002, "tx_count": 1}' \
+	  '{"ts_ms": 3, "height": 1003, "tx_count": 1}' \
+	| cargo run --release --bin bench -- --stream --tx-per-proof 1 --duration 120s
+
+# stream-sweep: rate-ladder sweep driving `feeder.py replay` (issue
+# #48, sibling PR) into `bench --stream`. Untestable until both PRs
+# merge; see scripts/stream-sweep.sh for knobs (TRACE, RATES, ...).
+stream-sweep:
+	@bash ../scripts/stream-sweep.sh
+# --- end streaming consumer (#49) ---

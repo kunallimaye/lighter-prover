@@ -12,6 +12,15 @@
 //! - `event = "circuit_define"`: define + build time for each circuit.
 //! - `event = "summary"`: aggregate totals emitted at the end of `main`.
 //!
+//! Streaming mode (`bench --stream`, issue #49) additionally emits:
+//!
+//! - `event = "stream_arrival"`: one per accepted trace block event.
+//! - `event = "chunk_proven"`: the `layer_prove` fields plus `lag_ms`,
+//!   `queue_depth`, and `height`; emitted per layer (L1, L2) for every
+//!   dequeued chunk job.
+//! - `event = "stream_summary"`: rolling aggregates, every 60s
+//!   (`phase = "periodic"`) and once at exit (`phase = "final"`).
+//!
 //! ## Platform note
 //!
 //! `peak_rss_mb`, `current_rss_mb`, and `cpu_time_ms` are Linux-only:
@@ -61,6 +70,53 @@ pub enum BenchEvent<'a> {
         total_wall_ms: u64,
         total_cpu_ms: Option<u64>,
         peak_rss_mb: Option<u64>,
+        ts: String,
+    },
+    /// Stream mode: one accepted trace block event (gap markers and
+    /// malformed lines are skipped+counted, never emitted here).
+    StreamArrival {
+        height: u64,
+        /// `null` mirrors a trace-level `tx_count: null` (treated as
+        /// 500 for enqueue math, per the lenient-consumer policy).
+        tx_count: Option<u64>,
+        /// Queue depth observed at arrival time, before fan-out.
+        queue_depth: usize,
+        ts: String,
+    },
+    /// Stream mode: a dequeued chunk job's per-layer prove measurement.
+    /// Carries the same measurement fields as `layer_prove` plus
+    /// `height`, `lag_ms` (layer completion - enqueue), and
+    /// `queue_depth` (after dequeue).
+    ChunkProven {
+        layer: u8,
+        name: &'a str,
+        /// Witness-pool chunk index (round-robin), not a per-block index.
+        chunk_idx: Option<usize>,
+        /// Witness-pool size.
+        chunk_total: Option<usize>,
+        tx_per_proof: usize,
+        wall_ms: u64,
+        cpu_ms: Option<u64>,
+        rss_mb_peak: Option<u64>,
+        rss_mb_after: Option<u64>,
+        height: u64,
+        lag_ms: u64,
+        queue_depth: usize,
+        ts: String,
+    },
+    /// Stream mode: rolling aggregates. Emitted every 60s
+    /// (`phase = "periodic"`) and once at exit (`phase = "final"`).
+    StreamSummary {
+        phase: &'a str,
+        throughput_tx_s: f64,
+        lag_p50_ms: u64,
+        lag_p95_ms: u64,
+        peak_rss_mb: Option<u64>,
+        dropped_chunks: u64,
+        arrivals: u64,
+        gaps_skipped: u64,
+        chunks_proven: u64,
+        elapsed_s: f64,
         ts: String,
     },
 }
@@ -214,6 +270,57 @@ mod tests {
             (Some(a), Some(b)) => assert!(b >= a, "cpu time went backwards: {a} -> {b}"),
             _ => {} // Non-Linux: skip.
         }
+    }
+
+    #[test]
+    fn stream_event_serialization() {
+        let arrival = BenchEvent::StreamArrival {
+            height: 260_138_266,
+            tx_count: None,
+            queue_depth: 3,
+            ts: "2026-06-11T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&arrival).unwrap();
+        assert!(json.contains("\"event\":\"stream_arrival\""));
+        assert!(json.contains("\"tx_count\":null"));
+
+        let proven = BenchEvent::ChunkProven {
+            layer: 2,
+            name: "BlockTxChainCircuit",
+            chunk_idx: Some(5),
+            chunk_total: Some(120),
+            tx_per_proof: 4,
+            wall_ms: 498,
+            cpu_ms: Some(3960),
+            rss_mb_peak: Some(2925),
+            rss_mb_after: Some(2910),
+            height: 260_138_266,
+            lag_ms: 1234,
+            queue_depth: 7,
+            ts: "2026-06-11T00:00:01Z".into(),
+        };
+        let json = serde_json::to_string(&proven).unwrap();
+        assert!(json.contains("\"event\":\"chunk_proven\""));
+        assert!(json.contains("\"lag_ms\":1234"));
+        assert!(json.contains("\"queue_depth\":7"));
+
+        let summary = BenchEvent::StreamSummary {
+            phase: "final",
+            throughput_tx_s: 49.6,
+            lag_p50_ms: 800,
+            lag_p95_ms: 2100,
+            peak_rss_mb: Some(2925),
+            dropped_chunks: 0,
+            arrivals: 201,
+            gaps_skipped: 0,
+            chunks_proven: 254,
+            elapsed_s: 20.5,
+            ts: "2026-06-11T00:00:21Z".into(),
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("\"event\":\"stream_summary\""));
+        assert!(json.contains("\"phase\":\"final\""));
+        assert!(json.contains("\"throughput_tx_s\":49.6"));
     }
 
     #[test]
