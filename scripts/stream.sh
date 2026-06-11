@@ -71,6 +71,10 @@ build_replay_args() {
   [[ -n "${TRACE:-}" ]] || die "TRACE=<trace.jsonl> is required.
 ${usage}"
   [[ -f "${TRACE}" ]] || die "trace file not found: ${TRACE}"
+  # Canonicalize to an absolute path: bench() cds into bench/ before
+  # the feeder opens the trace, so a root-relative TRACE (e.g.
+  # traces/trace_15m.jsonl) would otherwise fail mid-pipeline.
+  TRACE="$(cd "$(dirname "${TRACE}")" && pwd)/$(basename "${TRACE}")"
   if [[ -n "${RATE:-}" && -n "${SPEED:-}" ]]; then
     die "RATE and SPEED are mutually exclusive — give exactly one.
 ${usage}"
@@ -163,7 +167,9 @@ bench() {
   fi
 }
 
-test() {
+# Named run_tests (not `test`) to avoid shadowing the bash builtin,
+# which common.sh helpers or future edits could depend on.
+run_tests() {
   # Offline suites only: feeder unit tests + bench crate tests (stub
   # prover, zero plonky2 calls). <1 min total, no network, no proving.
   require_cmd python3
@@ -201,7 +207,7 @@ case "${1:-}" in
   record)      record      ;;
   replay)      replay      ;;
   bench)       bench       ;;
-  test)        test        ;;
+  test)        run_tests   ;;
   smoke)       smoke       ;;
   sweep)       sweep       ;;
   *)           die "Usage: $0 {fetch-trace|record|replay|bench|test|smoke|sweep}" ;;
