@@ -113,7 +113,7 @@ bounded queue, and proves them with the same L1 + L2 pipeline as batch
 mode. Without `--stream` the original batch behavior is untouched.
 
 ```bash
-python3 bench/feeder/feeder.py replay --input trace.jsonl --target-rate 1000 \
+python3 bench/feeder/feeder.py replay --in trace.jsonl --target-rate 1000 \
   | ./bench --stream --tx-per-proof 4 --duration 15m
 ```
 

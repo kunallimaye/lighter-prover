@@ -87,7 +87,7 @@ for rate in ${RATES}; do
   # The feeder replays the trace renormalized to the target aggregate
   # rate (trace-format.md P1); bench consumes it on stdin. bench's
   # exit code is authoritative; the feeder ending first is normal.
-  if ! python3 "${FEEDER}" replay --input "${TRACE}" --target-rate "${rate}" \
+  if ! python3 "${FEEDER}" replay --in "${TRACE}" --target-rate "${rate}" \
       | "${BENCH_BIN}" --stream \
           --tx-per-proof "${TX_PER_PROOF}" \
           --max-queue "${MAX_QUEUE}" \
