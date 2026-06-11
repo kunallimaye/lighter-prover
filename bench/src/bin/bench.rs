@@ -87,23 +87,19 @@ fn main() {
 
     let args = Args::parse();
 
-    const UPSTREAM_TESTED_MAX_TX_PER_PROOF: usize = 6;
-    if args.tx_per_proof > UPSTREAM_TESTED_MAX_TX_PER_PROOF {
+    const VALIDATED_MAX_TX_PER_PROOF: usize = 32;
+    if args.tx_per_proof > VALIDATED_MAX_TX_PER_PROOF {
         eprintln!(
-            "error: --tx-per-proof {} exceeds the upstream-tested maximum of {}.\n\
+            "error: --tx-per-proof {} exceeds the validated maximum of {}.\n\
              \n\
-             Upstream lighter-prover (commit 5bbb307) sets log_gates = 14 in\n\
-             circuit/src/block_tx_chain_constraints.rs:128 when tx_per_proof > 6.\n\
-             That setting is insufficient: the chain-recursion verifier circuit\n\
-             requires more than 2^14 = 16384 rows for tx_per_proof in {{7, 8, 16, 32}}\n\
-             and panics at build time with 'Failed to build circuit'.\n\
+             Chunk sizes 1..=32 are validated (building and proving) following\n\
+             the log_gates / ExponentiationGate fix from issue #63, with sweep\n\
+             measurements recorded on issue #60. Values above 32 have not been\n\
+             validated and may panic at circuit build time.\n\
              \n\
-             Empirically validated chunk sizes on upstream 5bbb307: 1, 2, 3, 4, 5, 6.\n\
-             \n\
-             See https://github.com/kunallimaye/lighter-prover/issues/8 for the\n\
-             log_gates analysis and proposed fix paths (bump constant, tiered\n\
-             table, or dynamic computation from CommonCircuitData).",
-            args.tx_per_proof, UPSTREAM_TESTED_MAX_TX_PER_PROOF
+             See https://github.com/kunallimaye/lighter-prover/issues/63 for the\n\
+             root-cause analysis and fix details.",
+            args.tx_per_proof, VALIDATED_MAX_TX_PER_PROOF
         );
         std::process::exit(2);
     }
