@@ -70,6 +70,38 @@ grep '^BENCH_EVENT ' bench.log | sed 's/^BENCH_EVENT //' \
   | jq 'select(.event=="summary")'
 ```
 
+## Feeder (trace producer)
+
+`bench/feeder/feeder.py` produces JSONL block-event streams for the
+streaming bench. The producer/consumer contract — schema, gap markers,
+provenance header, monotonicity rules, and policies P1–P4 — is pinned in
+[`trace-format.md`](trace-format.md); every emitted stream conforms to it.
+Witnesses never flow through the feeder: it carries only block cadence
+and tx counts; the consumer (`bench --stream`, issue #49) sources witness
+data itself.
+
+| Subcommand | Mode | Summary |
+|---|---|---|
+| `record` | network | Capture live chain cadence: WS height channel (`wss://mainnet.zklighter.elliot.ai/stream?readonly=true`) merged with explorer tx counts via a ~4 s late-bind watermark; unmatched heights emit `tx_count: null` |
+| `replay` | offline | Re-emit a recorded trace retimed (`--speed N` or `--target-rate TXS`; `--loop`, `--duration`, `--dry-run`) |
+| `synth-peak` | offline, no inputs | Fabricate an idealized trace from a rate: back-to-back 500-tx blocks at cadence `500/rate` s |
+| `peak-hours` | analysis helper | Locate peak windows from the explorer hourly tx stats (top-N hours by tx/s) |
+
+Make targets (from `bench/`): `stream-record OUT=... [DURATION=...]`,
+`stream-replay TRACE=... [SPEED=N | RATE=TXS] [DURATION=...]`,
+`stream-peak RATE=... DURATION=...`, and `feeder-test` (offline suite,
+no network, <1 min; also wired into the repo-root `make local-test`).
+
+Dependencies: `record` and `peak-hours` need `bench/feeder/requirements.txt`
+(`websockets`, `requests`); `replay`, `synth-peak`, and the tests are pure
+Python 3 stdlib.
+
+Geo-block note: the chain's main REST API returns 403 to US IPs. The
+feeder avoids it entirely — the WS stream with `?readonly=true` and the
+explorer API (`explorer.elliot.ai`) are not geo-blocked. The explorer
+blocks endpoint is rate-limited to 90 req/min per IP; `record` polls at
+~85 req/min with an identifying User-Agent.
+
 ## Streaming mode (bench --stream)
 
 `bench --stream` (issue #49) turns the one-shot batch bench into a
@@ -81,7 +113,7 @@ bounded queue, and proves them with the same L1 + L2 pipeline as batch
 mode. Without `--stream` the original batch behavior is untouched.
 
 ```bash
-python3 bench/feeder/feeder.py replay --input trace.jsonl --target-rate 1000 \
+python3 bench/feeder/feeder.py replay --in trace.jsonl --target-rate 1000 \
   | ./bench --stream --tx-per-proof 4 --duration 15m
 ```
 

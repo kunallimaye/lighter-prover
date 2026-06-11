@@ -50,6 +50,7 @@ local-build: ## cargo build --release -p bench --bin bench
 
 local-test: ## Smoke test: bench at tx_per_proof=1 tx_limit=4, assert TOTAL line
 	@bash scripts/local.sh test
+	@$(MAKE) -C bench feeder-test
 
 local-bench: ## Full bench run (TX_PER_PROOF/TX_LIMIT overridable)
 	@bash scripts/local.sh bench

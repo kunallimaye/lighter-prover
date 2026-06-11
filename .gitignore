@@ -42,3 +42,7 @@ logs/
 # Go
 /bin/
 /vendor/
+
+# Python bytecode (bench/feeder tooling)
+__pycache__/
+*.pyc

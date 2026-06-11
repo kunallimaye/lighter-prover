@@ -1,0 +1,4 @@
+# Network subcommands only (record, peak-hours). replay / synth-peak /
+# the offline test suite are pure stdlib.
+websockets>=12
+requests>=2.31
