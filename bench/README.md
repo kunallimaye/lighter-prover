@@ -118,20 +118,73 @@ chain seeded at the chunk's pre-state), then adjacent proofs are merged
 pairwise by the dedicated `BlockTxChainMergeCircuit` (same 2^14 shape
 and PI surface as the leaf circuit; odd proofs at any level carry up
 unchanged). The default `--l2-fold serial` is byte-for-byte today's
-behavior. Execution is sequential either way — plonky2 already uses all
-cores per proof; parallel leaf/merge scheduling belongs to the cell
-implementation (#3). The run ends with a `TREEFOLD` summary line:
-depth, merges, leaf/merge averages, and the critical-path latency
-(depth × avg merge — the serial-L2 wall a parallel cell would see).
+behavior. The run ends with a `TREEFOLD` summary line: depth, merges,
+leaf/merge averages, and the critical-path latency (depth × avg merge —
+the serial-L2 wall a parallel cell would see).
+
+Execution is sequential by default; with `--l2-workers M` (issue #73,
+ADR-0003 §D1) the driver dispatches the leaves and per-level merges
+across M worker threads sharing the resident `CircuitData` -- see
+[Intra-cell parallel scheduler](#intra-cell-parallel-scheduler-bench---l2-workers-m)
+below.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--l2-fold serial\|tree` | `serial` | L2 fold strategy (batch mode only) |
+| `--l2-workers M` | `1` | Tree mode (#73): M worker threads sharing the resident `CircuitData`. `1` keeps the serial driver byte-for-byte. |
 | `--ab-check` | off | Tree mode: also serial-fold the same L1 proofs and assert element-wise equality of the two final proofs' semantic public inputs (#67 acceptance) |
 | `--l4-check` | off | After the fold, define+prove+verify L4 (`BlockCircuit`) against the final chain proof — the merge circuit's data in tree mode (#67 acceptance) |
 
 ```bash
 ./bench --tx-per-proof 4 --tx-limit 32 --l2-fold tree --ab-check --l4-check
+```
+
+### Intra-cell parallel scheduler (bench --l2-workers M)
+
+`--l2-workers M` (issue #73, ADR-0003 §D1) realizes the
+critical-path latency that the sequential tree-fold only *reports*.
+A cell is one host, one Rust process, M worker threads sharing the
+resident proving keys (multi-GB `CircuitData`, built once and held by
+reference across workers — not Arc-cloned). Sibling processes would
+multiply the key RSS by M, which the cell topology rules out.
+
+Default `M = 1` keeps the historical serial driver byte-for-byte (zero
+regression). For `M > 1` the driver:
+
+1. Builds a dedicated rayon `ThreadPool` of M workers
+   (`l2-worker-{0..M-1}`).
+2. Phase 2 (leaf chain proofs): all leaves are dispatched as a single
+   `par_iter` into the M-worker pool. Leaves are order-free post-#72,
+   so the proving order is a free parameter.
+3. Phase 3 (merges): each level is dispatched as a `par_iter` over the
+   level's pairs into the M-worker pool. Odd proofs carry up unchanged
+   (the merge circuit accepts leaf and merge children in any mix).
+
+**Open question (issue #73, ADR-0003 §D1):** plonky2 already saturates
+all cores per proof via the *global* rayon pool, so M concurrent proves
+contend for cores. The sweep `M ∈ {1,2,4,8,16}` at S=4 (`--tx-limit
+32`) and S=20 (`--tx-limit 500`) measures the real M / wall-clock
+curve; the `l2_tree_schedule` event in the JSONL stream is the
+headline.
+
+`--ab-check` PASSes at every `M`: every chunk's seed is witness-native
+(#72) and the merge circuit is associative on the semantic PI surface,
+so the proving order has no effect on the root.
+
+Two new BENCH_EVENT lines are emitted (additive — pre-#73 consumers
+ignore unknown events):
+
+| `event` | When | Notable fields |
+|---------|------|----------------|
+| `l2_tree_level` | Once per tree level (level `0` = leaves; `1..depth` = merge levels) | `level`, `nodes`, `level_wall_ms` (level start-to-end), `node_wall_sum_ms`, `node_wall_max_ms`, `node_wall_min_ms`, `workers`, `rss_mb_*` |
+| `l2_tree_schedule` | Once at the end of the tree fold | `workers`, `leaves`, `depth`, `merges`, `leaves_wall_ms`, `merges_wall_ms`, `realized_wall_ms` (the headline), `critical_path_ms` (`depth × avg merge` — the pre-#73 metric), `leaf_avg_ms`, `merge_avg_ms`, `rss_mb_*` |
+
+```bash
+# M sweep at S=4, --tx-limit 32 (PR #69's bench fixture):
+for M in 1 2 4 8 16; do
+  ./bench --tx-per-proof 4 --tx-limit 32 --l2-fold tree --ab-check \
+          --l2-workers "$M" 2>&1 | grep -E "L2_SCHEDULE|TREEFOLD|AB_CHECK PASS"
+done
 ```
 
 ## L5 segment scheduler (bench --l5-segment-check)
