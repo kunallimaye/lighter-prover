@@ -262,6 +262,124 @@ where
                 // println!("RESULT: {:?}", self.on_chain_operations_pub_data_hash);
             });
     }
+
+    /// Issue #82: host-side pairwise merge mirroring the in-circuit
+    /// [`BatchTarget::conditionally_merge_consecutive`] semantics (with the
+    /// circuit's `cond = true` path). Merges `self` (the earlier, left range)
+    /// with `right` (the later range) into the combined range, asserting the
+    /// same continuity invariants the circuit enforces:
+    ///
+    /// * contiguity: `right`'s start block (`end_block_number - batch_size`)
+    ///   equals `self.end_block_number`;
+    /// * monotonic timestamps: `self.last_created_at <= right.first_created_at`;
+    /// * state-root continuity: `self.new_state_root == right.old_state_root`;
+    /// * account-delta-root continuity:
+    ///   `self.new_account_delta_tree_root == right.old_account_delta_tree_root`;
+    /// * priority-op keccak prefix chain:
+    ///   `self.new_prefix_priority_operation_hash ==
+    ///   right.old_prefix_priority_operation_hash`.
+    ///
+    /// The merged output takes `old_*`/start fields from the left child and
+    /// `new_*`/end fields from the right child, summing the counts — the
+    /// host mirror of the circuit's `select(cond, b, a)` rules.
+    ///
+    /// The on-chain-ops pub-data hash is taken from the right child (its
+    /// running hash already incorporates the left child's chain via the seam
+    /// stitch enforced by [`SegmentInfo::stitch`]); this mirrors the
+    /// `select_keccak_output(cond, b.., a..)` for that field.
+    pub fn merge_consecutive(&self, right: &Self) -> Self {
+        let right_start_block = right.end_block_number.saturating_sub(right.batch_size);
+        assert_eq!(
+            self.end_block_number, right_start_block,
+            "Batch::merge_consecutive: right child's start block ({}) is not contiguous with \
+             left child's end block ({})",
+            right_start_block, self.end_block_number
+        );
+
+        assert!(
+            self.last_created_at <= right.first_created_at,
+            "Batch::merge_consecutive: timestamps not monotonic across the seam \
+             (left.last_created_at {} > right.first_created_at {})",
+            self.last_created_at,
+            right.first_created_at
+        );
+
+        assert_eq!(
+            self.new_state_root, right.old_state_root,
+            "Batch::merge_consecutive: left.new_state_root != right.old_state_root"
+        );
+
+        assert_eq!(
+            self.new_account_delta_tree_root, right.old_account_delta_tree_root,
+            "Batch::merge_consecutive: left.new_account_delta_tree_root != \
+             right.old_account_delta_tree_root"
+        );
+
+        assert_eq!(
+            self.new_prefix_priority_operation_hash, right.old_prefix_priority_operation_hash,
+            "Batch::merge_consecutive: priority-op keccak prefix chain broken across the seam \
+             (left.new_prefix_priority_operation_hash != \
+             right.old_prefix_priority_operation_hash)"
+        );
+
+        Self {
+            end_block_number: right.end_block_number,
+            batch_size: self.batch_size + right.batch_size,
+
+            first_created_at: self.first_created_at,
+            last_created_at: right.last_created_at,
+
+            old_state_root: self.old_state_root,
+            new_validium_root: right.new_validium_root,
+            new_state_root: right.new_state_root,
+
+            old_account_delta_tree_root: self.old_account_delta_tree_root,
+            new_account_delta_tree_root: right.new_account_delta_tree_root,
+
+            // The running on-chain-ops hash flows from the right child (its
+            // chain already includes the left child's, via the seam stitch).
+            on_chain_operations_pub_data_hash: right.on_chain_operations_pub_data_hash,
+
+            priority_operations_count: self.priority_operations_count
+                + right.priority_operations_count,
+            old_prefix_priority_operation_hash: self.old_prefix_priority_operation_hash,
+            new_prefix_priority_operation_hash: right.new_prefix_priority_operation_hash,
+
+            new_public_market_details: right.new_public_market_details.clone(),
+        }
+    }
+
+    /// Validate-only host mirror of `merge_consecutive` for callers that only
+    /// need to check whether two batches form a contiguous, mergeable pair
+    /// (e.g. driver-side A/B sanity checks). Returns `Err` instead of
+    /// panicking on a broken seam.
+    pub fn try_merge_consecutive(&self, right: &Self) -> Result<Self> {
+        let right_start_block = right.end_block_number.saturating_sub(right.batch_size);
+        if self.end_block_number != right_start_block {
+            anyhow::bail!(
+                "Batch::try_merge_consecutive: non-contiguous block ranges (left end {}, right start {})",
+                self.end_block_number,
+                right_start_block
+            );
+        }
+        if self.last_created_at > right.first_created_at {
+            anyhow::bail!("Batch::try_merge_consecutive: non-monotonic timestamps across the seam");
+        }
+        if self.new_state_root != right.old_state_root {
+            anyhow::bail!("Batch::try_merge_consecutive: state-root discontinuity across the seam");
+        }
+        if self.new_account_delta_tree_root != right.old_account_delta_tree_root {
+            anyhow::bail!(
+                "Batch::try_merge_consecutive: account-delta-root discontinuity across the seam"
+            );
+        }
+        if self.new_prefix_priority_operation_hash != right.old_prefix_priority_operation_hash {
+            anyhow::bail!(
+                "Batch::try_merge_consecutive: priority-op keccak prefix chain broken across the seam"
+            );
+        }
+        Ok(self.merge_consecutive(right))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -655,6 +773,49 @@ impl SegmentInfo {
 
         public_inputs
     }
+
+    /// Issue #82: host-side mirror of the in-circuit
+    /// [`SegmentInfoTarget::connect_segments`] start-digest stitch (escape
+    /// hatch iii). Stitches the left segment (`self`) to the right segment
+    /// (`right`) given the left child's running on-chain-ops hash at the seam
+    /// (`left_running_on_chain_ops_hash`): the right segment's start digest
+    /// must equal the left child's running hash, and the merged segment
+    /// carries the LEFT child's start digest so the on-chain-ops hash chain
+    /// stays anchored at the segment's true start across merges.
+    ///
+    /// This is what makes the on-chain-ops keccak chain associative across the
+    /// tree-fold (ADR-0003 §D5): the same stitch L6 performs at
+    /// `wrapper_circuit.rs:196-200`. Panics on a broken seam.
+    pub fn stitch(
+        &self,
+        right: &Self,
+        left_running_on_chain_ops_hash: &[u8; KECCAK_HASH_OUT_BYTE_SIZE],
+    ) -> Self {
+        assert_eq!(
+            *left_running_on_chain_ops_hash, right.old_on_chain_operations_pub_data_hash,
+            "SegmentInfo::stitch: on-chain-ops seam broken (left running hash != right segment \
+             start digest)"
+        );
+        Self {
+            old_on_chain_operations_pub_data_hash: self.old_on_chain_operations_pub_data_hash,
+        }
+    }
+
+    /// Validate-only host mirror of `stitch` that returns `Err` instead of
+    /// panicking on a broken seam.
+    pub fn try_stitch(
+        &self,
+        right: &Self,
+        left_running_on_chain_ops_hash: &[u8; KECCAK_HASH_OUT_BYTE_SIZE],
+    ) -> Result<Self> {
+        if *left_running_on_chain_ops_hash != right.old_on_chain_operations_pub_data_hash {
+            anyhow::bail!(
+                "SegmentInfo::try_stitch: on-chain-ops seam broken (left running hash != right \
+                 segment start digest)"
+            );
+        }
+        Ok(self.stitch(right, left_running_on_chain_ops_hash))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -715,5 +876,329 @@ impl<T: Witness<F>, F: PrimeField64 + RichField> SegmentInfoTargetWitness<F> for
             )?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Issue #82: host-side unit tests for the pre-L5 merge mirror. These
+    //! exercise the plain-Rust `Batch::merge_consecutive` / `SegmentInfo::stitch`
+    //! mirrors of the in-circuit `BatchTarget::conditionally_merge_consecutive`
+    //! / `SegmentInfoTarget::connect_segments` semantics, with NO plonky2
+    //! proving — they run under a plain `cargo test -p circuit recursion::batch`.
+
+    use plonky2::field::goldilocks_field::GoldilocksField;
+    use plonky2::hash::hash_types::HashOut;
+
+    use super::*;
+
+    type TF = GoldilocksField;
+
+    fn h(seed: u64) -> HashOut<TF> {
+        HashOut::<TF>::from([
+            TF::from_canonical_u64(seed),
+            TF::from_canonical_u64(seed + 1),
+            TF::from_canonical_u64(seed + 2),
+            TF::from_canonical_u64(seed + 3),
+        ])
+    }
+
+    fn k(seed: u8) -> [u8; KECCAK_HASH_OUT_BYTE_SIZE] {
+        core::array::from_fn(|i| seed.wrapping_add(i as u8))
+    }
+
+    /// Build a single-block batch (batch_size = 1) covering `block_number`.
+    fn one_block_batch(
+        block_number: u64,
+        created_at: i64,
+        old_state_root: HashOut<TF>,
+        new_state_root: HashOut<TF>,
+        old_delta: HashOut<TF>,
+        new_delta: HashOut<TF>,
+        old_priority_prefix: [u8; KECCAK_HASH_OUT_BYTE_SIZE],
+        new_priority_prefix: [u8; KECCAK_HASH_OUT_BYTE_SIZE],
+        on_chain_hash: [u8; KECCAK_HASH_OUT_BYTE_SIZE],
+        priority_count: u64,
+    ) -> Batch<TF> {
+        Batch {
+            end_block_number: block_number,
+            batch_size: 1,
+            first_created_at: created_at,
+            last_created_at: created_at,
+            old_state_root,
+            new_validium_root: h(900 + block_number),
+            new_state_root,
+            old_account_delta_tree_root: old_delta,
+            new_account_delta_tree_root: new_delta,
+            on_chain_operations_pub_data_hash: on_chain_hash,
+            priority_operations_count: priority_count,
+            old_prefix_priority_operation_hash: old_priority_prefix,
+            new_prefix_priority_operation_hash: new_priority_prefix,
+            new_public_market_details: core::array::from_fn(|_| PublicMarketDetails::default()),
+        }
+    }
+
+    #[test]
+    fn merge_two_consecutive_batches_field_correctness() {
+        // Left covers block 5 (start block 4 -> end 5), right covers block 6.
+        let mid_state = h(50);
+        let mid_delta = h(60);
+        let mid_prio = k(7);
+
+        let left = one_block_batch(
+            5,
+            100,
+            h(40),     // old_state_root
+            mid_state, // new_state_root (== right.old_state_root)
+            h(45),     // old_delta
+            mid_delta, // new_delta (== right.old_delta)
+            k(1),      // old_priority_prefix
+            mid_prio,  // new_priority_prefix (== right.old_priority_prefix)
+            k(20),     // on_chain hash
+            2,         // priority count
+        );
+        let right = one_block_batch(
+            6,
+            150,
+            mid_state, // old_state_root (== left.new_state_root)
+            h(70),     // new_state_root
+            mid_delta, // old_delta (== left.new_delta)
+            h(80),     // new_delta
+            mid_prio,  // old_priority_prefix (== left.new_priority_prefix)
+            k(9),      // new_priority_prefix
+            k(30),     // on_chain hash (right's running chain)
+            3,         // priority count
+        );
+
+        let merged = left.merge_consecutive(&right);
+
+        // Combined range: old_* from left, new_* from right, counts summed.
+        assert_eq!(merged.end_block_number, 6);
+        assert_eq!(merged.batch_size, 2);
+        assert_eq!(merged.first_created_at, 100);
+        assert_eq!(merged.last_created_at, 150);
+        assert_eq!(merged.old_state_root, h(40));
+        assert_eq!(merged.new_state_root, h(70));
+        assert_eq!(merged.old_account_delta_tree_root, h(45));
+        assert_eq!(merged.new_account_delta_tree_root, h(80));
+        assert_eq!(merged.new_validium_root, right.new_validium_root);
+        // Priority counts sum; old prefix from left, new prefix from right.
+        assert_eq!(merged.priority_operations_count, 5);
+        assert_eq!(merged.old_prefix_priority_operation_hash, k(1));
+        assert_eq!(merged.new_prefix_priority_operation_hash, k(9));
+        // On-chain-ops running hash flows from the right child.
+        assert_eq!(merged.on_chain_operations_pub_data_hash, k(30));
+
+        // Contiguous start block: combined start == left start (4).
+        assert_eq!(
+            merged.end_block_number - merged.batch_size,
+            left.end_block_number - left.batch_size
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not contiguous")]
+    fn merge_rejects_non_contiguous_block_ranges() {
+        let mid_state = h(50);
+        let mid_delta = h(60);
+        let mid_prio = k(7);
+        let left = one_block_batch(
+            5,
+            100,
+            h(40),
+            mid_state,
+            h(45),
+            mid_delta,
+            k(1),
+            mid_prio,
+            k(20),
+            0,
+        );
+        // Right covers block 8 (gap after 5): start block 7 != left end 5.
+        let right = one_block_batch(
+            8,
+            150,
+            mid_state,
+            h(70),
+            mid_delta,
+            h(80),
+            mid_prio,
+            k(9),
+            k(30),
+            0,
+        );
+        let _ = left.merge_consecutive(&right);
+    }
+
+    #[test]
+    #[should_panic(expected = "keccak prefix chain")]
+    fn merge_rejects_broken_priority_prefix_chain() {
+        let mid_state = h(50);
+        let mid_delta = h(60);
+        let left = one_block_batch(
+            5,
+            100,
+            h(40),
+            mid_state,
+            h(45),
+            mid_delta,
+            k(1),
+            k(7),
+            k(20),
+            1,
+        );
+        // right.old_priority_prefix (k(8)) != left.new_priority_prefix (k(7)).
+        let right = one_block_batch(
+            6,
+            150,
+            mid_state,
+            h(70),
+            mid_delta,
+            h(80),
+            k(8),
+            k(9),
+            k(30),
+            1,
+        );
+        let _ = left.merge_consecutive(&right);
+    }
+
+    /// On-chain-ops keccak-chain continuity with a NON-EMPTY on-chain-ops leaf:
+    /// the right child's segment-start digest must equal the left child's
+    /// running on-chain-ops hash. Seam-match passes, seam-mismatch errors.
+    #[test]
+    fn on_chain_ops_keccak_chain_continuity_non_empty_leaf() {
+        // Construct a realistic non-empty on-chain-ops running hash for the
+        // left child by folding one op into the zero digest, exactly as the
+        // host `aggregate_on_chain_operations_pub_data` does.
+        let zero_digest = [0u8; KECCAK_HASH_OUT_BYTE_SIZE];
+        let op_pub_data: Vec<u8> = (0..KECCAK_HASH_OUT_BYTE_SIZE as u8).collect();
+        let mut input = vec![];
+        input.extend_from_slice(&zero_digest);
+        input.extend_from_slice(&op_pub_data);
+        let left_running: [u8; KECCAK_HASH_OUT_BYTE_SIZE] = keccak(&input);
+        // The running hash must be genuinely non-empty (non-zero) for this to
+        // exercise the AC edge case.
+        assert_ne!(left_running, zero_digest);
+
+        // Left segment starts at the segment's true start (here: zero);
+        // right segment's start digest equals the left child's running hash.
+        let left_segment = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: zero_digest,
+        };
+        let right_segment_match = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: left_running,
+        };
+
+        // Seam match: stitch succeeds, carrying the LEFT segment's start digest.
+        let stitched = left_segment.stitch(&right_segment_match, &left_running);
+        assert_eq!(
+            stitched.old_on_chain_operations_pub_data_hash,
+            left_segment.old_on_chain_operations_pub_data_hash,
+            "stitched segment must carry the left child's start digest"
+        );
+        // try_stitch agrees.
+        assert!(
+            left_segment
+                .try_stitch(&right_segment_match, &left_running)
+                .is_ok()
+        );
+
+        // Seam mismatch: a right segment whose start digest disagrees with the
+        // left running hash must error (and panic via the hard `stitch`).
+        let right_segment_mismatch = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: k(42),
+        };
+        assert!(
+            left_segment
+                .try_stitch(&right_segment_mismatch, &left_running)
+                .is_err(),
+            "mismatched on-chain-ops seam must be rejected"
+        );
+
+        // And the full Batch-level merge mirror: when the left child's running
+        // on-chain-ops hash is `left_running` and the right child's
+        // segment-start matches, the merged batch carries the right child's
+        // (further-advanced) running hash.
+        let mid_state = h(50);
+        let mid_delta = h(60);
+        let mid_prio = k(7);
+        // Advance the right child's running hash one more op past `left_running`.
+        let mut input2 = vec![];
+        input2.extend_from_slice(&left_running);
+        input2.extend_from_slice(&op_pub_data);
+        let right_running: [u8; KECCAK_HASH_OUT_BYTE_SIZE] = keccak(&input2);
+
+        let left = one_block_batch(
+            5,
+            100,
+            h(40),
+            mid_state,
+            h(45),
+            mid_delta,
+            k(1),
+            mid_prio,
+            left_running, // left child's running on-chain-ops hash
+            1,
+        );
+        let right = one_block_batch(
+            6,
+            150,
+            mid_state,
+            h(70),
+            mid_delta,
+            h(80),
+            mid_prio,
+            k(9),
+            right_running, // right child's running on-chain-ops hash
+            1,
+        );
+        let merged = left.merge_consecutive(&right);
+        assert_eq!(
+            merged.on_chain_operations_pub_data_hash, right_running,
+            "merged batch must expose the right child's running on-chain-ops hash"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "seam broken")]
+    fn segment_stitch_rejects_broken_seam() {
+        let left_segment = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: k(1),
+        };
+        let right_segment = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: k(50),
+        };
+        // Left running hash k(99) != right segment start k(50): must panic.
+        let _ = left_segment.stitch(&right_segment, &k(99));
+    }
+
+    #[test]
+    fn segment_stitch_start_digest_threading() {
+        // The stitched segment must always carry the LEFT segment's start
+        // digest, never the right's, so the chain stays anchored at the
+        // segment's true start across a chain of merges.
+        let seg_a = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: k(10),
+        };
+        let running_ab = k(20);
+        let seg_b = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: running_ab,
+        };
+        let ab = seg_a.stitch(&seg_b, &running_ab);
+        assert_eq!(ab.old_on_chain_operations_pub_data_hash, k(10));
+
+        // Stitch the (A+B) node to a third segment C whose start equals the
+        // running hash after B; the result still carries A's start digest.
+        let running_abc = k(30);
+        let seg_c = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: running_abc,
+        };
+        let abc = ab.stitch(&seg_c, &running_abc);
+        assert_eq!(
+            abc.old_on_chain_operations_pub_data_hash,
+            k(10),
+            "start digest must remain anchored at the leftmost segment across merges"
+        );
     }
 }

@@ -23,6 +23,7 @@ use circuit::block_tx_constraints::{BlockTxCircuit, BlockTxTarget, Circuit as _}
 use circuit::builder::custom::cyclic_base_proof;
 use circuit::keccak::helpers::keccak;
 use circuit::recursion::batch::{Batch, SegmentInfo};
+use circuit::recursion::batch_merge_constraints::{BatchMergeCircuit, Circuit as _};
 use circuit::recursion::cyclic_circuit::{Circuit as _, CyclicRecursionCircuit};
 use circuit::tx;
 use circuit::types::asset::Asset;
@@ -37,7 +38,7 @@ use clap::{Parser, ValueEnum};
 use env_logger::{Builder, DEFAULT_FILTER_ENV, Env, try_init_from_env};
 use log::{Level, LevelFilter, Log, Metadata, Record, debug, info};
 use plonky2::field::goldilocks_field::GoldilocksField;
-use plonky2::field::types::PrimeField64;
+use plonky2::field::types::{Field, Field64, PrimeField64};
 use plonky2::hash::hash_types::HashOut;
 use plonky2::plonk::circuit_data::CircuitData;
 use plonky2::plonk::proof::{CompressedProofWithPublicInputs, ProofWithPublicInputs};
@@ -151,6 +152,25 @@ struct Args {
     /// real proving is ~0.94 s/fold.
     #[arg(long, default_value_t = 64)]
     blocks: usize,
+
+    /// L5 fold strategy (issue #82). `serial`: today's L5 cyclic linked-list
+    /// fold (default; zero behavior change). `tree`: build the pre-L5
+    /// `BatchMergeCircuit`, assert its self-shape matches the L5 cyclic
+    /// circuit (`merge.common == l5.common`), and wire the host-level
+    /// pairwise tree-fold of L5 `Batch` proofs (build-validated). Batch mode
+    /// only. The LIVE timed >=4-leaf prove on EPYC hardware is a documented
+    /// follow-up run (see the PR), so this path does NOT execute a full L5
+    /// prove in-workspace.
+    #[arg(long, value_enum, default_value_t = L5FoldMode::Serial)]
+    l5_fold: L5FoldMode,
+
+    /// L5 tree mode only (issue #82): after wiring the tree fold, also run the
+    /// L5 serial fold over the same per-block batches and assert element-wise
+    /// equality of the two roots' semantic public inputs (the `Batch` +
+    /// `SegmentInfo` PI surface, excluding the trailing verifier-key PIs which
+    /// differ by construction: L5 leaf VK vs merge VK).
+    #[arg(long, default_value_t = false)]
+    l5_ab_check: bool,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -168,6 +188,13 @@ enum L2FoldMode {
 enum LeafOrder {
     Forward,
     Reverse,
+}
+
+/// Issue #82: L5 fold strategy (pre-L5 block-proof aggregation).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum L5FoldMode {
+    Serial,
+    Tree,
 }
 
 fn main() {
@@ -260,6 +287,28 @@ fn main() {
     }
     if args.leaf_order != LeafOrder::Forward && args.l2_fold != L2FoldMode::Tree {
         eprintln!("error: --leaf-order requires --l2-fold tree");
+        std::process::exit(2);
+    }
+    if args.l5_fold == L5FoldMode::Tree && args.stream {
+        eprintln!("error: --l5-fold tree is batch-mode only (issue #82); drop --stream");
+        std::process::exit(2);
+    }
+    if args.l5_fold == L5FoldMode::Tree && args.l2_fold == L2FoldMode::Tree {
+        eprintln!(
+            "error: --l5-fold tree and --l2-fold tree are separate driver paths (issue #82); \
+             run them one at a time"
+        );
+        std::process::exit(2);
+    }
+    if args.l5_ab_check && args.l5_fold != L5FoldMode::Tree {
+        eprintln!("error: --l5-ab-check requires --l5-fold tree");
+        std::process::exit(2);
+    }
+    if args.l5_fold == L5FoldMode::Tree && args.l5_segment_check {
+        eprintln!(
+            "error: --l5-fold tree (issue #82) and --l5-segment-check (issue #78) are separate \
+             L5 driver paths; run them one at a time"
+        );
         std::process::exit(2);
     }
 
@@ -457,6 +506,24 @@ fn main() {
             chain_circuit.block_tx_witness_size,
             &dummy_tx_chain_circuit,
             &dummy_proof,
+            bench_start,
+            bench_cpu_start,
+        );
+        return;
+    }
+
+    // Issue #82: pre-L5 block-proof aggregation tree-fold. Build-validates the
+    // `BatchMergeCircuit` against the L5 cyclic self-shape and wires the
+    // host-level pairwise tree fold + A/B check. The live timed prove is a
+    // documented follow-up (does NOT run a full L5 prove in-workspace).
+    if args.l5_fold == L5FoldMode::Tree {
+        run_l5_tree_fold(
+            &args,
+            &block,
+            effective_limit,
+            &data,
+            &pre_exec_data,
+            &chain_circuit_data,
             bench_start,
             bench_cpu_start,
         );
@@ -1598,45 +1665,6 @@ fn run_l4_check(
     );
 }
 
-/// Issue #78: 8-way L5 (`CyclicRecursionCircuit`) segment-parallel
-/// scheduler.
-///
-/// Pipeline:
-///  1. Build the L1..L4 + L5 circuits ONCE (shape-identical across blocks).
-///  2. Synthesize a `--blocks` continuation-consistent block sequence from
-///     `bench_test.json` (the repo ships only a single-block fixture) so the
-///     per-fold sanity checks in `cyclic_circuit.rs` all pass.
-///  3. Produce one L4 proof per synthesized block (serial up-front; L4 is not
-///     the floor this issue targets -- the L5 fold is).
-///  4. Split the blocks across `--segments` (`1..=8`) segment chains and
-///     compute each chain's starting on-chain-operations keccak prefix on the
-///     host (prove-free; mirrors the in-circuit `Batch` aggregation).
-///  5. Fold each segment's L4 proofs into a running L5 proof IN PARALLEL
-///     across segments (rayon). The fold is serial WITHIN a segment (a cyclic
-///     proof is threaded through), parallel ACROSS segments.
-///  6. L5-verify every segment proof (the functional acceptance).
-///  7. Emit `l5_segment_batch` with the parallel `effective_ms_per_block`.
-///
-/// ## L6 termination (gated on issue #83)
-///
-/// The wrapper (`WrapperCircuit::prove_inner`, `NUM_CHAINS_PER_BATCH = 8`)
-/// takes the `S` segment proofs plus a `delta_chain_proof`, a
-/// `blob_evaluation_proof`, and a KZG `WrapperInput` -- none of which exist
-/// in-repo yet (that is issue #83). When #83 lands, the L6 call shape is:
-/// pad the unused `chain_proofs[S..8)` slots with `chain_proofs[0]` and set
-/// `segment_count = S`; the wrapper asserts segment 0's on-chain-ops hash is
-/// zero (which the host pre-pass guarantees). This driver only DOCUMENTS that
-/// shape -- it does not call the wrapper. The verifying L6 run + the
-/// ≤200 ms/block hardware measurement (#10 AMD EPYC 7B13 baseline) are the
-/// follow-up tracked on #78/#83.
-///
-/// ## Composition seam (issue #82)
-///
-/// A segment's per-block L5 fold can be swapped for a pre-L5 merge-tree root
-/// proof of the SAME L5 shape without changing the L6 call: each segment
-/// already produces a single proof with the L5 public-input surface, so #82's
-/// merge tree slots in as the segment producer with the scheduler and wrapper
-/// call unchanged.
 fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
     let bench_start = Instant::now();
     let bench_cpu_start = cpu_time_ms();
@@ -2007,6 +2035,394 @@ fn prove_block_l4(
     l4_data
         .prove(pw)
         .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L4 prove failed: {err:?}"))
+}
+
+/// Issue #82: pre-L5 block-proof aggregation tree-fold driver.
+///
+/// This BUILD-VALIDATES the `BatchMergeCircuit` and WIRES the log-depth fold,
+/// but deliberately does NOT execute a live L5 prove: the timed >=4-leaf prove
+/// on dedicated EPYC hardware is a documented follow-up run (#90 / ADR-0003
+/// §D5). It builds L4 -> L5 (`CyclicRecursionCircuit`) -> `BatchMergeCircuit`,
+/// asserts the self-shape gate `merge.common == l5.common`, wires the pairwise
+/// tree fold over a `level` vector of per-block L5 `Batch` proofs (carrying odd
+/// proofs up a level) using the host `Batch::merge_consecutive` /
+/// `SegmentInfo::stitch` mirrors, and with `--l5-ab-check` compares the tree
+/// root vs the L5 serial fold element-wise on the semantic PI surface.
+#[allow(clippy::too_many_arguments)]
+fn run_l5_tree_fold(
+    args: &Args,
+    block: &Block<F>,
+    effective_limit: usize,
+    l3_data: &CircuitData<F, C, D>,
+    pre_exec_data: &CircuitData<F, C, D>,
+    chain_circuit_data: &CircuitData<F, C, D>,
+    bench_start: Instant,
+    bench_cpu_start: Option<u64>,
+) {
+    let _ = (l3_data, effective_limit);
+
+    // ---- Build the L4 -> L5 -> merge circuit chain.
+    let l4_define_t = Instant::now();
+    let l4 = BlockCircuit::define(CIRCUIT_CONFIG, pre_exec_data, chain_circuit_data, 1);
+    let l4_data = l4.builder.build::<C>();
+    info!(
+        "L5_TREEFOLD: L4 BlockCircuit defined+built in {:?} (degree 2^{})",
+        l4_define_t.elapsed(),
+        l4_data.common.degree_bits()
+    );
+
+    let l5_define_t = Instant::now();
+    let l5_circuit = CyclicRecursionCircuit::define(CIRCUIT_CONFIG, &l4_data, 1);
+    let l5_data = l5_circuit.builder.build::<C>();
+    events::emit(&BenchEvent::CircuitDefine {
+        layer: 5,
+        name: "CyclicRecursionCircuit",
+        wall_ms: l5_define_t.elapsed().as_millis() as u64,
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
+    info!(
+        "L5_TREEFOLD: L5 CyclicRecursionCircuit defined+built in {:?} (degree 2^{}, {} public inputs)",
+        l5_define_t.elapsed(),
+        l5_data.common.degree_bits(),
+        l5_data.common.num_public_inputs
+    );
+
+    let merge_define_t = Instant::now();
+    let merge_circuit = BatchMergeCircuit::define(CIRCUIT_CONFIG, &l5_data);
+    let merge_data = merge_circuit.builder.build::<C>();
+    events::emit(&BenchEvent::CircuitDefine {
+        layer: 5,
+        name: "BatchMergeCircuit",
+        wall_ms: merge_define_t.elapsed().as_millis() as u64,
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
+    info!(
+        "L5_TREEFOLD: BatchMergeCircuit defined+built in {:?} (degree 2^{}, {} public inputs)",
+        merge_define_t.elapsed(),
+        merge_data.common.degree_bits(),
+        merge_data.common.num_public_inputs
+    );
+
+    // ---- Self-shape gate (issue #82 acceptance). The merge circuit must build
+    // into the L5 cyclic circuit's EXACT shape (itself the goal-asserted 2^15
+    // fixed point). This build-time equality is what guarantees the merge
+    // node's PI surface is consumable anywhere an L5 proof is, AND that the
+    // node fits inside L5's 2^15 budget.
+    assert!(
+        merge_data.common == l5_data.common,
+        "BatchMergeCircuit must build into the L5 cyclic circuit's exact self-shape \
+         (issue #82); see Builder::verify_leaf_or_cyclic_proof docs. \
+         merge: degree 2^{} / {} PIs, l5: degree 2^{} / {} PIs",
+        merge_data.common.degree_bits(),
+        merge_data.common.num_public_inputs,
+        l5_data.common.degree_bits(),
+        l5_data.common.num_public_inputs,
+    );
+    info!(
+        "L5_TREEFOLD: self-shape gate PASS -- BatchMergeCircuit.common == L5.common \
+         (fixed point closed; merge node fits L5's 2^{} budget)",
+        l5_data.common.degree_bits()
+    );
+
+    // ---- Build a small set of semantically-valid, contiguous per-block L5
+    // batches to exercise the fold wiring. Each batch is a single-block L5
+    // `Batch` whose ranges/roots/priority-prefix chain are stitched so the
+    // merge invariants hold. (The live prove will replace these with real L5
+    // proofs; the topology and invariant checks are identical.)
+    let num_leaves = 4usize; // >= 4 so we exercise multiple tree levels
+    let leaves: Vec<Batch<F>> = build_synthetic_l5_batches(block, num_leaves);
+    info!(
+        "L5_TREEFOLD: {} synthetic per-block L5 batches built (contiguous block range {}..={})",
+        num_leaves,
+        leaves.first().map(|b| b.end_block_number).unwrap_or(0),
+        leaves.last().map(|b| b.end_block_number).unwrap_or(0),
+    );
+
+    // The segment-start digests: leaf k's segment starts where leaf k-1's
+    // running on-chain-ops hash ended (the L6 seam contract). Leaf 0 starts at
+    // the zero digest (first segment is empty, per wrapper_circuit.rs:160-165).
+    let segments: Vec<SegmentInfo> = leaves
+        .iter()
+        .scan([0u8; 32], |start, leaf| {
+            let seg = SegmentInfo {
+                old_on_chain_operations_pub_data_hash: *start,
+            };
+            *start = leaf.on_chain_operations_pub_data_hash;
+            Some(seg)
+        })
+        .collect();
+
+    // ---- Pairwise merge up the tree. Each entry carries (batch, segment,
+    // is_merge), mirroring the (proof, is_merge) carry in `run_tree_fold`.
+    let mut level: Vec<(Batch<F>, SegmentInfo, bool)> = leaves
+        .iter()
+        .cloned()
+        .zip(segments.iter().cloned())
+        .map(|(b, s)| (b, s, false))
+        .collect();
+
+    let mut depth = 0usize;
+    let mut merges = 0usize;
+    while level.len() > 1 {
+        depth += 1;
+        let mut next = Vec::with_capacity(level.len() / 2 + 1);
+        let mut iter = level.into_iter();
+        while let Some(left) = iter.next() {
+            match iter.next() {
+                Some(right) => {
+                    // Seam: right's segment-start digest must equal left's
+                    // running on-chain-ops hash (escape hatch iii stitch).
+                    let stitched_segment = left
+                        .1
+                        .try_stitch(&right.1, &left.0.on_chain_operations_pub_data_hash)
+                        .unwrap_or_else(|err| {
+                            panic!("L5_TREEFOLD merge #{merges} (level {depth}) seam stitch failed: {err:?}")
+                        });
+                    let merged_batch = left
+                        .0
+                        .try_merge_consecutive(&right.0)
+                        .unwrap_or_else(|err| {
+                            panic!("L5_TREEFOLD merge #{merges} (level {depth}) batch merge failed: {err:?}")
+                        });
+                    merges += 1;
+                    next.push((merged_batch, stitched_segment, true));
+                }
+                None => {
+                    info!("L5_TREEFOLD level {depth}: odd proof carried up to the next level");
+                    next.push(left);
+                }
+            }
+        }
+        level = next;
+    }
+    let (root_batch, root_segment, _root_is_merge) =
+        level.pop().expect("L5 tree fold produced no root");
+
+    info!(
+        "L5_TREEFOLD wired: leaves={} depth={} merges={} root_block_range={}..={} root_batch_size={}",
+        num_leaves,
+        depth,
+        merges,
+        root_batch
+            .end_block_number
+            .saturating_sub(root_batch.batch_size),
+        root_batch.end_block_number,
+        root_batch.batch_size,
+    );
+
+    // ---- A/B: serial fold over the SAME batches; root PIs must match.
+    if args.l5_ab_check {
+        info!(
+            "L5_AB_CHECK: running serial L5 fold over the same {} batches...",
+            num_leaves
+        );
+        let mut serial_batch = leaves[0].clone();
+        for right in &leaves[1..] {
+            serial_batch = serial_batch
+                .try_merge_consecutive(right)
+                .unwrap_or_else(|err| panic!("L5_AB_CHECK serial step failed: {err:?}"));
+        }
+        // The serial fold's segment is always the first leaf's start digest
+        // (the running chain is anchored at the segment start), same as the
+        // tree root's left-anchored segment.
+        let serial_segment = segments[0].clone();
+
+        // Semantic PI surface: the `Batch` PIs followed by the `SegmentInfo`
+        // PIs. The trailing verifier-key PIs differ by construction (L5 leaf
+        // VK in the serial root, merge VK in the tree root) and are excluded.
+        let tree_pis = batch_segment_public_inputs(&root_batch, &root_segment);
+        let serial_pis = batch_segment_public_inputs(&serial_batch, &serial_segment);
+        assert_eq!(
+            tree_pis.len(),
+            serial_pis.len(),
+            "L5_AB_CHECK: semantic PI lengths differ"
+        );
+        let mismatches: Vec<usize> = (0..tree_pis.len())
+            .filter(|&i| tree_pis[i] != serial_pis[i])
+            .collect();
+        if mismatches.is_empty() {
+            info!(
+                "L5_AB_CHECK PASS: all {} semantic public inputs element-wise equal \
+                 (trailing verifier-key PIs differ by design: L5 leaf VK vs merge VK)",
+                tree_pis.len()
+            );
+        } else {
+            eprintln!(
+                "L5_AB_CHECK FAIL: {} of {} semantic public inputs differ; first mismatching indices: {:?}",
+                mismatches.len(),
+                tree_pis.len(),
+                &mismatches[..mismatches.len().min(16)]
+            );
+            std::process::exit(1);
+        }
+    }
+
+    info!(
+        "L5_TREEFOLD DONE: BatchMergeCircuit build-validated against the L5 self-shape and the \
+         log-depth fold wired. The live timed >=4-leaf prove on EPYC hardware is a documented \
+         follow-up run (see issue #82 / ADR-0003 §D5)."
+    );
+
+    let total_wall_ms = bench_start.elapsed().as_millis() as u64;
+    let total_cpu_ms = diff_ms(bench_cpu_start, cpu_time_ms());
+    events::emit(&BenchEvent::Summary {
+        tx_per_proof: args.tx_per_proof,
+        tx_limit: args.tx_limit,
+        chunks: num_leaves,
+        total_wall_ms,
+        total_cpu_ms,
+        peak_rss_mb: peak_rss_mb(),
+        ts: now_iso8601(),
+    });
+}
+
+/// Build `n` contiguous single-block L5 `Batch` values seeded from the test
+/// block, with the state/delta-root and priority-prefix keccak chains stitched
+/// so the merge invariants hold. Used only by `run_l5_tree_fold` to exercise
+/// the fold wiring without a live prove.
+fn build_synthetic_l5_batches(block: &Block<F>, n: usize) -> Vec<Batch<F>> {
+    let mut out = Vec::with_capacity(n);
+    // Threaded state across blocks: each block's new_* feeds the next's old_*.
+    let mut state_root = block.old_state_root;
+    let mut delta_root = block.old_account_delta_tree_root;
+    let mut prio_prefix = block.old_prefix_priority_operation_hash;
+    let mut on_chain_running = [0u8; 32];
+    let base_block = block.block_number;
+    let base_ts = block.created_at;
+
+    for i in 0..n {
+        let new_state_root = HashOut::<F>::from([
+            F::from_canonical_u64(1_000 + i as u64),
+            F::from_canonical_u64(2_000 + i as u64),
+            F::from_canonical_u64(3_000 + i as u64),
+            F::from_canonical_u64(4_000 + i as u64),
+        ]);
+        let new_delta_root = HashOut::<F>::from([
+            F::from_canonical_u64(5_000 + i as u64),
+            F::from_canonical_u64(6_000 + i as u64),
+            F::from_canonical_u64(7_000 + i as u64),
+            F::from_canonical_u64(8_000 + i as u64),
+        ]);
+        // Advance the priority-prefix keccak chain by one op so the seam
+        // invariant (`left.new == right.old`) is exercised non-trivially.
+        let new_prio_prefix: [u8; 32] = {
+            let mut input = Vec::with_capacity(64);
+            input.extend_from_slice(&prio_prefix);
+            input.extend_from_slice(&[i as u8; 32]);
+            keccak(&input)
+        };
+        // Advance the on-chain-ops running hash by one op (non-empty leaf).
+        let new_on_chain_running: [u8; 32] = {
+            let mut input = Vec::with_capacity(64);
+            input.extend_from_slice(&on_chain_running);
+            input.extend_from_slice(&[(i as u8).wrapping_add(100); 32]);
+            keccak(&input)
+        };
+
+        out.push(Batch::<F> {
+            end_block_number: base_block + i as u64,
+            batch_size: 1,
+            first_created_at: base_ts + i as i64,
+            last_created_at: base_ts + i as i64,
+            old_state_root: state_root,
+            new_validium_root: HashOut::<F>::from([
+                F::from_canonical_u64(9_000 + i as u64),
+                F::from_canonical_u64(9_100 + i as u64),
+                F::from_canonical_u64(9_200 + i as u64),
+                F::from_canonical_u64(9_300 + i as u64),
+            ]),
+            new_state_root,
+            old_account_delta_tree_root: delta_root,
+            new_account_delta_tree_root: new_delta_root,
+            on_chain_operations_pub_data_hash: new_on_chain_running,
+            priority_operations_count: 1,
+            old_prefix_priority_operation_hash: prio_prefix,
+            new_prefix_priority_operation_hash: new_prio_prefix,
+            new_public_market_details: core::array::from_fn(|_| {
+                circuit::types::market_details::PublicMarketDetails::default()
+            }),
+        });
+
+        state_root = new_state_root;
+        delta_root = new_delta_root;
+        prio_prefix = new_prio_prefix;
+        on_chain_running = new_on_chain_running;
+    }
+    out
+}
+
+/// Concatenate a `Batch`'s and a `SegmentInfo`'s public inputs in L5 layout
+/// order (Batch first, then SegmentInfo), for the A/B semantic comparison.
+fn batch_segment_public_inputs(batch: &Batch<F>, segment: &SegmentInfo) -> Vec<F> {
+    let mut pis = batch_public_inputs(batch);
+    pis.extend(segment.to_public_inputs());
+    pis
+}
+
+/// Reconstruct a `Batch`'s public-input vector in the L5 layout used by
+/// `Batch::from_public_inputs` (the inverse of that parser, for the
+/// semantic A/B comparison). Only the fields that participate in the merge
+/// semantics are compared; the layout matches the in-circuit registration.
+fn batch_public_inputs(batch: &Batch<F>) -> Vec<F> {
+    use circuit::types::constants::POSITION_LIST_SIZE;
+
+    let mut pis = vec![
+        F::from_canonical_u64(batch.end_block_number),
+        F::from_canonical_u64(batch.batch_size),
+        F::from_canonical_i64(batch.first_created_at),
+        F::from_canonical_i64(batch.last_created_at),
+    ];
+    pis.extend_from_slice(&batch.old_state_root.elements);
+    pis.extend_from_slice(&batch.new_validium_root.elements);
+    pis.extend_from_slice(&batch.new_state_root.elements);
+    pis.extend_from_slice(&batch.old_account_delta_tree_root.elements);
+    pis.extend_from_slice(&batch.new_account_delta_tree_root.elements);
+    // Market details: 5 field elements per entry (sign, abs lo, abs hi,
+    // mark_price, quote_multiplier), matching `Batch::from_public_inputs`.
+    for md in batch
+        .new_public_market_details
+        .iter()
+        .take(POSITION_LIST_SIZE)
+    {
+        let (sign, abs) = {
+            use num::Signed;
+            let abs = md.funding_rate_prefix_sum.abs();
+            let abs_u64 = abs.to_u64_digits().1.first().copied().unwrap_or(0);
+            let sign = if md.funding_rate_prefix_sum.is_negative() {
+                2u64
+            } else {
+                1u64
+            };
+            (sign, abs_u64)
+        };
+        pis.push(F::from_canonical_u64(sign));
+        pis.push(F::from_canonical_u64(abs & 0xFFFF_FFFF));
+        pis.push(F::from_canonical_u64(abs >> 32));
+        pis.push(F::from_canonical_u32(md.mark_price));
+        pis.push(F::from_canonical_u32(md.quote_multiplier));
+    }
+    pis.extend(
+        batch
+            .on_chain_operations_pub_data_hash
+            .iter()
+            .map(|&b| F::from_canonical_u8(b)),
+    );
+    pis.push(F::from_canonical_u64(batch.priority_operations_count));
+    pis.extend(
+        batch
+            .old_prefix_priority_operation_hash
+            .iter()
+            .map(|&b| F::from_canonical_u8(b)),
+    );
+    pis.extend(
+        batch
+            .new_prefix_priority_operation_hash
+            .iter()
+            .map(|&b| F::from_canonical_u8(b)),
+    );
+    pis
 }
 
 /// Compute the delta between two CPU-time samples. Returns `None` if
