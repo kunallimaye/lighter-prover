@@ -36,17 +36,21 @@ Per #59 (feasibility GO) and #64 (gate budget GO): leaf circuit = today's `Block
 ### D4 — S=20 is the streaming sweep anchor
 Validated by #60 and unlocked by #63 (PR #65). Comparison-fleet sweeps remain S ∈ {1,2,4,6} for historical comparability; streaming/cell experiments anchor at S=20 and may sweep {4, 6, 20}.
 
-### D5 — L5 throughput via 8-way segment parallelism (supersedes the aggregation-tree design; decided by spike #71)
+### D5 — L5 throughput: hybrid — 8-way segment parallelism near-term, pre-L5 merge tree for scaling (revised per #84; supersedes both the original tree-only text and PR #79's Path-A-only text)
 
-The measured 0.94 s serial L5 fold (#10 Stage-A) cannot meet the 226 ms peak cadence (4.15× over). The fix is already designed into the circuits: L6's `WrapperInnerCircuit` merges up to **8 parallel L5 chain proofs** (`NUM_CHAINS_PER_BATCH = 8`, `circuit/src/recursion/wrapper_circuit.rs:44`) via `handle_segment_proofs` (`wrapper_circuit.rs:134-219`) and `BatchTarget::conditionally_merge_consecutive` (`circuit/src/recursion/batch.rs:385-463`), enforcing contiguous block numbers, monotonic timestamps, state/delta-root chaining, and on-chain-ops + priority-op keccak prefix chaining across segments; `segment_count ∈ {1..8}` supports partial batches (`wrapper_circuit.rs:210-216`).
+The measured 0.94 s serial L5 fold (#10 Stage-A) cannot meet the 226 ms peak cadence (4.15× over). Two complementary mechanisms resolve it:
 
-**Why the L2 tree-fold pattern (#67/PR #69) does NOT lift to L5**: `Batch.on_chain_operations_pub_data_hash` is a keccak prefix chain (`cyclic_circuit.rs:229-276`) — non-associative, so two half-range accumulators cannot be merged from endpoint digests. A merge tree at L5 would require an L1-contract-changing commitment redesign. Ruled out.
+**Near-term (Path A — #78):** L6's `WrapperInnerCircuit` natively merges up to **8 parallel L5 chain proofs** (`NUM_CHAINS_PER_BATCH = 8`, `circuit/src/recursion/wrapper_circuit.rs:44`; `handle_segment_proofs` :134-219; `BatchTarget::conditionally_merge_consecutive` `circuit/src/recursion/batch.rs:385-463`; `segment_count ∈ {1..8}`). All cross-segment stitch values are host-derivable from block bytes/headers in milliseconds. Yield: 0.94 s ÷ 8 ≈ **117.5 ms/block with zero new circuits**. Caveats that make this a band-aid rather than the scaling story: the 8× is a **compile-time hard cap** (exceeding it re-synthesizes L6), total headroom is ~1.93× vs peak — the bottom of this ADR's required 1.5-2× sizing band — and segment boundaries require a batch pre-scan.
 
-**Why that chain does not block segment parallelism**: every per-segment start hash is a deterministic function of raw block bytes — the host computes all segment-boundary hashes in one keccak prefix pass (milliseconds per batch) *before* spawning folders; the other sequential fields (`old_state_root`, `old_account_delta_tree_root`, `old_prefix_priority_operation_hash`) are read directly from block headers.
+**Scaling (Path C — #82):** a pre-L5 block-proof merge node — two conditional same-shape cyclic verifications on the L5 `Batch`+`SegmentInfo` PI surface, `conditionally_merge_consecutive` glue, and the on-chain-ops keccak **start-digest stitch** — **builds at 2^14 (12,503 pre-padding gates), ~38% of the L5 2^15 self-shape budget** (calibration-anchored probe; control rows matched #10/#64 measurements). Merge step ≈ today's ~0.94 s fold ⇒ a log-depth tree gives ~log₂(N)·0.94 s critical path and no arity ceiling.
 
-**Protocol** (per batch of B blocks, split points p_0=0 < … < p_S=B, S ≤ 8): (1) host pre-pass snapshots the running on-chain-ops hash at each split; (2) each segment k seeds `SegmentInfo` with h_{p_k}, calls `cyclic_base_proof`, then serially folds its block range — 8 segments in parallel; (3) pad unused `chain_proofs` slots with `chain_proofs[0]`, set `segment_count = S`, call `WrapperCircuit::prove_inner` (once per batch — off the per-block hot path).
+**Correction record:** PR #79's "Ruled out" conclusion rested on the non-associativity of the keccak prefix chain over *endpoint digests* — while the same section documented host-side start-digest threading for segments. The tension resolves in the tree's favor: composition happens by **threading each range's start digest through public inputs and asserting continuity at the join** — exactly how L6 already stitches adjacent segments (`conditional_assert_eq_keccak_output`, `wrapper_circuit.rs:221`) — not by merging endpoint digests. The original #71 verdict was an artifact of analyzing a tree 3 commits behind main, without PR #69's L2 merge-circuit precedent in view.
 
-**Throughput**: 0.94 s ÷ 8 ≈ **117.5 ms/block effective** — clears the 226 ms peak budget with 48% headroom. **Future amplifier** if demand exceeds ~7,500 tx/s: multi-arity L5 fold (k block proofs per step; gate cost sub-linear in k) — tracked as a future spike, not needed now. Spike: #71. Implementation: #78.
+**Composition:** the paths are orthogonal — 8 segments in parallel, each folded by a log-depth tree; a segment's serial-fold output and a tree root are both L5-shaped proofs, so the L6 call is unchanged either way.
+
+**Shared gate (#83):** any *verifying* L6 proof additionally requires the never-exercised KZG `WrapperInput` sidecar, cyclic-delta prover, and blob-evaluation prover — orthogonal to the A/C choice but bounding any end-to-end batch-proof demonstration.
+
+**Future amplifier:** multi-arity L5 fold (Path B) remains parked unless demand outgrows the hybrid's ceiling. Decision trail: #71 (original verdict + reversal with probe), PR #79 (superseded text), #84 (this revision); implementations #78 (A) + #82 (C); prerequisite #83.
 
 ### D6 — Data-plane rules
 - **GCS is showback-only**: run manifests, BENCH_EVENT JSONL, final proof artifacts. Never in the per-proof critical path (a 100-300 ms GCS round-trip is a ~100% tax on a 0.5 s fold step).
@@ -68,7 +72,7 @@ M (workers per cell) ∈ {1, 2, 4, 8, 16}; S per D4; cell count N sized from mea
 | S=20, serial L2 (#63 landed) | ~12.8 s + 5.1 s ≈ 18 s | ~80 |
 | S=20 + L2 tree-fold (D3) | ~10.8 s L1 (M≥25) + ~2.5 s L2 + 5.1 s L4 ≈ 16 s (L1+L4-bound) | ~70 |
 
-Plus the D5 segment-parallel L5 layer (8 folders) in place of a single serial L5 folder. Practical sizing adds 1.5-2× headroom for queueing margin and failure recovery. Cell RSS at S=20: ~9.4 GB for L1/L2 (#60) + L4/L5 keys (~5.6 GB peak observed in the Stage-A run) — comfortably inside 32-64 GB hosts.
+Plus the D5 hybrid L5 layer (8 parallel segment folders, each a log-depth merge tree once #82 lands) in place of a single serial L5 folder. Practical sizing adds 1.5-2× headroom for queueing margin and failure recovery. Cell RSS at S=20: ~9.4 GB for L1/L2 (#60) + L4/L5 keys (~5.6 GB peak observed in the Stage-A run) — comfortably inside 32-64 GB hosts.
 
 **What this overturns**: issue #1's "L2 must run sequentially on a single process" described the linked-list driver, not a circuit constraint (#59 finding: ordering is enforced purely by state-root equality — associative). Issue #1 should gain a correction note when D3's implementation lands. Older comments claiming the chain circuit is 2^13 are also corrected (#64: it is 2^14).
 
@@ -77,6 +81,6 @@ Plus the D5 segment-parallel L5 layer (8 folders) in place of a single serial L5
 ## Risks
 
 1. The merge circuit's +4 PI perturbs the cyclic fixed point and three PI-index maps shared with L4 — mechanical but fiddly; mitigated by the A/B acceptance criterion (tree-folded proof verifies under the same L4).
-2. D5's 117.5 ms figure assumes 8 concurrent L5 proves scale linearly on one host; rayon contention between concurrent proves may erode it. #78's acceptance criterion (measured effective ≤ 200 ms on the reference machine) settles this; the fallback is spreading segment folders across hosts, which is architecturally free since block proofs already cross the network at this boundary.
+2. Path A's 117.5 ms figure assumes 8 concurrent L5 proves scale linearly on one host (rayon contention; #78's measured acceptance criterion settles it). Path C's merge step is build-validated only — prove-level confirmation (≈0.94 s/step, log-depth critical path) is #82's acceptance criterion. The L6 end-to-end gate (#83) bounds when any full verifying batch proof is demonstrable.
 3. L4 at 5.14 s is now ~⅓ of the cell wall; if it becomes the binding term after D3, intra-cell L4 pipelining (prove block H's L4 while H+1's L1 runs) is the next lever — not designed here.
 4. All measurements are single-machine (EPYC 7B13); cross-shape variance (the comparison fleet's domain) may shift constants but not structure.
