@@ -1,4 +1,4 @@
-Once `make build` is run and the `bench` executable is generated, that and `bench_test.json` can be copied across machines being placed at the same level, and run independently from the repository.
+The `bench` executable is produced locally by `make build` (which moves `../target/release/bench` to `bench/bench`) — it is a per-machine build artifact and is **not** shipped in the repository. Once built, it and `bench_test.json` can be copied to another machine *of the same architecture* (placed at the same level) and run independently from the repository.
 
 ## Supported `--tx-per-proof` range
 

@@ -41,15 +41,25 @@ FEEDER="${PROJECT_ROOT}/bench/feeder/feeder.py"
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 
-# Resolve the bench binary, building it if missing. Mirrors
-# scripts/local.sh build (cargo release build at the workspace root);
-# prefers bench/bench (the `make -C bench build` artifact) when present.
+# Resolve the bench binary, building it if missing OR not runnable on
+# this machine. Mirrors scripts/local.sh build (cargo release build at
+# the workspace root); prefers bench/bench (the `make -C bench build`
+# artifact) when present — but only after proving it actually executes
+# here. Existence/executable-bit alone is not enough: a stale or
+# foreign-architecture artifact at bench/bench (e.g. the Mach-O arm64
+# binary once committed upstream) passes `[[ -x ]]` yet dies with
+# "Exec format error" (exit 126) the moment it is exec'd (#56).
 ensure_bench_bin() {
-  if [[ -x "${PROJECT_ROOT}/bench/bench" ]]; then
+  if [[ -x "${PROJECT_ROOT}/bench/bench" ]] \
+     && "${PROJECT_ROOT}/bench/bench" --help >/dev/null 2>&1; then
     BENCH_BIN="${PROJECT_ROOT}/bench/bench"
     return 0
   fi
-  log_info "bench binary not found at bench/bench; building (release)..." >&2
+  if [[ -e "${PROJECT_ROOT}/bench/bench" ]]; then
+    log_warn "bench binary missing or wrong architecture — rebuilding (release)..." >&2
+  else
+    log_info "bench binary not found at bench/bench; building (release)..." >&2
+  fi
   require_cmd cargo
   local rustflags=""
   [[ "${TARGET_CPU_NATIVE}" == "1" ]] && rustflags="-C target-cpu=native"
