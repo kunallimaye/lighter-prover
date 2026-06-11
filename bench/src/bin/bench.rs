@@ -126,12 +126,14 @@ struct Args {
     leaf_order: LeafOrder,
 
     /// Issue #73 (cell slice B): intra-cell parallel tree scheduler.
-    /// `M` worker threads share the resident `CircuitData` (Arc) and prove
-    /// leaves/merges concurrently. Default `1` keeps the historical
-    /// sequential driver byte-for-byte (zero regression). M > 1 builds a
-    /// dedicated rayon thread pool of M workers; leaves and per-level
-    /// merges are dispatched into that pool, realizing the critical-path
-    /// latency PR #69's sequential bench only reports. Tree-fold only.
+    /// `M` worker threads share the resident `CircuitData` (by reference --
+    /// it is Send + Sync and immutable after build, so no Arc clone is
+    /// needed) and prove leaves/merges concurrently. Default `1` keeps the
+    /// historical sequential driver byte-for-byte (zero regression). M > 1
+    /// builds a dedicated rayon thread pool of M workers; leaves and
+    /// per-level merges are dispatched into that pool, realizing the
+    /// critical-path latency PR #69's sequential bench only reports.
+    /// Tree-fold only.
     ///
     /// Open question (issue #73, ADR-0003 §D1): plonky2 already saturates
     /// all cores per proof via the global rayon pool, so M concurrent
