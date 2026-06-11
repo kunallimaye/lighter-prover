@@ -31,7 +31,9 @@
   cloud-status cloud-recover \
   logs-list logs-last logs-clean \
   fleet-quota-check fleet-run fleet-run-dry fleet-status \
-  fleet-collect fleet-publish fleet-teardown
+  fleet-collect fleet-publish fleet-teardown \
+  stream-fetch-trace stream-record stream-replay stream-bench \
+  stream-test stream-smoke stream-sweep
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -189,6 +191,39 @@ fleet-publish: ## Render markdown, create Discussion, comment on #6 (requires RU
 
 fleet-teardown: ## Force-delete any leftover fleet VMs (optional RUN_ID=<id>, or all)
 	@$(FLEET) teardown $(if $(RUN_ID),--run-id $(RUN_ID),--all)
+
+# ─── Streaming bench (issues #47–#49) ────────────────────────────────
+# Root operator surface for the streaming producer/consumer pipeline:
+# feeder.py (trace producer, #48) piped into `bench --stream` (#49),
+# per the trace contract in bench/trace-format.md (#47). All targets
+# are thin wrappers around scripts/stream.sh (which cds into bench/ as
+# needed); the bench/Makefile keeps its own crate-local targets
+# (stream-record/stream-replay/stream-peak/feeder-test/stream-smoke/
+# stream-sweep) — root names below do not collide with them.
+#
+# Knobs: TRACE=, RATE=|SPEED= (exactly one), SYNTH_RATE=, DURATION=,
+# LOOP=1, OUT=, TX_PER_PROOF=, MAX_QUEUE=.
+
+stream-fetch-trace: ## Download the banked 15-min mainnet trace to traces/ (gcloud auth required)
+	@bash scripts/stream.sh fetch-trace
+
+stream-record: ## Capture a live mainnet trace (network; OUT=, DURATION=)
+	@bash scripts/stream.sh record
+
+stream-replay: ## Replay a trace to stdout (TRACE=, RATE=|SPEED=, DURATION=, LOOP=1)
+	@bash scripts/stream.sh replay
+
+stream-bench: ## E2E: replay trace into bench --stream (TRACE=+RATE=|SPEED= or SYNTH_RATE=; TX_PER_PROOF=, MAX_QUEUE=, DURATION=)
+	@bash scripts/stream.sh bench
+
+stream-test: ## Offline streaming test suites (feeder + consumer; <1 min, no proving)
+	@bash scripts/stream.sh test
+
+stream-smoke: ## Manual real-proving smoke (~minutes; not part of any test target)
+	@bash scripts/stream.sh smoke
+
+stream-sweep: ## Rate-ladder sweep for max sustained tx/s (long-running; real proving)
+	@bash scripts/stream.sh sweep
 
 # ─── Operator notes ──────────────────────────────────────────────────
 # - ORCH_FORCE_RESTART=1 on any admin-cloud-* / cloud-* target invalidates
