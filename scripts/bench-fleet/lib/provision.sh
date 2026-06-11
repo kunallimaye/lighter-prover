@@ -19,10 +19,13 @@ _PROV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091 # path is resolved at runtime from $BASH_SOURCE
 . "${_PROV_DIR}/common.sh"
 
-# render_startup <image> <svalues> <host_label> <run_id> -> path of rendered file
+# render_startup <image> <svalues> <host_label> <run_id> [<cal_mode>] -> path
 # <image> is the full AR URI including the per-microarch tag (#33).
+# <cal_mode> (issue #85): "1" switches the per-S worker container to
+# tx_limit=4*S; default "0" keeps the historical fixed __TX_LIMIT__.
 render_startup() {
   local image="$1" svalues="$2" host_label="$3" run_id="$4"
+  local cal_mode="${5:-0}"
   local tmpl="${FLEET_TEMPLATES}/vm-startup.sh.tmpl"
   local out
   out="$(mktemp -t bench-fleet-startup.XXXXXX)"
@@ -35,12 +38,14 @@ render_startup() {
     -v svalues="${svalues}" \
     -v host_label="${host_label}" \
     -v tx_limit="${TX_LIMIT}" \
+    -v cal_mode="${cal_mode}" \
     '{ gsub(/__IMAGE__/, image);
        gsub(/__BUCKET__/, bucket);
        gsub(/__RUN_PREFIX__/, run_prefix);
        gsub(/__SVALUES__/, svalues);
        gsub(/__HOST_LABEL__/, host_label);
        gsub(/__TX_LIMIT__/, tx_limit);
+       gsub(/__CAL_MODE__/, cal_mode);
        print }' "${tmpl}" > "${out}"
   printf '%s\n' "${out}"
 }
@@ -98,7 +103,7 @@ provision_one_vm() {
   image="$(fleet_image_for "${mt}" "${sha}")" || return 1
 
   local startup_path
-  startup_path="$(render_startup "${image}" "${svalues}" "${mt}" "${run_id}")"
+  startup_path="$(render_startup "${image}" "${svalues}" "${mt}" "${run_id}" "${CAL_MODE:-0}")"
   # Stash the rendered script next to the run state for debugging.
   cp "${startup_path}" "${run_dir}/${mt}.startup.sh"
 

@@ -169,6 +169,21 @@ make stream-sweep                                         # find max sustained t
 | `MAX_QUEUE`  | `1024`  | Bounded chunk-job queue in `bench --stream`; overflow is dropped and counted     |
 | `TX_PER_PROOF` | `4`   | Chunk size — same knob as the batch bench (see the Knobs table above)            |
 
+## Quickstart — chunk-size calibration
+
+Per-machine calibration of the chunk size S (issue #85): probes only the
+degree-bracket tops from issue #60's step-function finding, RAM-gates
+infeasible brackets, and reports the optimal S per objective (serial
+fold / tree fold / s-per-tx) plus a BENCH-LEDGER entry for Discussion #77.
+
+```bash
+make s-calibrate                          # this machine (CAL_SVALUES=, BLOCK_TX=, OUT_DIR=)
+make s-calibrate-fleet                    # 3 c4a cloud shapes (~$10-25; interactive cost gate)
+```
+
+The historical comparison fleet (`make fleet-run`, S ∈ {1,2,4,6}) is
+unaffected — see `scripts/bench-fleet/README.md` § Calibration mode.
+
 ## Configuration
 
 Cloud topology is configured in `config.toml` (copy from
@@ -203,6 +218,8 @@ for the rationale.
 │   ├── cloud.sh                    # gcloud + Cloud Build flows
 │   ├── stream.sh                   # Streaming bench flows (#47–#49 wiring)
 │   ├── stream-sweep.sh             # Rate-ladder sweep for bench --stream (#49)
+│   ├── s-calibrate.sh              # Per-machine chunk-size calibration suite (#85)
+│   ├── s-calibrate-report.py       # Calibration objective math + report/ledger rendering
 │   └── config.py                   # config.toml → shell exports + TF_VAR_*
 ├── traces/                         # Downloaded/recorded traces (gitignored)
 ├── Makefile                        # Operator entry point — see `make help`

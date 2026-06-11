@@ -38,6 +38,7 @@ RUN_PREFIX="__RUN_PREFIX__"    # e.g. <run-id>/<machine_type>/  (trailing slash)
 SVALUES="__SVALUES__"          # e.g. "1 2 4 6"
 HOST_LABEL="__HOST_LABEL__"    # e.g. c4a-highcpu-32
 TX_LIMIT="__TX_LIMIT__"        # e.g. 480 (LIGHTER_TX_LIMIT in the container)
+CAL_MODE="__CAL_MODE__"        # issue #85: "1" = per-S tx_limit=4*S; "0" = fixed TX_LIMIT
 
 # entrypoint.sh expects BENCH_BUCKET WITHOUT the gs:// scheme (it
 # constructs dest="gs://${BENCH_BUCKET}/${BENCH_PREFIX}/").
@@ -179,9 +180,15 @@ FAIL_COUNT=0
 for S in ${SVALUES}; do
   echo "FLEET_S${S}_START $(date -Is)"
   S_START=$(date +%s)
+  # Calibration mode (issue #85): the #60 methodology runs 4 chunks per
+  # probe, i.e. tx_limit=4*S. Default fleet mode keeps the fixed limit.
+  EFFECTIVE_TX_LIMIT="${TX_LIMIT}"
+  if [[ "${CAL_MODE}" == "1" ]]; then
+    EFFECTIVE_TX_LIMIT=$((4 * S))
+  fi
   timeout 4h docker run --rm --name "bench-S${S}" \
     -e LIGHTER_TX_PER_PROOF="${S}" \
-    -e LIGHTER_TX_LIMIT="${TX_LIMIT}" \
+    -e LIGHTER_TX_LIMIT="${EFFECTIVE_TX_LIMIT}" \
     -e BENCH_BUCKET="${BUCKET_NAME}" \
     -e BENCH_PREFIX="${RUN_PREFIX}S${S}" \
     -e RUST_LOG=info \

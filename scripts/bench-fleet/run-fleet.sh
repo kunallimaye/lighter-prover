@@ -28,7 +28,20 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${_SCRIPT_DIR}/lib/monitor.sh"
 
 # Default sweep values: config.toml [fleet].svalues > built-in.
+# ADR-0003 §D4: the comparison fleet stays S in {1,2,4,6} for
+# comparability with the historical 10-shape data. Do NOT change this --
+# the calibration suite (issue #85) is a separate, opt-in mode below.
 DEFAULT_SVALUES="${FLEET_SVALUES:-1 2 4 6}"
+
+# Calibration mode (issue #85): bracket tops + edge probes from #60.
+# RAM-gating does not bind on the calibrate shapes (>=128 GiB), so the
+# 2^20 probe (S=40) is included by default. Override with --svalues.
+DEFAULT_CAL_SVALUES="8 9 10 11 20 21 32 40"
+
+# CAL_MODE=1 switches the per-S worker container to tx_limit=4*S (the
+# #60 calibration methodology) via the __CAL_MODE__ template token.
+# Default 0 = historical fleet behavior, byte-identical.
+CAL_MODE="${CAL_MODE:-0}"
 
 # ---------------------------------------------------------------------------
 # Usage
@@ -46,8 +59,17 @@ Subcommands:
     --yes            Skip cost-estimate confirmation prompt
     --dry-run        Print create commands; do not provision
 
+  calibrate [opts]                   Chunk-size calibration run (issue #85)
+    Same flags as run, plus:
+    --machines-file F  Machine matrix TSV (default: machines-calibrate.tsv)
+    Defaults: machines-calibrate.tsv shapes, S="8 9 10 11 20 21 32 40",
+    per-S tx_limit=4*S. The comparison fleet (S in {1,2,4,6}) is untouched.
+
   status [--run-id ID]               Show current state from GCS
-  collect --run-id ID                Pull logs from GCS, run parser
+  collect --run-id ID [--calibrate]  Pull logs from GCS, run parser
+                                     (--calibrate forces per-machine
+                                     calibration reports; auto-detected
+                                     from local run state when present)
   publish --run-id ID                Create Discussion + comment on #6
   teardown [--run-id ID] [--all]     Force-delete leftover VMs
 
@@ -288,7 +310,11 @@ cmd_run() {
   # full-sweep wall is 6h on T2A, 4h on Axion, 3h on Turin. The breakdown
   # below lets the operator see where the spend goes.
   echo "" >&2
-  echo "Fleet plan:" >&2
+  if [[ "${CAL_MODE}" == "1" ]]; then
+    echo "Calibration plan (issue #85):" >&2
+  else
+    echo "Fleet plan:" >&2
+  fi
   echo "  ref:       ${ref} (${sha})" >&2
   echo "  S sweep:   ${svalues}" >&2
   echo "  machines:  ${#machine_list[@]}" >&2
@@ -296,12 +322,20 @@ cmd_run() {
     echo "             - ${mt}" >&2
   done
   echo "" >&2
-  echo "  Per-shape cost estimate (price × realistic full-sweep wall):" >&2
   local cost
-  cost="$(estimate_cost_breakdown "${machine_list[@]}")"
-  echo "" >&2
-  echo "  est. cost: ${cost}  (T2A:6h, C4A/N4A:4h, C4D/N4D:3h — calibrated against v2)" >&2
-  echo "  wall:      ~6h (limited by slowest shape; 10h max-run-duration kill)" >&2
+  if [[ "${CAL_MODE}" == "1" ]]; then
+    # Calibration probes are short (4 chunks per S, tx_limit=4*S):
+    # ~1-1.5h per shape, not a full comparison sweep.
+    cost="$(estimate_cost 1.5 "${machine_list[@]}")"
+    echo "  est. cost: ${cost}  (calibration probes: ~1.5h/shape assumed)" >&2
+    echo "  wall:      ~1-1.5h (10h max-run-duration kill remains the backstop)" >&2
+  else
+    echo "  Per-shape cost estimate (price × realistic full-sweep wall):" >&2
+    cost="$(estimate_cost_breakdown "${machine_list[@]}")"
+    echo "" >&2
+    echo "  est. cost: ${cost}  (T2A:6h, C4A/N4A:4h, C4D/N4D:3h — calibrated against v2)" >&2
+    echo "  wall:      ~6h (limited by slowest shape; 10h max-run-duration kill)" >&2
+  fi
   echo "" >&2
 
   if (( ! auto_yes )); then
@@ -318,6 +352,7 @@ cmd_run() {
   echo "${sha}"  > "${run_dir}/sha.txt"
   echo "${ref}"  > "${run_dir}/ref.txt"
   echo "${svalues}" > "${run_dir}/svalues.txt"
+  echo "${CAL_MODE}" > "${run_dir}/cal_mode.txt"
   printf '%s\n' "${machine_list[@]}" > "${run_dir}/machines.txt"
 
   log_info "run_id=${run_id} (state in ${run_dir})"
@@ -348,6 +383,44 @@ cmd_run() {
 }
 
 # ---------------------------------------------------------------------------
+# calibrate (issue #85) -- additive wrapper around cmd_run.
+#
+# Switches the machine matrix to machines-calibrate.tsv, the S list to
+# the bracket-top candidate set, and CAL_MODE=1 (per-S tx_limit=4*S on
+# the VM). Everything else -- image preflight, cost estimate, the
+# Proceed? [y/N] gate, provisioning, monitoring, GCS collection,
+# teardown -- is the existing run path, reused untouched. The historical
+# comparison fleet (machines.tsv + S in {1,2,4,6}, ADR-0003 §D4) is
+# unaffected.
+# ---------------------------------------------------------------------------
+cmd_calibrate() {
+  local machines_file="${FLEET_ROOT}/machines-calibrate.tsv"
+  local -a pass_args=()
+  local have_svalues=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --machines-file) machines_file="$2"; shift 2 ;;
+      --svalues)       have_svalues=1; pass_args+=("$1" "$2"); shift 2 ;;
+      --machines|--ref) pass_args+=("$1" "$2"); shift 2 ;;
+      --yes|--dry-run)  pass_args+=("$1"); shift ;;
+      *) log_err "unknown calibrate flag: $1"; usage; exit 2 ;;
+    esac
+  done
+  [[ -r "${machines_file}" ]] || die "machines file not readable: ${machines_file}"
+
+  CAL_MODE=1
+  export CAL_MODE
+  FLEET_MACHINES_TSV="${machines_file}"
+  export FLEET_MACHINES_TSV
+  if (( ! have_svalues )); then
+    pass_args+=(--svalues "${DEFAULT_CAL_SVALUES}")
+  fi
+
+  log_info "calibration mode: machines=${machines_file} (CAL_MODE=1, per-S tx_limit=4*S)"
+  cmd_run "${pass_args[@]}"
+}
+
+# ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 cmd_status() {
@@ -373,14 +446,23 @@ cmd_status() {
 # collect
 # ---------------------------------------------------------------------------
 cmd_collect() {
-  local run_id=""
+  local run_id="" calibrate=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --run-id) run_id="$2"; shift 2 ;;
+      --run-id)    run_id="$2"; shift 2 ;;
+      --calibrate) calibrate=1; shift ;;
       *) die "unknown collect flag: $1" ;;
     esac
   done
   [[ -n "$run_id" ]] || die "collect: --run-id required"
+
+  # Auto-detect calibration runs from the local run state (written by
+  # cmd_run). --calibrate forces it when collecting from another host.
+  if [[ "${calibrate}" == "0" \
+        && -r "/tmp/bench-fleet-runs/${run_id}/cal_mode.txt" \
+        && "$(cat "/tmp/bench-fleet-runs/${run_id}/cal_mode.txt")" == "1" ]]; then
+    calibrate=1
+  fi
 
   local local_dir="/tmp/bench-fleet-runs/${run_id}/collected"
   mkdir -p "${local_dir}"
@@ -423,6 +505,45 @@ cmd_collect() {
   done
 
   log_ok "parsed ${count} log files (${fail} failures) -> ${out_tsv}"
+
+  # Calibration runs (issue #85): additionally feed each machine's per-S
+  # BENCH_EVENT JSONL through the objective computation to produce
+  # calibration.tsv + report.md + ledger.md (Discussion #77 template)
+  # under collected/<machine>/.
+  if [[ "${calibrate}" == "1" ]]; then
+    local sha_for_report
+    sha_for_report="$(cat "/tmp/bench-fleet-runs/${run_id}/sha.txt" 2>/dev/null || echo unknown)"
+    for mt_dir in "${local_dir}"/*/; do
+      [[ -d "$mt_dir" ]] || continue
+      local mt; mt="$(basename "$mt_dir")"
+      [[ "$mt" == "info" ]] && continue
+      # Assemble the cal-S<N>.jsonl layout the report script expects
+      # from the per-S worker uploads (S<N>/bench.jsonl).
+      local found=0 s_dir s_num
+      for s_dir in "${mt_dir}"S*/; do
+        [[ -d "$s_dir" && -r "${s_dir}bench.jsonl" ]] || continue
+        s_num="$(basename "$s_dir")"; s_num="${s_num#S}"
+        # bench.jsonl from entrypoint.sh already has the BENCH_EVENT
+        # prefix stripped; copy as-is.
+        cp "${s_dir}bench.jsonl" "${mt_dir}cal-S${s_num}.jsonl"
+        found=$((found+1))
+      done
+      if (( found == 0 )); then
+        log_warn "[${mt}] no S*/bench.jsonl found -- skipping calibration report"
+        continue
+      fi
+      log_info "[${mt}] computing calibration report (${found} probes)"
+      if python3 "${_FLEET_REPO_ROOT}/scripts/s-calibrate-report.py" \
+           --out-dir "${mt_dir%/}" \
+           --machine-label "${mt}" \
+           --git-sha "${sha_for_report}"; then
+        log_ok "[${mt}] calibration report -> ${mt_dir%/}/{calibration.tsv,report.md,ledger.md}"
+      else
+        log_warn "[${mt}] calibration report FAILED (probes may be incomplete)"
+      fi
+    done
+  fi
+
   printf '%s\n' "${out_tsv}"
 }
 
@@ -558,6 +679,7 @@ main() {
   case "$sub" in
     quota-check) cmd_quota_check "$@" ;;
     run)         cmd_run "$@" ;;
+    calibrate)   cmd_calibrate "$@" ;;
     status)      cmd_status "$@" ;;
     collect)     cmd_collect "$@" ;;
     publish)     cmd_publish "$@" ;;

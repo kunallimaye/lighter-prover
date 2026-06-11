@@ -143,21 +143,40 @@ fn main() {
 
     let args = Args::parse();
 
+    // Hard cap raised 32 -> 64 for the per-machine calibration suite
+    // (issue #85): probing the 2^20 degree bracket needs S around 40,
+    // which only fits machines with >=48 GB RAM (projected ~32 GB peak
+    // RSS plus headroom -- see issue #60's bracket table). Values in
+    // 33..=64 are accepted with a loud warning; 1..=32 remain the
+    // validated range from issues #60/#63.
     const VALIDATED_MAX_TX_PER_PROOF: usize = 32;
-    if args.tx_per_proof > VALIDATED_MAX_TX_PER_PROOF {
+    const MAX_TX_PER_PROOF: usize = 64;
+    if args.tx_per_proof > MAX_TX_PER_PROOF {
         eprintln!(
-            "error: --tx-per-proof {} exceeds the validated maximum of {}.\n\
+            "error: --tx-per-proof {} exceeds the maximum of {}.\n\
              \n\
              Chunk sizes 1..=32 are validated (building and proving) following\n\
              the log_gates / ExponentiationGate fix from issue #63, with sweep\n\
-             measurements recorded on issue #60. Values above 32 have not been\n\
-             validated and may panic at circuit build time.\n\
+             measurements recorded on issue #60. Sizes 33..=64 are accepted\n\
+             (with a warning) for the 2^20-bracket calibration probes from\n\
+             issue #85. Values above 64 have never been attempted and are\n\
+             refused outright.\n\
              \n\
              See https://github.com/kunallimaye/lighter-prover/issues/63 for the\n\
              root-cause analysis and fix details.",
-            args.tx_per_proof, VALIDATED_MAX_TX_PER_PROOF
+            args.tx_per_proof, MAX_TX_PER_PROOF
         );
         std::process::exit(2);
+    }
+    if args.tx_per_proof > VALIDATED_MAX_TX_PER_PROOF {
+        eprintln!(
+            "warning: --tx-per-proof {} is above the validated maximum of {}.\n\
+             Chunk sizes 33..=64 land in the 2^20 degree bracket with a projected\n\
+             peak RSS of ~32 GB (issue #60 bracket table; unmeasured until the\n\
+             issue #85 calibration runs). Expect a long circuit build and make\n\
+             sure this machine has >=48 GB of free RAM. See issues #60 and #63.",
+            args.tx_per_proof, VALIDATED_MAX_TX_PER_PROOF
+        );
     }
 
     if args.tx_per_proof == 0 {

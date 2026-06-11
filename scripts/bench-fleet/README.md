@@ -151,10 +151,40 @@ make fleet-teardown                       # all leftover fleet VMs
 |---|---|---|
 | `quota-check` | Verify quotas, bucket, write-probe, VM-side IAM | No (read-only API) |
 | `run [--machines L] [--ref R] [--svalues "L"] [--yes] [--dry-run]` | Provision + monitor + collect | Yes (full fleet) |
+| `calibrate [run flags] [--machines-file F]` | Chunk-size calibration run (issue #85) | Yes (~$10-25 / 3 shapes) |
 | `status [--run-id ID]` | Show VM state + GCS contents | No |
-| `collect --run-id ID` | Download logs, run parser, emit TSV | No |
+| `collect --run-id ID [--calibrate]` | Download logs, run parser, emit TSV (+ per-machine calibration reports) | No |
 | `publish --run-id ID` | Render markdown, create Discussion, comment on #6 | No GCP spend |
 | `teardown [--run-id ID] [--all]` | Force-delete leftover VMs | No (delete API only) |
+
+## Calibration mode (issue #85)
+
+`make s-calibrate-fleet` (→ `run-fleet.sh calibrate`) reuses the entire
+provisioning path — image preflight, cost estimate, interactive
+`Proceed? [y/N]` gate, COS VM + per-microarch image, GCS collection,
+sentinel-driven teardown — but probes **chunk-size bracket tops**
+instead of the comparison sweep:
+
+- **Machines**: `machines-calibrate.tsv` (c4a-highcpu-64,
+  c4a-highmem-64, c4a-highmem-96-metal), not `machines.tsv`. Lines
+  starting with `#` in the TSV are comments (used for the bare-metal
+  image fallback note).
+- **S values**: default `8 9 10 11 20 21 32 40` — the degree-bracket
+  tops + edge probes from issue #60's step-function finding (override
+  with `--svalues`).
+- **tx_limit**: `4*S` per probe (the #60 four-chunk methodology) via the
+  `__CAL_MODE__` startup-template token — minutes per probe, circuit
+  build dominating, ~1-1.5 h per shape.
+- **Collect**: `collect` on a calibration run additionally computes
+  per-machine `calibration.tsv` + `report.md` + `ledger.md` (the
+  Discussion #77 BENCH-LEDGER template) under `collected/<machine>/`
+  via `scripts/s-calibrate-report.py`.
+
+**ADR-0003 §D4 guarantee**: the historical comparison fleet is
+untouched. `fleet-run` still sweeps S ∈ {1,2,4,6} over `machines.tsv`;
+calibration is a separate, opt-in subcommand with its own machine file.
+The local single-machine variant is `make s-calibrate` (see the root
+Makefile and `scripts/s-calibrate.sh`).
 
 ## How a run works, end to end (#33 container flow)
 
@@ -243,7 +273,8 @@ per-machine `machine-info.txt` content if a real run exceeds it.
 scripts/bench-fleet/
 ├── README.md                    (this file)
 ├── machines.tsv                 source-of-truth: 10 machine types, zones, image tags
-├── run-fleet.sh                 top-level CLI with 6 subcommands
+├── machines-calibrate.tsv       calibration shapes (issue #85; comparison fleet untouched)
+├── run-fleet.sh                 top-level CLI with 7 subcommands
 ├── lib/
 │   ├── common.sh                config.toml resolution, logging, run-id helpers
 │   ├── provision.sh             provision_one_vm() with zone fallback + image tag resolution
@@ -256,12 +287,13 @@ scripts/bench-fleet/
 └── tests/
     ├── fixtures/
     ├── test-parser.sh           parser regression test
-    └── test-render.sh           renderer well-formedness test
+    ├── test-render.sh           renderer well-formedness test
+    └── test-calibrate.sh        calibration objective-math golden test (#85)
 ```
 
-Run `bash tests/test-parser.sh` and `bash tests/test-render.sh` from
-`scripts/bench-fleet/` to validate the parser + renderer locally before
-shipping changes.
+Run `bash tests/test-parser.sh`, `bash tests/test-render.sh`, and
+`bash tests/test-calibrate.sh` from `scripts/bench-fleet/` to validate
+the parser + renderer + calibration math locally before shipping changes.
 
 ## What this toolkit is NOT
 
