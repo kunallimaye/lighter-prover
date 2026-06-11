@@ -853,4 +853,88 @@ where
     pub fn connect_verifier_data(&mut self, x: &VerifierCircuitTarget, y: &VerifierCircuitTarget) {
         self.builder.connect_verifier_data(x, y)
     }
+
+    /// Builds a `VerifierCircuitTarget` view over a cyclic proof's trailing
+    /// VK-in-public-inputs (`4` digest elements followed by `4 * num_cap_elements`
+    /// Merkle-cap elements). The layout mirrors `add_verifier_data_public_inputs`
+    /// (see `builder/custom.rs` cap-element math), so the slice begins at
+    /// `num_public_inputs - 4 - 4 * num_cap_elements`.
+    fn verifier_data_view_from_pis(
+        proof: &ProofWithPublicInputsTarget<D>,
+        common: &CommonCircuitData<F, D>,
+    ) -> VerifierCircuitTarget {
+        let num_cap = common.config.fri_config.num_cap_elements();
+        let pis = &proof.public_inputs;
+        // Start of the trailing VK block: digest (4) + cap (4 * num_cap).
+        let start = pis.len() - 4 - 4 * num_cap;
+        let circuit_digest = HashOutTarget {
+            elements: core::array::from_fn(|i| pis[start + i]),
+        };
+        let cap_targets: Vec<HashOutTarget> = (0..num_cap)
+            .map(|i| HashOutTarget {
+                elements: core::array::from_fn(|j| pis[start + 4 + 4 * i + j]),
+            })
+            .collect();
+        VerifierCircuitTarget {
+            circuit_digest,
+            constants_sigmas_cap: MerkleCapTarget(cap_targets),
+        }
+    }
+
+    /// Anchor a cyclic proof's trailing VK-in-public-inputs (`4` digest +
+    /// `4 * num_cap_elements` cap) to the constant `pinned` VK the proof is
+    /// verified against.
+    ///
+    /// `verify_proof` only checks the proof against the pinned constant VK; it
+    /// does not constrain the proof's *own* VK that a cyclic circuit appends to
+    /// its public inputs. This is the missing `check_cyclic_proof_verifier_data`
+    /// equivalent for our consumption boundaries: it asserts the embedded VK-PIs
+    /// equal the pinned VK, so a proof whose internal/forged cyclic VK differs
+    /// from the pinned chain VK is rejected at this boundary.
+    pub fn connect_proof_vk_pis_to_constant(
+        &mut self,
+        proof: &ProofWithPublicInputsTarget<D>,
+        common: &CommonCircuitData<F, D>,
+        pinned: &VerifierCircuitTarget,
+    ) {
+        let embedded = Self::verifier_data_view_from_pis(proof, common);
+        self.builder.connect_verifier_data(&embedded, pinned);
+    }
+
+    /// Conditional variant of [`Self::connect_proof_vk_pis_to_constant`].
+    ///
+    /// When `condition` is true, asserts the proof's trailing VK-PIs equal the
+    /// `pinned` constant VK; when false, imposes no constraint. Use this at
+    /// consumption boundaries where disabled/placeholder slots carry arbitrary
+    /// public inputs (e.g. the wrapper's in-loop, `is_enabled`-gated segment
+    /// proofs) to avoid over-constraining slots that are "not selected".
+    pub fn conditional_connect_proof_vk_pis_to_constant(
+        &mut self,
+        condition: BoolTarget,
+        proof: &ProofWithPublicInputsTarget<D>,
+        common: &CommonCircuitData<F, D>,
+        pinned: &VerifierCircuitTarget,
+    ) {
+        let embedded = Self::verifier_data_view_from_pis(proof, common);
+        // Assert digest equality element-wise, gated by `condition`.
+        for (e, p) in embedded
+            .circuit_digest
+            .elements
+            .iter()
+            .zip(pinned.circuit_digest.elements.iter())
+        {
+            self.conditional_assert_eq(condition, *e, *p);
+        }
+        // Assert Merkle-cap equality element-wise, gated by `condition`.
+        for (e_cap, p_cap) in embedded
+            .constants_sigmas_cap
+            .0
+            .iter()
+            .zip(pinned.constants_sigmas_cap.0.iter())
+        {
+            for (e, p) in e_cap.elements.iter().zip(p_cap.elements.iter()) {
+                self.conditional_assert_eq(condition, *e, *p);
+            }
+        }
+    }
 }

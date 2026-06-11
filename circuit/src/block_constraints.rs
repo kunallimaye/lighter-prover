@@ -144,6 +144,24 @@ impl BlockCircuit {
             &block_tx_chain_circuit.common,
         );
 
+        // Anchor the cyclic chain proof's trailing VK public inputs to the constant
+        // chain VK we just verified against (the missing `check_cyclic_proof_verifier_data`
+        // equivalent for this consumption boundary -- see issue #70).
+        //
+        // Reasoned argument (why a forged/mismatched-VK chain proof is now rejected):
+        // `verify_proof` checks the proof against the pinned constant
+        // `block_tx_chain_verifier_data`, but `BlockTxChainCircuit` is *cyclic* and also
+        // carries its own verifier key in its trailing 68 public inputs (4 digest +
+        // 16x4 Merkle cap, cap_height = 4). Before this anchor, those embedded VK-PIs
+        // were never asserted equal to the pinned constant, so the in-PI VK was
+        // unconstrained at the boundary. By connecting them here, a proof whose internal
+        // (e.g. forged) cyclic VK differs from the pinned chain VK is now rejected.
+        self.builder.connect_proof_vk_pis_to_constant(
+            &self.target.tx_chain_proof,
+            &block_tx_chain_circuit.common,
+            &block_tx_chain_verifier_data,
+        );
+
         // Extract pre-exec and tx chain witnesses from the proofs
         let pre_exec_witness = BlockPreExecWitnessTarget::from_public_inputs(
             &self.target.pre_exec_proof.public_inputs,
