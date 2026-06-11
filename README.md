@@ -138,6 +138,37 @@ done
 wait
 ```
 
+## Quickstart — streaming benchmark
+
+Replays recycled `bench_test.json` witnesses paced by captured (or
+synthesized) mainnet block cadence — measuring the sustained
+throughput ceiling and bounded-queue behavior of the prover under
+live-shaped load. Witness *content* repeats; only arrival *timing* is
+live-shaped — see [`bench/trace-format.md`](bench/trace-format.md)
+(trace contract, #47) and [`bench/README.md`](bench/README.md)
+(feeder #48, `bench --stream` #49) for details; the Pub/Sub phase
+(#50) is deferred.
+
+```bash
+make stream-fetch-trace                                   # one-time: pull the banked 15-min mainnet trace
+make stream-test                                          # offline unit suites (<1 min, no proving)
+make stream-bench TRACE=traces/trace_15m.jsonl RATE=2213  # E2E at observed-peak rate (expect clean queue divergence)
+make stream-bench SYNTH_RATE=50 DURATION=15m              # synthetic low-rate run
+make stream-sweep                                         # find max sustained tx/s for this machine
+```
+
+### Knobs
+
+| Variable     | Default | Effect                                                                          |
+|--------------|---------|---------------------------------------------------------------------------------|
+| `TRACE`      | —       | Trace file to replay (required for `stream-replay`/trace-mode `stream-bench`)   |
+| `RATE`       | —       | Retime replay so the aggregate rate hits this tx/s (mutually exclusive w/ `SPEED`) |
+| `SPEED`      | —       | Replay speed multiplier, e.g. `2` = twice as fast (mutually exclusive w/ `RATE`) |
+| `SYNTH_RATE` | —       | Skip the trace: synthesize an idealized peak trace at this tx/s (needs `DURATION`) |
+| `DURATION`   | —       | Wall-clock cap, e.g. `15m`, `900s` (feeder emission + `bench --duration`)        |
+| `MAX_QUEUE`  | `1024`  | Bounded chunk-job queue in `bench --stream`; overflow is dropped and counted     |
+| `TX_PER_PROOF` | `4`   | Chunk size — same knob as the batch bench (see the Knobs table above)            |
+
 ## Configuration
 
 Cloud topology is configured in `config.toml` (copy from
@@ -151,6 +182,8 @@ for the rationale.
 
 ```
 ├── bench/                          # Bench crate (patched per #4)
+│   ├── feeder/                     # Trace producer: record/replay/synth-peak (#48)
+│   └── trace-format.md             # Producer↔consumer trace contract (#47)
 ├── cicd/
 │   ├── Containerfile               # Multi-stage Rust build → debian-slim runtime
 │   ├── .dockerignore
@@ -168,7 +201,10 @@ for the rationale.
 │   ├── local.sh                    # Host cargo flows
 │   ├── container.sh                # Podman flows
 │   ├── cloud.sh                    # gcloud + Cloud Build flows
+│   ├── stream.sh                   # Streaming bench flows (#47–#49 wiring)
+│   ├── stream-sweep.sh             # Rate-ladder sweep for bench --stream (#49)
 │   └── config.py                   # config.toml → shell exports + TF_VAR_*
+├── traces/                         # Downloaded/recorded traces (gitignored)
 ├── Makefile                        # Operator entry point — see `make help`
 ├── config.toml.example
 └── .env.example

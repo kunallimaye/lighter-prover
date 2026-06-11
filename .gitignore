@@ -46,3 +46,7 @@ logs/
 # Python bytecode (bench/feeder tooling)
 __pycache__/
 *.pyc
+
+# Downloaded/recorded streaming-bench traces (#54) — banked canonical
+# trace lives in GCS, too big to commit (anchored: repo-root only, cf. #27)
+/traces/
