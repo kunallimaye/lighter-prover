@@ -194,6 +194,37 @@ what the scheduler parallelizes. Running with `--blocks N --segments N`
 (one block per segment) exercises the full define → base-proof → witness →
 prove → verify path for every segment in parallel.
 
+## Pre-L5 tree-fold mode (bench --l5-fold tree)
+
+`--l5-fold tree` (issue #82, ADR-0003 §D5) is the L5 analogue of the L2
+tree-fold one layer up: it builds the pre-L5 block-proof aggregation
+`BatchMergeCircuit` (`circuit/src/recursion/batch_merge_constraints.rs`),
+asserts the **self-shape gate** `merge.common == l5.common` (the merge
+node builds into the L5 cyclic circuit's exact 2^15 / 1496-PI shape, so
+its root is consumable anywhere an L5 proof is), and wires the log-depth
+pairwise fold of per-block L5 `Batch` proofs (carrying odd proofs up a
+level, mirroring `--l2-fold tree`). Two L5 children are merged by
+`BatchTarget::conditionally_merge_consecutive` (contiguity, monotonic
+timestamps, state/delta-root and priority-op keccak-chain continuity)
+plus the on-chain-ops keccak **start-digest stitch**
+(`SegmentInfoTarget::connect_segments`, escape hatch iii) — the same
+stitch L6 uses, which makes the keccak chain associative across the tree.
+
+This path is **build-validated and A/B-wired**; it does **not** execute a
+live L5 prove in-workspace. The timed ≥4-leaf prove on the AMD EPYC 7B13
+baseline (confirming ≈0.94 s/step and the log₂(N)·0.94 s critical path)
+is a documented follow-up run requiring dedicated hardware + long
+wall-clock. The default `--l5-fold serial` is unchanged.
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--l5-fold serial\|tree` | `serial` | L5 fold strategy (batch mode only; `tree` build-validates `BatchMergeCircuit` and wires the host-level fold) |
+| `--l5-ab-check` | off | Tree mode: also serial-fold the same batches and assert element-wise equality of the two roots' semantic public inputs (`Batch`+`SegmentInfo`, excluding trailing VK PIs) |
+
+```bash
+./bench --l5-fold tree --l5-ab-check
+```
+
 ## Streaming mode (bench --stream)
 
 `bench --stream` (issue #49) turns the one-shot batch bench into a
