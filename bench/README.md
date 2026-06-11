@@ -69,3 +69,83 @@ Or just the summary line:
 grep '^BENCH_EVENT ' bench.log | sed 's/^BENCH_EVENT //' \
   | jq 'select(.event=="summary")'
 ```
+
+## Streaming mode (bench --stream)
+
+`bench --stream` (issue #49) turns the one-shot batch bench into a
+trace-driven consumer: it reads a JSONL block trace on stdin —
+conforming to the pinned contract in
+[`trace-format.md`](./trace-format.md) (issue #47) — fans each block
+arrival out into `ceil(tx_count / tx_per_proof)` chunk jobs over a
+bounded queue, and proves them with the same L1 + L2 pipeline as batch
+mode. Without `--stream` the original batch behavior is untouched.
+
+```bash
+python3 bench/feeder/feeder.py replay --input trace.jsonl --target-rate 1000 \
+  | ./bench --stream --tx-per-proof 4 --duration 15m
+```
+
+### Flags
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--stream` | off | Enable streaming mode (stdin trace consumer) |
+| `--max-queue N` | 1024 | Bounded chunk-job queue; overflow jobs are dropped and counted (`dropped_chunks`) |
+| `--l3-every N` | off | Additionally prove L3 once every N proven chunks |
+| `--duration D` | none | Stop after wall-clock `D` (`900s`, `15m`, `2h`); otherwise run to trace EOF or SIGINT/SIGTERM |
+
+Trace handling per the contract: the provenance header (first line) is
+parsed, logged, and skipped; headerless pre-spec traces are accepted;
+gap markers are skipped and counted (`gaps_skipped`); malformed lines
+are warned about and skipped; monotonicity violations (`ts_ms`
+regression, non-increasing `height`) abort the run with exit 1.
+`tx_count: null` should not occur in replayed input (the producer
+fills it, policy P1) but is leniently treated as 500 with a warning.
+
+### Witness recycling (why proving repeated content is OK)
+
+`bench_test.json` is loaded once, circuits are built once, and the
+block's txs are pre-sliced into `tx_per_proof`-sized chunks that are
+cycled round-robin — the *content* of each proof repeats; only the
+*cadence* is live (driven by the trace). Proving cost is dominated by
+circuit size, not witness values, so recycled witnesses measure
+throughput faithfully. State rolls forward chunk-to-chunk exactly as
+in batch mode within one pass over the pool; **when the pool wraps,
+state restarts from the block's initial state** — each pool pass is an
+independent replay of the same block's chunks (the L2 chain proof also
+restarts from a fresh cyclic base proof).
+
+### Streaming event types
+
+Same `BENCH_EVENT ` prefix, serialization, and per-event flush
+discipline as the batch events above:
+
+| `event` | When | Notable fields |
+|---------|------|----------------|
+| `stream_arrival` | Each accepted trace block event | `height`, `tx_count` (`null` mirrors the trace), `queue_depth`, `ts` |
+| `chunk_proven` | Per layer (L1, L2) for every dequeued chunk job | the `layer_prove` fields (with `chunk_idx`/`chunk_total` = pool position/size) plus `height`, `lag_ms` (layer completion − enqueue), `queue_depth` |
+| `stream_summary` | Every 60s (`phase:"periodic"`) and once at exit (`phase:"final"`) | `throughput_tx_s`, `lag_p50_ms`, `lag_p95_ms`, `peak_rss_mb`, `dropped_chunks`, `arrivals`, `gaps_skipped`, `chunks_proven`, `elapsed_s` |
+
+### Expected divergence at peak rates
+
+This is a single-instance consumer. At the recorded peak of ~2,213
+tx/s with `tx_per_proof=4`, the consumer would need to absorb ~556
+chunk-jobs/s while a single L1+L2 prove takes seconds — so divergence
+at 1.0× peak (queue saturating, `dropped_chunks` climbing) is the
+**expected, cleanly-reported outcome**, not a failure mode. The
+interesting measurement is the highest rate at which the queue stays
+bounded; that is what `make stream-sweep` ladders toward.
+
+### stream-smoke and stream-sweep
+
+- `make -C bench stream-smoke` — manual real-proving smoke test
+  (minutes: circuit define dominates). Pipes a tiny inline trace into
+  `bench --stream --tx-per-proof 1`. Deliberately **not** part of any
+  automated test target; `cargo test -p bench` covers the stream
+  machinery with a stub prover and zero plonky2 calls.
+- `make -C bench stream-sweep` / `scripts/stream-sweep.sh` — rate
+  ladder driving `feeder.py replay` (issue #48) into `bench --stream`,
+  reporting the highest stable rate vs. first diverging rate from the
+  final `stream_summary`. **Not runnable until the #48 sibling PR
+  merges** (the script fails fast with a clear message if the feeder
+  is absent).
