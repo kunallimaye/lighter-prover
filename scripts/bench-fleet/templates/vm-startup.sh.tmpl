@@ -113,7 +113,11 @@ upload_and_signal_done() {
 # metadata-server identity (the default Compute SA, which needs
 # roles/artifactregistry.reader — granted by `make admin-cloud-init`).
 echo "FLEET_DOCKER_AUTH_START $(date -Is)"
-export HOME=/root
+# COS mounts /root read-only — docker config must live on the writable
+# stateful partition. Both `docker` and `docker-credential-gcr` honor
+# DOCKER_CONFIG, so point it at the fleet dir under /var/lib.
+export DOCKER_CONFIG="${FLEET_DIR}/.docker"
+mkdir -p "${DOCKER_CONFIG}"
 docker-credential-gcr configure-docker --registries="${REGISTRY_HOST}"
 AUTH_RC=$?
 echo "FLEET_DOCKER_AUTH_DONE $(date -Is) rc=${AUTH_RC}"
