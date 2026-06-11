@@ -2037,6 +2037,18 @@ fn prove_block_l4(
         .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L4 prove failed: {err:?}"))
 }
 
+/// Issue #82: pre-L5 block-proof aggregation tree-fold driver.
+///
+/// This BUILD-VALIDATES the `BatchMergeCircuit` and WIRES the log-depth fold,
+/// but deliberately does NOT execute a live L5 prove: the timed >=4-leaf prove
+/// on dedicated EPYC hardware is a documented follow-up run (#90 / ADR-0003
+/// §D5). It builds L4 -> L5 (`CyclicRecursionCircuit`) -> `BatchMergeCircuit`,
+/// asserts the self-shape gate `merge.common == l5.common`, wires the pairwise
+/// tree fold over a `level` vector of per-block L5 `Batch` proofs (carrying odd
+/// proofs up a level) using the host `Batch::merge_consecutive` /
+/// `SegmentInfo::stitch` mirrors, and with `--l5-ab-check` compares the tree
+/// root vs the L5 serial fold element-wise on the semantic PI surface.
+#[allow(clippy::too_many_arguments)]
 fn run_l5_tree_fold(
     args: &Args,
     block: &Block<F>,
