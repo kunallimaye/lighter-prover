@@ -50,3 +50,10 @@ __pycache__/
 # Downloaded/recorded streaming-bench traces (#54) — banked canonical
 # trace lives in GCS, too big to commit (anchored: repo-root only, cf. #27)
 /traces/
+
+# Local bench binary (#56) — `make -C bench build` MOVES
+# ../target/release/bench here; it is a per-machine build artifact,
+# never tracked (anchored, cf. #27/#28). The upstream-committed copy
+# was a foreign-arch Mach-O arm64 binary that broke stream-bench on
+# Linux x86_64 with Exec format error.
+/bench/bench
