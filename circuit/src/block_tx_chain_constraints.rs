@@ -111,7 +111,7 @@ impl BlockTxChainCircuit {
     pub fn new(
         config: CircuitConfig,
         block_tx_common_circuit: &CommonCircuitData<F, D>,
-        tx_per_proof: usize,
+        _tx_per_proof: usize, // Issue #63: no longer drives log_gates; kept for API stability
         on_chain_operations_limit: usize,
     ) -> (Self, CommonCircuitData<F, D>) {
         let mut builder = Builder::new(config);
@@ -123,16 +123,24 @@ impl BlockTxChainCircuit {
 
         let self_verifier_data = builder.add_verifier_data_public_inputs();
 
-        let mut log_gates = 13;
-        if tx_per_proof > 6 {
-            log_gates = 14;
-        }
+        // Issue #63: upstream set log_gates = 14 for tx_per_proof > 6, but the
+        // chain circuit actually builds at degree 2^14 for all S in 1..=32 --
+        // the same degree log_gates = 13 produces. Declaring 14 made the goal
+        // CommonCircuitData 2^15 and caused a goal-vs-actual mismatch panic
+        // (not row insufficiency). 13 is correct for all supported S.
+        let log_gates = 13;
 
         // IMPORTANT: DO NOT ADD PUBLIC INPUTS AFTER THIS POINT.
         // Building common data for current circuit
+        //
+        // Issue #63: once the L1 BlockTxCircuit proof reaches degree 2^18
+        // (empirically tx_per_proof >= 12), the recursive FRI verifier emits
+        // an ExponentiationGate { num_power_bits: 67 }; the synthetic goal
+        // data must contain the same gate set or build() fails.
+        let with_exp_gate = block_tx_common_circuit.degree_bits() >= 18;
         let common_data_for_recursion = CommonCircuitData {
             num_public_inputs: builder.num_public_inputs(),
-            ..common_data_for_recursion(log_gates)
+            ..common_data_for_recursion(log_gates, with_exp_gate)
         };
 
         (
@@ -610,7 +618,10 @@ fn select_on_chain_pub_data(
 }
 
 // Generates `CommonCircuitData` usable for recursion.
-fn common_data_for_recursion(log_gates: usize) -> CommonCircuitData<F, D> {
+fn common_data_for_recursion(
+    log_gates: usize,
+    with_exp_gate: bool, // Issue #63: mirror ExponentiationGate for large L1 proofs
+) -> CommonCircuitData<F, D> {
     let builder = Builder::new(CIRCUIT_CONFIG);
     let data = builder.build::<C>();
 
@@ -633,6 +644,15 @@ fn common_data_for_recursion(log_gates: usize) -> CommonCircuitData<F, D> {
         vec![],
     );
     builder.add_gate(ConstantGate::new(2), vec![]);
+
+    if with_exp_gate {
+        // Issue #63: matches the gate the FRI verifier emits when verifying
+        // an L1 proof of degree >= 2^18 (observed at S in {12..32}).
+        builder.add_gate(
+            plonky2::gates::exponentiation::ExponentiationGate::new(67),
+            vec![],
+        );
+    }
 
     while builder.num_gates() < 1 << log_gates {
         builder.add_gate(plonky2::gates::noop::NoopGate, vec![]);

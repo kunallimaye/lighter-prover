@@ -2,12 +2,19 @@ The `bench` executable is produced locally by `make build` (which moves `../targ
 
 ## Supported `--tx-per-proof` range
 
-This bench is validated for `--tx-per-proof ∈ {1, 2, 3, 4, 5, 6}` on
-upstream commit `5bbb307`. Larger values trigger an unrelated bug in
-the chain-recursion circuit sizing (`log_gates = 14` is insufficient
-for the resulting verifier). See
-[issue #8](https://github.com/kunallimaye/lighter-prover/issues/8)
-for the analysis and proposed fixes.
+This bench is validated for `--tx-per-proof ∈ {1..=32}` (building and
+proving). The previous cap of 6 was caused by a chain-recursion circuit
+sizing bug — a goal-vs-actual `CommonCircuitData` mismatch from the
+upstream `log_gates = 14` bump, fixed in
+[issue #63](https://github.com/kunallimaye/lighter-prover/issues/63)
+(supersedes the analysis in
+[issue #8](https://github.com/kunallimaye/lighter-prover/issues/8)).
+Values above 32 are unvalidated and rejected at startup.
+
+For throughput, `--tx-per-proof 20` is the measured optimum for 500-tx
+blocks: 12.8 s block wall vs 40.6 s at the old cap of 6 (sweep
+measurements on
+[issue #60](https://github.com/kunallimaye/lighter-prover/issues/60)).
 
 The default `--tx-per-proof 4` matches upstream's production setting
 (`bench/src/bin/bench.rs:33`, `build_circuits.sh:21`).
