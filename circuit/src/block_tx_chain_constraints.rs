@@ -105,6 +105,17 @@ pub struct BlockTxChainTarget {
 
     pub new_block: BlockTxChainWitnessTarget, // Public witness - Block state after iterating current block
     pub state_metadata_target: StateMetadataTarget, // Public witness - Carry data between all iterations to calculate state roots, doesn't change between iterations
+
+    // Issue #67: range-start `old_account_delta_tree_root` (4 public inputs).
+    // The chain witness exposes only the range END delta root
+    // (`new_account_delta_tree_root`); the tree-fold merge circuit needs the
+    // range START to check `left.end_delta == right.start_delta` continuity
+    // (the delta tree is committed in neither validium_root nor state_root).
+    // Registered after the state metadata PIs and before the verifier-data
+    // PIs, so the full chain-proof PI layout is:
+    //   [chain witness (block_tx_witness_size)] [state metadata (3)]
+    //   [range-start delta root (4)] [verifier data (4 + 4*cap)]
+    pub old_account_delta_tree_root_range_start: HashOutTarget, // Public witness
 }
 
 impl BlockTxChainCircuit {
@@ -120,6 +131,11 @@ impl BlockTxChainCircuit {
         let new_block =
             BlockTxChainWitnessTarget::new_public(&mut builder, on_chain_operations_limit);
         let state_metadata_target = StateMetadataTarget::new_public(&mut builder);
+
+        // Issue #67: +4 public inputs for the range-start delta root (must
+        // stay BEFORE the verifier-data PIs -- the VK is parsed from the end
+        // of the PI vector by the cyclic machinery).
+        let old_account_delta_tree_root_range_start = builder.add_virtual_hash_public_input();
 
         let self_verifier_data = builder.add_verifier_data_public_inputs();
 
@@ -149,6 +165,7 @@ impl BlockTxChainCircuit {
                     tx_index: builder.add_virtual_target(),
                     new_block,
                     state_metadata_target,
+                    old_account_delta_tree_root_range_start,
 
                     self_verifier_data,
 
@@ -212,6 +229,20 @@ impl BlockTxChainCircuit {
             last_oracle_price_timestamp: self.target.cyclic_proof.public_inputs[block_pis_size + 1],
             last_premium_timestamp: self.target.cyclic_proof.public_inputs[block_pis_size + 2],
         };
+
+        // Issue #67: the range-start delta root never changes as the fold
+        // extends to the right, so every step copies the previous proof's
+        // value (the base proof seeds it; see `cyclic_base_proof`). PI offset
+        // per the layout documented on `BlockTxChainTarget`.
+        let child_range_start = HashOutTarget::try_from(
+            &self.target.cyclic_proof.public_inputs
+                [block_pis_size + STATE_METADATA_SIZE..block_pis_size + STATE_METADATA_SIZE + 4],
+        )
+        .unwrap();
+        self.builder.connect_hashes(
+            self.target.old_account_delta_tree_root_range_start,
+            child_range_start,
+        );
 
         // Extract current tx from tx proof
         let current_block_tx = BlockTxWitnessTarget::from_public_inputs(
@@ -302,6 +333,15 @@ impl BlockTxChainCircuit {
         self.builder.connect_hashes(
             block.new_account_delta_tree_root,
             current_tx.old_account_delta_tree_root,
+        );
+
+        // Issue #67: at the base of a chain segment the range-start delta
+        // root equals the seeded starting delta root (carried in the base
+        // proof's `new_account_delta_tree_root` slot, see `cyclic_base_proof`).
+        self.builder.conditional_assert_eq_hash(
+            is_first_recursion,
+            &self.target.old_account_delta_tree_root_range_start,
+            &block.new_account_delta_tree_root,
         );
     }
 }
@@ -581,6 +621,14 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
             nonzero_public_inputs.insert(i, public_inputs[i - block_tx_witness_size]);
         });
 
+        // Issue #67: seed the range-start `old_account_delta_tree_root` PIs
+        // (registered right after the state metadata, see
+        // `BlockTxChainCircuit::new`). At the base of a segment the range
+        // start IS the starting delta root.
+        for (i, elem) in old_account_delta_tree_root.elements.iter().enumerate() {
+            nonzero_public_inputs.insert(block_tx_witness_size + STATE_METADATA_SIZE + i, *elem);
+        }
+
         cyclic_base_proof(
             &circuit_data.common,
             &circuit_data.verifier_only,
@@ -591,7 +639,9 @@ impl Circuit<C, F, D> for BlockTxChainCircuit {
     }
 }
 
-fn select_on_chain_pub_data(
+// pub(crate) since issue #67: also used by the tree-fold merge circuit
+// (`block_tx_chain_merge_constraints`) for the on-chain-ops slot shift.
+pub(crate) fn select_on_chain_pub_data(
     builder: &mut Builder,
     on_chain_operations_limit: usize,
     on_chain_operations_count: Target,
@@ -618,6 +668,12 @@ fn select_on_chain_pub_data(
 }
 
 // Generates `CommonCircuitData` usable for recursion.
+//
+// Issue #64 calibration note: although this pads the synthetic builder to
+// `1 << log_gates` (8,192 rows at log_gates = 13), build-time hashing of the
+// ~1.6k public inputs spills past 8,192 rows and the shape blinds/pads to
+// degree 2^14. The real chain circuit (and the #67 merge circuit) therefore
+// build at 2^14 -- the ~0.5 s/step cost is the 2^14 cost.
 fn common_data_for_recursion(
     log_gates: usize,
     with_exp_gate: bool, // Issue #63: mirror ExponentiationGate for large L1 proofs

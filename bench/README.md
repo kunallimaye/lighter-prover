@@ -33,7 +33,7 @@ partial output survives a later crash (e.g. an OOM during proving).
 | `event`           | When                                              | Notable fields                                                                                                                                  |
 |-------------------|---------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|
 | `circuit_define`  | After each circuit's `define + build` step        | `layer`, `name`, `wall_ms`, `rss_mb_after`, `ts`                                                                                                |
-| `layer_prove`     | After each `*::prove(...)` call (L1, L2, L3)      | `layer`, `name`, `chunk_idx`, `chunk_total`, `tx_per_proof`, `wall_ms`, `cpu_ms`, `rss_mb_peak`, `rss_mb_after`, `ts`                            |
+| `layer_prove`     | After each `*::prove(...)` call (L1, L2, L3; in #67 tree mode also L2 merges, and L4 with `--l4-check`) | `layer`, `name`, `chunk_idx`, `chunk_total`, `tx_per_proof`, `wall_ms`, `cpu_ms`, `rss_mb_peak`, `rss_mb_after`, `ts`                            |
 | `summary`         | Once at end of `main`                             | `tx_per_proof`, `tx_limit`, `chunks`, `total_wall_ms`, `total_cpu_ms`, `peak_rss_mb`, `ts`                                                      |
 
 For L3 (`BlockPreExecutionCircuit`, one-shot) the `chunk_idx` and
@@ -108,6 +108,30 @@ feeder avoids it entirely — the WS stream with `?readonly=true` and the
 explorer API (`explorer.elliot.ai`) are not geo-blocked. The explorer
 blocks endpoint is rate-limited to 90 req/min per IP; `record` polls at
 ~85 req/min with an identifying User-Agent.
+
+## Tree-fold mode (bench --l2-fold tree)
+
+`--l2-fold tree` (issue #67, ADR-0003 §D3) replaces the serial L2 fold
+with a log-depth tree: each chunk gets a LEAF chain proof (a 1-chunk
+chain seeded at the chunk's pre-state), then adjacent proofs are merged
+pairwise by the dedicated `BlockTxChainMergeCircuit` (same 2^14 shape
+and PI surface as the leaf circuit; odd proofs at any level carry up
+unchanged). The default `--l2-fold serial` is byte-for-byte today's
+behavior. Execution is sequential either way — plonky2 already uses all
+cores per proof; parallel leaf/merge scheduling belongs to the cell
+implementation (#3). The run ends with a `TREEFOLD` summary line:
+depth, merges, leaf/merge averages, and the critical-path latency
+(depth × avg merge — the serial-L2 wall a parallel cell would see).
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--l2-fold serial\|tree` | `serial` | L2 fold strategy (batch mode only) |
+| `--ab-check` | off | Tree mode: also serial-fold the same L1 proofs and assert element-wise equality of the two final proofs' semantic public inputs (#67 acceptance) |
+| `--l4-check` | off | After the fold, define+prove+verify L4 (`BlockCircuit`) against the final chain proof — the merge circuit's data in tree mode (#67 acceptance) |
+
+```bash
+./bench --tx-per-proof 4 --tx-limit 32 --l2-fold tree --ab-check --l4-check
+```
 
 ## Streaming mode (bench --stream)
 
