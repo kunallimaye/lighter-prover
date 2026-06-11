@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bench::events::{self, BenchEvent, cpu_time_ms, current_rss_mb, now_iso8601, peak_rss_mb};
+use bench::l5segment::{host_prepass, segment_split_points, synthesize_block_sequence};
 use bench::seed::{ChunkSeed, seed_from_state};
 use circuit::block::{Block, BlockWitness};
 use circuit::block_constraints::{BlockCircuit, Circuit as _};
@@ -21,6 +22,8 @@ use circuit::block_tx_chain_merge_constraints::{BlockTxChainMergeCircuit, Circui
 use circuit::block_tx_constraints::{BlockTxCircuit, BlockTxTarget, Circuit as _};
 use circuit::builder::custom::cyclic_base_proof;
 use circuit::keccak::helpers::keccak;
+use circuit::recursion::batch::{Batch, SegmentInfo};
+use circuit::recursion::cyclic_circuit::{Circuit as _, CyclicRecursionCircuit};
 use circuit::tx;
 use circuit::types::asset::Asset;
 use circuit::types::config::{C, CIRCUIT_CONFIG, D, F};
@@ -39,6 +42,7 @@ use plonky2::hash::hash_types::HashOut;
 use plonky2::plonk::circuit_data::CircuitData;
 use plonky2::plonk::proof::{CompressedProofWithPublicInputs, ProofWithPublicInputs};
 use plonky2::recursion::dummy_circuit::{self, dummy_circuit};
+use rayon::prelude::*;
 use rayon::vec;
 
 const DEFAULT_TX_PER_PROOF: usize = 4;
@@ -119,6 +123,34 @@ struct Args {
     /// on the previous leaf's proven outputs). Tree-fold only.
     #[arg(long, value_enum, default_value_t = LeafOrder::Forward)]
     leaf_order: LeafOrder,
+
+    /// Issue #78: run the 8-way L5 (`CyclicRecursionCircuit`) segment
+    /// scheduler. Synthesizes a `--blocks` continuation-consistent block
+    /// sequence from `bench_test.json`, splits it into `--segments`
+    /// independent segment chains, computes each segment's starting
+    /// on-chain-operations keccak prefix on the host (prove-free), then
+    /// folds the segments' per-block L4 proofs into running L5 proofs IN
+    /// PARALLEL across segments (rayon). Every resulting segment proof is
+    /// L5-verified. Emits a `l5_segment_batch` event with the parallel
+    /// `effective_ms_per_block` headline. Batch mode only. The ≤200 ms/block
+    /// acceptance is a hardware measurement gate (#10 EPYC baseline); this
+    /// flag delivers the instrument and proves it functionally at small
+    /// scale. The verifying L6 termination is gated on issue #83.
+    #[arg(long, default_value_t = false)]
+    l5_segment_check: bool,
+
+    /// Issue #78: number of parallel L5 segment chains (`1..=8`, the
+    /// wrapper's `NUM_CHAINS_PER_BATCH`). Only meaningful with
+    /// `--l5-segment-check`.
+    #[arg(long, default_value_t = 8)]
+    segments: usize,
+
+    /// Issue #78: number of synthesized blocks to schedule across the
+    /// segments. Must be `>= --segments`. Only meaningful with
+    /// `--l5-segment-check`. Keep small (e.g. 4) for a tractable smoke run;
+    /// real proving is ~0.94 s/fold.
+    #[arg(long, default_value_t = 64)]
+    blocks: usize,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -198,6 +230,10 @@ fn main() {
             eprintln!("error: --ab-check/--l4-check are batch-mode only (issue #67)");
             std::process::exit(2);
         }
+        if args.l5_segment_check {
+            eprintln!("error: --l5-segment-check is batch-mode only (issue #78); drop --stream");
+            std::process::exit(2);
+        }
     }
     if args.ab_check && args.l2_fold != L2FoldMode::Tree {
         eprintln!("error: --ab-check requires --l2-fold tree");
@@ -208,6 +244,26 @@ fn main() {
         std::process::exit(2);
     }
 
+    // Issue #78: validate the L5 segment scheduler knobs up-front. The
+    // upper bound is the wrapper's NUM_CHAINS_PER_BATCH (8); blocks must
+    // fill at least one block per segment.
+    if args.l5_segment_check {
+        if args.segments < 1 || args.segments > 8 {
+            eprintln!(
+                "error: --segments ({}) must be in 1..=8 (the wrapper's NUM_CHAINS_PER_BATCH)",
+                args.segments
+            );
+            std::process::exit(2);
+        }
+        if args.blocks < args.segments {
+            eprintln!(
+                "error: --blocks ({}) must be >= --segments ({}); each segment needs at least one block",
+                args.blocks, args.segments
+            );
+            std::process::exit(2);
+        }
+    }
+
     log_machine_metadata(&args);
 
     if args.stream {
@@ -216,6 +272,14 @@ fn main() {
     }
 
     let block = get_test_block_json_file("bench_test.json");
+
+    // Issue #78: the L5 segment scheduler builds its own L1..L4 pipeline and
+    // multi-block fixture, so it branches off here (like --stream) before the
+    // single-block serial/tree batch flow.
+    if args.l5_segment_check {
+        run_l5_segment_check(&args, &block);
+        return;
+    }
 
     if block.txs.len() < args.tx_per_proof {
         eprintln!(
@@ -1513,6 +1577,417 @@ fn run_l4_check(
         "L4_CHECK [{label}] PASS: BlockCircuit proved+verified the final chain proof in {:?}",
         prove_dt
     );
+}
+
+/// Issue #78: 8-way L5 (`CyclicRecursionCircuit`) segment-parallel
+/// scheduler.
+///
+/// Pipeline:
+///  1. Build the L1..L4 + L5 circuits ONCE (shape-identical across blocks).
+///  2. Synthesize a `--blocks` continuation-consistent block sequence from
+///     `bench_test.json` (the repo ships only a single-block fixture) so the
+///     per-fold sanity checks in `cyclic_circuit.rs` all pass.
+///  3. Produce one L4 proof per synthesized block (serial up-front; L4 is not
+///     the floor this issue targets -- the L5 fold is).
+///  4. Split the blocks across `--segments` (`1..=8`) segment chains and
+///     compute each chain's starting on-chain-operations keccak prefix on the
+///     host (prove-free; mirrors the in-circuit `Batch` aggregation).
+///  5. Fold each segment's L4 proofs into a running L5 proof IN PARALLEL
+///     across segments (rayon). The fold is serial WITHIN a segment (a cyclic
+///     proof is threaded through), parallel ACROSS segments.
+///  6. L5-verify every segment proof (the functional acceptance).
+///  7. Emit `l5_segment_batch` with the parallel `effective_ms_per_block`.
+///
+/// ## L6 termination (gated on issue #83)
+///
+/// The wrapper (`WrapperCircuit::prove_inner`, `NUM_CHAINS_PER_BATCH = 8`)
+/// takes the `S` segment proofs plus a `delta_chain_proof`, a
+/// `blob_evaluation_proof`, and a KZG `WrapperInput` -- none of which exist
+/// in-repo yet (that is issue #83). When #83 lands, the L6 call shape is:
+/// pad the unused `chain_proofs[S..8)` slots with `chain_proofs[0]` and set
+/// `segment_count = S`; the wrapper asserts segment 0's on-chain-ops hash is
+/// zero (which the host pre-pass guarantees). This driver only DOCUMENTS that
+/// shape -- it does not call the wrapper. The verifying L6 run + the
+/// ≤200 ms/block hardware measurement (#10 AMD EPYC 7B13 baseline) are the
+/// follow-up tracked on #78/#83.
+///
+/// ## Composition seam (issue #82)
+///
+/// A segment's per-block L5 fold can be swapped for a pre-L5 merge-tree root
+/// proof of the SAME L5 shape without changing the L6 call: each segment
+/// already produces a single proof with the L5 public-input surface, so #82's
+/// merge tree slots in as the segment producer with the scheduler and wrapper
+/// call unchanged.
+fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
+    let bench_start = Instant::now();
+    let bench_cpu_start = cpu_time_ms();
+
+    info!(
+        "L5_SEGMENT_CHECK: synthesizing {} blocks across {} parallel segment chains",
+        args.blocks, args.segments
+    );
+
+    // ---- 1. Build the pipeline circuits ONCE. ----
+    // L1 (BlockTxCircuit) -> L2 (BlockTxChainCircuit) -> L3
+    // (BlockPreExecutionCircuit) -> L4 (BlockCircuit) -> L5
+    // (CyclicRecursionCircuit). All shapes are block-independent.
+    let l1 = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, CHAIN_ID);
+    let l1_target = l1.target;
+    let l1_data = l1.builder.build::<C>();
+
+    let l3 = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+    let l3_target = l3.target;
+    let l3_data = l3.builder.build::<C>();
+
+    let l2 = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &l1_data, args.tx_per_proof, 1);
+    let l2_target = l2.target;
+    let l2_data = l2.builder.build::<C>();
+    let block_tx_witness_size = l2.block_tx_witness_size;
+    let dummy_l2_circuit = dummy_circuit(&l2_data.common);
+    let dummy_l2_proof = cyclic_base_proof(
+        &l2_data.common,
+        &l2_data.verifier_only,
+        &dummy_l2_circuit,
+        Vec::<F>::new().iter().copied().enumerate().collect(),
+    )
+    .expect("L5_SEGMENT_CHECK: L2 dummy proof");
+
+    let l4_define_t = Instant::now();
+    let l4 = BlockCircuit::define(CIRCUIT_CONFIG, &l3_data, &l2_data, 1);
+    let l4_target = l4.target;
+    let l4_data = l4.builder.build::<C>();
+    events::emit(&BenchEvent::CircuitDefine {
+        layer: 4,
+        name: "BlockCircuit",
+        wall_ms: l4_define_t.elapsed().as_millis() as u64,
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
+
+    let l5_define_t = Instant::now();
+    let l5 = CyclicRecursionCircuit::define(CIRCUIT_CONFIG, &l4_data, 1);
+    let l5_target = l5.target;
+    let l5_data = l5.builder.build::<C>();
+    events::emit(&BenchEvent::CircuitDefine {
+        layer: 5,
+        name: "CyclicRecursionCircuit",
+        wall_ms: l5_define_t.elapsed().as_millis() as u64,
+        rss_mb_after: current_rss_mb(),
+        ts: now_iso8601(),
+    });
+    info!(
+        "L5_SEGMENT_CHECK: circuits built (L4 degree 2^{}, L5 degree 2^{})",
+        l4_data.common.degree_bits(),
+        l5_data.common.degree_bits()
+    );
+
+    // L5 dummy proof (over the L5 common data) for the conditional cyclic
+    // verifier slot -- built via the in-repo custom helper.
+    let l5_dummy_circuit = dummy_circuit(&l5_data.common);
+    let l5_dummy_proof = cyclic_base_proof(
+        &l5_data.common,
+        &l5_data.verifier_only,
+        &l5_dummy_circuit,
+        Vec::<F>::new().iter().copied().enumerate().collect(),
+    )
+    .expect("L5_SEGMENT_CHECK: L5 dummy proof");
+
+    // ---- 2. Synthesize the multi-block fixture. ----
+    let blocks = synthesize_block_sequence(base_block, args.blocks);
+
+    // ---- 3. One L4 proof per block (serial up-front). ----
+    info!(
+        "L5_SEGMENT_CHECK: proving {} per-block L4 proofs (serial)...",
+        blocks.len()
+    );
+    let mut l4_proofs: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(blocks.len());
+    for (i, block) in blocks.iter().enumerate() {
+        let l4_t = Instant::now();
+        let l4_proof = prove_block_l4(
+            args,
+            block,
+            &l1_data,
+            &l1_target,
+            &l3_data,
+            &l3_target,
+            &l2_data,
+            &l2_target,
+            block_tx_witness_size,
+            &dummy_l2_circuit,
+            &dummy_l2_proof,
+            &l4_data,
+            &l4_target,
+        );
+        info!(
+            "L5_SEGMENT_CHECK: L4 proof {}/{} (block {}) in {:?}",
+            i + 1,
+            blocks.len(),
+            block.block_number,
+            l4_t.elapsed()
+        );
+        l4_proofs.push(l4_proof);
+    }
+
+    // ---- 4. Split + host pre-pass (prove-free). ----
+    let split_points = segment_split_points(blocks.len(), args.segments);
+    let seeds = host_prepass(&blocks, &split_points);
+
+    // ---- 5. Fold each segment IN PARALLEL across segments. ----
+    info!(
+        "L5_SEGMENT_CHECK: folding {} segments in parallel...",
+        args.segments
+    );
+    let l5_data_ref = &l5_data;
+    let l5_target_ref = &l5_target;
+    let l5_dummy_ref = &l5_dummy_proof;
+    let l4_proofs_ref = &l4_proofs;
+    let split_ref = &split_points;
+    let seeds_ref = &seeds;
+
+    // Returns (final_segment_proof, wall_ms, segment_size) per segment.
+    let mut results: Vec<(ProofWithPublicInputs<F, C, D>, u64, u64)> = (0..args.segments)
+        .into_par_iter()
+        .map(|k| {
+            let start = split_ref[k];
+            let end = split_ref[k + 1];
+            let segment_size = (end - start) as u64;
+
+            let segment_info = SegmentInfo {
+                old_on_chain_operations_pub_data_hash: seeds_ref[k]
+                    .old_on_chain_operations_pub_data_hash,
+            };
+
+            let seg_t = Instant::now();
+
+            // Base cyclic proof seeded with this segment's SegmentInfo.
+            let mut cyclic_proof =
+                CyclicRecursionCircuit::cyclic_base_proof(l5_data_ref, &segment_info);
+
+            // Running host batch mirror for this segment (default + per-block
+            // aggregate_block), feeding the in-circuit fold's new_batch arg.
+            let mut batch = Batch::<F>::default();
+            let mut not_first_recursion = false;
+
+            for (offset, l4_proof) in l4_proofs_ref[start..end].iter().enumerate() {
+                let idx = start + offset;
+                // The L5 circuit reads `current_block` from the L4 proof's
+                // public inputs (the partial-block-patched values), and
+                // connects the public `new_batch` target to the batch it
+                // recomputes from THAT witness. So the host `new_batch` must be
+                // aggregated from the L4 proof's BlockWitness -- not from the
+                // raw synthesized Block, whose `new_*` roots predate the
+                // (possibly partial) tx run.
+                let block_witness = BlockWitness::from_public_inputs(&l4_proof.public_inputs, 1, 1);
+                batch.aggregate_block(&block_witness);
+
+                cyclic_proof = CyclicRecursionCircuit::prove(
+                    l5_target_ref,
+                    l5_data_ref,
+                    &batch,
+                    &segment_info,
+                    not_first_recursion,
+                    &cyclic_proof,
+                    l5_dummy_ref,
+                    l4_proof,
+                )
+                .unwrap_or_else(|err| {
+                    panic!("L5_SEGMENT_CHECK: segment {k} fold of block {idx} failed: {err:?}")
+                });
+
+                // After the first fold of a segment, every subsequent fold is
+                // a recursion over the previous cyclic proof.
+                not_first_recursion = true;
+            }
+
+            (
+                cyclic_proof,
+                seg_t.elapsed().as_millis() as u64,
+                segment_size,
+            )
+        })
+        .collect();
+
+    // ---- 6. Verify EVERY segment proof (functional acceptance). ----
+    let per_segment_wall_ms: Vec<u64> = results.iter().map(|(_, ms, _)| *ms).collect();
+    let segment_sizes: Vec<u64> = results.iter().map(|(_, _, sz)| *sz).collect();
+    for (k, (proof, _, _)) in results.iter().enumerate() {
+        l5_data.verify(proof.clone()).unwrap_or_else(|err| {
+            panic!("L5_SEGMENT_CHECK: segment {k} proof failed verify: {err:?}")
+        });
+    }
+    info!(
+        "L5_SEGMENT_CHECK: all {} segment proofs verified",
+        results.len()
+    );
+    // `results` consumed below only for length; drop the proofs explicitly to
+    // free memory before reporting.
+    results.clear();
+
+    // ---- 7. Effective parallel critical path per block + event. ----
+    // The parallel wall is the slowest segment; dividing by the largest
+    // segment size yields the effective per-block latency a parallel cell
+    // sees. Guard against an empty/degenerate denominator.
+    let max_wall = per_segment_wall_ms.iter().copied().max().unwrap_or(0) as f64;
+    let max_size = segment_sizes.iter().copied().max().unwrap_or(1).max(1) as f64;
+    let effective_ms_per_block = max_wall / max_size;
+
+    events::emit(&BenchEvent::L5SegmentBatch {
+        layer: 5,
+        name: "CyclicRecursionCircuit",
+        segment_count: args.segments as u64,
+        segment_sizes,
+        per_segment_wall_ms,
+        block_count: blocks.len() as u64,
+        effective_ms_per_block,
+        cpu_ms: diff_ms(bench_cpu_start, cpu_time_ms()),
+        rss_mb_peak: peak_rss_mb(),
+        ts: now_iso8601(),
+    });
+
+    info!(
+        "L5_SEGMENT_CHECK: effective_ms_per_block={:.1} (parallel critical path; \
+         total wall {:?}). The <=200 ms/block acceptance is a hardware measurement \
+         gate on the #10 AMD EPYC 7B13 baseline -- run: \
+         `bench --l5-segment-check --segments 8 --blocks 64` there and post the \
+         number on #78.",
+        effective_ms_per_block,
+        bench_start.elapsed()
+    );
+    info!(
+        "L5_SEGMENT_CHECK: L6 termination is gated on #83. When ready: pad the \
+         unused chain_proofs[{}..8) slots with chain_proofs[0] and set \
+         segment_count={} for WrapperCircuit::prove_inner.",
+        args.segments, args.segments
+    );
+}
+
+/// Produce a single block's L4 (`BlockCircuit`) proof by running the full
+/// L3 (pre-exec) + L1/L2 (tx + chain fold) + L4 pipeline for that block.
+/// Used by the #78 L5 segment scheduler, which needs one L4 proof per
+/// synthesized block before the parallel L5 fold. Mirrors the structures in
+/// `main`'s serial batch flow; everything here is per-block and shape-stable.
+#[allow(clippy::too_many_arguments)]
+fn prove_block_l4(
+    args: &Args,
+    block: &Block<F>,
+    l1_data: &CircuitData<F, C, D>,
+    l1_target: &BlockTxTarget,
+    l3_data: &CircuitData<F, C, D>,
+    l3_target: &circuit::block_pre_execution_constraints::BlockPreExecutionTarget,
+    l2_data: &CircuitData<F, C, D>,
+    l2_target: &BlockTxChainTarget,
+    block_tx_witness_size: usize,
+    dummy_l2_circuit: &CircuitData<F, C, D>,
+    dummy_l2_proof: &ProofWithPublicInputs<F, C, D>,
+    l4_data: &CircuitData<F, C, D>,
+    l4_target: &circuit::block_constraints::BlockTarget,
+) -> ProofWithPublicInputs<F, C, D> {
+    // L3: pre-execution.
+    let block_pre_exec = BlockPreExec::from_block(block);
+    let pre_proof = BlockPreExecutionCircuit::prove(l3_data, &block_pre_exec, l3_target)
+        .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L3 prove failed: {err:?}"));
+    let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
+    let state_metadata = pre_exec_witness.new_state_metadata.clone();
+
+    // Align tx limit down to a whole number of chunks (same rule as main).
+    let aligned_limit = (args.tx_limit / args.tx_per_proof) * args.tx_per_proof;
+    let effective_limit =
+        aligned_limit.min((block.txs.len() / args.tx_per_proof) * args.tx_per_proof);
+    assert!(
+        effective_limit >= args.tx_per_proof,
+        "L5_SEGMENT_CHECK: block {} has too few txs for one chunk",
+        block.block_number
+    );
+    let txs: &[_] = &block.txs[..effective_limit];
+
+    // Mutable rolling state across L1 chunks.
+    let mut all_assets = block.all_assets.clone();
+    let mut all_market_details = pre_exec_witness.new_market_details.clone();
+    let mut system_config = block.old_system_config;
+    let mut register_stack = block.register_stack_before;
+    let mut account_tree_root = block.old_account_tree_root;
+    let mut account_pub_data_tree_root = block.old_account_pub_data_tree_root;
+    let mut account_delta_tree_root = block.old_account_delta_tree_root;
+    let mut market_tree_root = block.old_market_tree_root;
+    let created_at = block.created_at;
+
+    // L2 seed: cyclic base proof for this block's chain.
+    let mut current_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
+        l2_data,
+        dummy_l2_circuit,
+        block.block_number,
+        block.created_at,
+        pre_exec_witness.new_state_root,
+        pre_exec_witness.new_state_root,
+        pre_exec_witness.new_validium_root,
+        block.old_account_delta_tree_root,
+        block_tx_witness_size,
+        &state_metadata,
+    );
+
+    for (index, tx) in txs.chunks(args.tx_per_proof).enumerate() {
+        let block_tx = BlockTx {
+            created_at,
+            old_system_config: system_config,
+            register_stack_before: register_stack,
+            all_assets_before: all_assets.clone(),
+            all_market_details_before: all_market_details.clone(),
+            old_account_tree_root: account_tree_root,
+            old_account_pub_data_tree_root: account_pub_data_tree_root,
+            old_account_delta_tree_root: account_delta_tree_root,
+            old_market_tree_root: market_tree_root,
+            txs: tx.to_vec(),
+        };
+
+        let tx_proof = BlockTxCircuit::prove(l1_data, &block_tx, l1_target)
+            .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L1 chunk {index} failed: {err:?}"));
+
+        let tx_witness = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs);
+        all_assets = tx_witness.all_assets_after.clone();
+        all_market_details = tx_witness.all_market_details_after.clone();
+        register_stack = tx_witness.register_stack_after;
+        system_config = tx_witness.new_system_config;
+        account_tree_root = tx_witness.new_account_tree_root;
+        account_pub_data_tree_root = tx_witness.new_account_pub_data_tree_root;
+        account_delta_tree_root = tx_witness.new_account_delta_tree_root;
+        market_tree_root = tx_witness.new_market_tree_root;
+
+        current_chain_proof = BlockTxChainCircuit::prove(
+            l2_target,
+            l2_data,
+            index as u64,
+            &current_chain_proof,
+            dummy_l2_proof,
+            &tx_proof,
+        )
+        .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L2 fold {index} failed: {err:?}"));
+    }
+
+    // L4: connect the (possibly partial) chain run to the block witness, then
+    // prove. Same partial-block patch trick as `run_l4_check`.
+    let cw = BlockTxChainWitness::from_public_inputs(&current_chain_proof.public_inputs, 1, 1);
+    let mut pblock = block.clone();
+    pblock.new_validium_root = cw.new_validium_root;
+    pblock.new_state_root = cw.new_state_root;
+    pblock.new_account_delta_tree_root = cw.new_account_delta_tree_root;
+    pblock.on_chain_operations_count = cw.on_chain_operations_count;
+    pblock.on_chain_operations_pub_data = cw.on_chain_operations_pub_data.clone();
+    pblock.priority_operations_count = cw.priority_operations_count;
+    pblock.new_public_market_details = cw.new_public_market_details.clone();
+    pblock.new_prefix_priority_operation_hash = if cw.priority_operations_count != 0 {
+        let mut input = Vec::with_capacity(32 + cw.priority_operations_pub_data.len());
+        input.extend_from_slice(&block.old_prefix_priority_operation_hash);
+        input.extend_from_slice(&cw.priority_operations_pub_data);
+        keccak(&input)
+    } else {
+        block.old_prefix_priority_operation_hash
+    };
+
+    let pw = BlockCircuit::generate_witness(l4_target, &pblock, &pre_proof, &current_chain_proof)
+        .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L4 witness gen failed: {err:?}"));
+    l4_data
+        .prove(pw)
+        .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L4 prove failed: {err:?}"))
 }
 
 /// Compute the delta between two CPU-time samples. Returns `None` if
