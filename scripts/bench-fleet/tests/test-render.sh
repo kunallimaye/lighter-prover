@@ -18,7 +18,7 @@ INFO="${WORK}/info"
 mkdir -p "${INFO}"
 
 # Header (must match the schema the renderer expects).
-printf 'machine_type\tgit_sha\thost\tcpu\tcores\tram_kb\tS\tchunks\tpre_exec_ms\ttotal_tx_ms\tavg_tx_ms\ttotal_chain_ms\tavg_chain_ms\twall_ms\trss_kb\texit_code\tstatus\n' > "${TSV}"
+printf 'machine_type\tgit_sha\thost\tcpu\tcores\tram_kb\tS\tchunks\tpre_exec_ms\ttotal_tx_ms\tavg_tx_ms\ttotal_chain_ms\tavg_chain_ms\twall_ms\tms_per_tx\ttx_per_sec\trss_kb\texit_code\tstatus\n' > "${TSV}"
 
 # Generate synthetic rows for every machine_type × S∈{1,2,4,6}.
 # Use slightly different fake numbers per shape/S to keep them distinguishable.
@@ -34,9 +34,13 @@ while IFS=$'\t' read -r mt vcpus arch _img _imgp _quota _zones; do
     avg_chain=520
     pre_exec=$((500 + i*5))
     chunks=$((480 / S))
-    printf '%s\t0ae123b\tvm-%s\tFake CPU %s\t%s\t131904212\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tNA\t0\tok\n' \
+    # Derived metrics exactly as the parser computes them: tx = chunks × S.
+    ms_per_tx=$(python3 -c "print(f'{$wall_ms / ($chunks * $S):.3f}')")
+    tx_per_sec=$(python3 -c "print(f'{($chunks * $S) * 1000 / $wall_ms:.3f}')")
+    printf '%s\t0ae123b\tvm-%s\tFake CPU %s\t%s\t131904212\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tNA\t0\tok\n' \
       "$mt" "$mt" "$mt" "$vcpus" "$S" "$chunks" \
       "$pre_exec" "$total_tx" "$avg_tx" "$total_chain" "$avg_chain" "$wall_ms" \
+      "$ms_per_tx" "$tx_per_sec" \
       >> "${TSV}"
   done
 
@@ -67,8 +71,10 @@ done < <(tail -n +2 "${MACHINES_TSV}")
 # is "11 rows" so include a phantom shape we don't know about. The renderer
 # orders by machines.tsv, so unknown shapes drop off the comparison/arch tables
 # but still appear in the full sweep (sorted to the end).
+# NOTE: these rows deliberately omit parser-computed ms_per_tx/tx_per_sec
+# ("NA") to exercise the renderer's derive-from-wall/chunks/S fallback.
 for S in 1 2 4 6; do
-  printf 'unknown-experimental-shape\t0ae123b\tvm-x\tExperimental\t128\t262144000\t%s\t1\t100\t100\t100\t100\t100\t%s\tNA\t0\tok\n' \
+  printf 'unknown-experimental-shape\t0ae123b\tvm-x\tExperimental\t128\t262144000\t%s\t1\t100\t100\t100\t100\t100\t%s\tNA\tNA\tNA\t0\tok\n' \
     "$S" "$((50000 + S*1000))" >> "${TSV}"
 done
 
@@ -98,6 +104,7 @@ assert "output < 60KB" test "${bytes}" -lt 61440
 
 # Required headings
 assert "has TL;DR heading"               grep -q '^## TL;DR'                                "${OUT}"
+assert "has Throughput leaders heading"  grep -q '^## Throughput leaders'                   "${OUT}"
 assert "has Methodology heading"         grep -q '^## Methodology'                          "${OUT}"
 assert "has Architectures heading"       grep -q '^## Architectures swept'                  "${OUT}"
 assert "has comparison heading"          grep -q '^## Cross-shape comparison at S=4'        "${OUT}"
@@ -116,10 +123,32 @@ done < <(tail -n +2 "${MACHINES_TSV}")
 fence_count=$(grep -c '^```' "${OUT}" || true)
 assert "balanced \`\`\` fence pairs (count=${fence_count})" test $((fence_count % 2)) -eq 0
 
-# Comparison table has 9 columns (header had 9 pipes)
-header_pipes=$(grep '^| Machine type | wall_s |' "${OUT}" | head -n1 | awk -F'|' '{print NF}')
-sep_pipes=$(grep -A1 '^| Machine type | wall_s |' "${OUT}" | tail -n1 | awk -F'|' '{print NF}')
+# Comparison table: ms_per_tx is the HEADLINE (first metric) column.
+assert "comparison headline column is ms_per_tx" \
+  grep -q '^| Machine type | ms_per_tx | tx_per_sec | wall_s |' "${OUT}"
+
+# Full sweep table carries the per-tx metrics too.
+assert "full table has ms_per_tx column" \
+  grep -q '^| Machine type | S | chunks | ms_per_tx | tx_per_sec |' "${OUT}"
+
+# Header/separator column counts match in the comparison table.
+header_pipes=$(grep '^| Machine type | ms_per_tx |' "${OUT}" | head -n1 | awk -F'|' '{print NF}')
+sep_pipes=$(grep -A1 '^| Machine type | ms_per_tx |' "${OUT}" | head -n2 | tail -n1 | awk -F'|' '{print NF}')
 assert "comparison header/separator column counts match" test "${header_pipes}" -eq "${sep_pipes}"
+
+# Throughput leaders table: one ranked row per known shape (10), sorted
+# ascending by ms_per_tx.
+leader_rows=$(grep -cE '^\| [0-9]+ \| `' "${OUT}" || true)
+assert "leaders table has one row per shape (got ${leader_rows})" \
+  test "${leader_rows}" -ge 10
+sorted_check=$(grep -E '^\| [0-9]+ \| `' "${OUT}" | awk -F'|' '{gsub(/[* ]/,"",$7); print $7}' | sort -nc 2>&1 || echo unsorted)
+assert "leaders table sorted by ms_per_tx asc" test -z "${sorted_check}"
+
+# Derive-fallback: the unknown shape rows had ms_per_tx=NA in the TSV but the
+# renderer must still show a numeric value in the full table (derived).
+# shellcheck disable=SC2016  # backticks are literal markdown, not expansion
+assert "fallback derivation for NA ms_per_tx rows" \
+  grep -qE '^\| `unknown-experimental-shape` \| 1 \| 1 \| \*\*[0-9]' "${OUT}"
 
 # Speedup column populated (× character present)
 assert "speedup column has values" grep -q '×' "${OUT}"

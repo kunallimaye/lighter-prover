@@ -10,7 +10,11 @@
 # parsed-results.tsv format (header line REQUIRED, tab-separated):
 #   machine_type  git_sha  host  cpu  cores  ram_kb  S  chunks
 #   pre_exec_ms  total_tx_ms  avg_tx_ms  total_chain_ms  avg_chain_ms
-#   wall_ms  rss_kb  exit_code  status
+#   wall_ms  ms_per_tx  tx_per_sec  rss_kb  exit_code  status
+#
+# ms_per_tx (wall_ms / (chunks × S)) is the HEADLINE metric (issue #42).
+# If the TSV predates the ms_per_tx/tx_per_sec columns, the renderer
+# derives them from wall_ms, chunks and S.
 #
 # machine-info-dir layout:
 #   <machine_info_dir>/<machine_type>/machine-info.txt
@@ -101,6 +105,36 @@ def gb(v):
     except ValueError:
         return "—"
 
+def per_tx_metrics(r):
+    """Return (ms_per_tx, tx_per_sec) as floats or (None, None).
+
+    Prefers the parser-emitted columns; falls back to deriving from
+    wall_ms / (chunks × S) for TSVs that predate issue #42.
+    """
+    try:
+        v = float(r.get("ms_per_tx", "NA"))
+        t = float(r.get("tx_per_sec", "NA"))
+        if v > 0:
+            return v, t
+    except (ValueError, TypeError):
+        pass
+    try:
+        total_tx = int(r["chunks"]) * int(r["S"])
+        wall = float(r["wall_ms"])
+        if total_tx > 0 and wall > 0:
+            return wall / total_tx, total_tx * 1000.0 / wall
+    except (ValueError, KeyError):
+        pass
+    return None, None
+
+def fmt_ms_per_tx(r):
+    v, _ = per_tx_metrics(r)
+    return f"{v:.1f}" if v is not None else "—"
+
+def fmt_tx_per_sec(r):
+    _, t = per_tx_metrics(r)
+    return f"{t:.2f}" if t is not None else "—"
+
 def s4_speedup(wall_ms):
     if wall_ms == "NA" or wall_ms == "":
         return "—"
@@ -123,10 +157,49 @@ tldr = (
     f"shapes** across 3 CPU architectures (Google Axion, Ampere Altra, AMD Turin) at "
     f"commit `{sha}`. All VMs provisioned in parallel as ephemeral GCE instances and "
     f"auto-deleted on completion.\n\n"
+    "**Headline metric: `ms_per_tx`** — average end-to-end pipeline time per "
+    "transaction, computed as `wall_ms / (chunks × S)` (each sweep proves a fixed "
+    "transaction count). Lower is better; `tx_per_sec` is the equivalent throughput. "
+    "See the Throughput leaders table below.\n\n"
     "See [Discussion #6](https://github.com/kunallimaye/lighter-prover/discussions/6) for "
     "the local AMD EPYC 7B13 baseline (S=4 = 345 s) used as the reference for "
     "`speedup_vs_epyc` in the comparison table below.\n"
 )
+
+# -------- throughput leaders (issue #42) --------
+# Best (lowest) ms_per_tx per machine across all S values, sorted ascending.
+leaders = []
+for mt in sorted({r["machine_type"] for r in rows}):
+    best = None
+    for r in rows:
+        if r["machine_type"] != mt:
+            continue
+        v, t = per_tx_metrics(r)
+        if v is None:
+            continue
+        if best is None or v < best[0]:
+            best = (v, t, r)
+    if best is not None:
+        leaders.append((mt, best[0], best[1], best[2]))
+leaders.sort(key=lambda x: x[1])
+
+leader_lines = [
+    "| Rank | Machine type | Arch | vCPUs | best S | ms_per_tx | tx_per_sec |",
+    "|---:|---|---|---:|---:|---:|---:|",
+]
+for rank, (mt, v, t, r) in enumerate(leaders, start=1):
+    leader_lines.append(
+        f"| {rank} "
+        f"| `{mt}` "
+        f"| {arch_lookup.get(mt, '—')} "
+        f"| {vcpu_lookup.get(mt, '—')} "
+        f"| {r['S']} "
+        f"| **{v:.1f}** "
+        f"| {t:.2f} |"
+    )
+if not leaders:
+    leader_lines.append("| — | — | — | — | — | — | — |")
+throughput_leaders = "\n".join(leader_lines)
 
 # -------- methodology --------
 methodology = (
@@ -168,16 +241,18 @@ arch_table = "\n".join(arch_lines)
 # -------- comparison table at S=4 --------
 s4_rows = {r["machine_type"]: r for r in rows if r["S"] == "4"}
 comp_lines = [
-    "| Machine type | wall_s | total_tx_s | avg_tx_ms | total_chain_s | avg_chain_ms | peak_rss_gb | speedup_vs_epyc |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|",
+    "| Machine type | ms_per_tx | tx_per_sec | wall_s | total_tx_s | avg_tx_ms | total_chain_s | avg_chain_ms | peak_rss_gb | speedup_vs_epyc |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
 ]
 for mt in machine_order:
     r = s4_rows.get(mt)
     if not r:
-        comp_lines.append(f"| `{mt}` | — | — | — | — | — | — | — |")
+        comp_lines.append(f"| `{mt}` | — | — | — | — | — | — | — | — | — |")
         continue
     comp_lines.append(
         f"| `{mt}` "
+        f"| **{fmt_ms_per_tx(r)}** "
+        f"| {fmt_tx_per_sec(r)} "
         f"| {ms_to_s(r['wall_ms'])} "
         f"| {ms_to_s(r['total_tx_ms'])} "
         f"| {ms_to_ms(r['avg_tx_ms'])} "
@@ -190,8 +265,8 @@ comparison_table = "\n".join(comp_lines)
 
 # -------- full sweep table --------
 full_lines = [
-    "| Machine type | S | chunks | pre_exec_ms | total_tx_s | avg_tx_ms | total_chain_s | avg_chain_ms | wall_s | status |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    "| Machine type | S | chunks | ms_per_tx | tx_per_sec | pre_exec_ms | total_tx_s | avg_tx_ms | total_chain_s | avg_chain_ms | wall_s | status |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
 ]
 # Sort rows by (machine_order index, int(S))
 def sort_key(r):
@@ -210,6 +285,8 @@ for r in sorted(rows, key=sort_key):
         f"| `{r['machine_type']}` "
         f"| {r['S']} "
         f"| {r['chunks']} "
+        f"| **{fmt_ms_per_tx(r)}** "
+        f"| {fmt_tx_per_sec(r)} "
         f"| {ms_to_ms(r['pre_exec_ms'])} "
         f"| {ms_to_s(r['total_tx_ms'])} "
         f"| {ms_to_ms(r['avg_tx_ms'])} "
@@ -272,6 +349,7 @@ repro = (
 tmpl = Path(tmpl_path).read_text()
 out = (
     tmpl.replace("__TL_DR__", tldr)
+        .replace("__THROUGHPUT_LEADERS__", throughput_leaders)
         .replace("__METHODOLOGY__", methodology)
         .replace("__ARCH_TABLE__", arch_table)
         .replace("__COMPARISON_TABLE__", comparison_table)
