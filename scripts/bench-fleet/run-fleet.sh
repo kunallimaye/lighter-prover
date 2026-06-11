@@ -269,7 +269,11 @@ cmd_run() {
       _seen_tags[$img_tag]=1
       image="${AR_IMAGE_BASE}:${sha}-${img_tag}"
       log_info "verifying image exists: ${image}"
-      if ! gcloud_imp artifacts docker images describe "${image}" >/dev/null 2>&1; then
+      # Use `tags list` instead of `images describe`: describe requires
+      # containeranalysis.occurrences.list, which the orchestrator SA may
+      # not hold. Listing tags only needs artifactregistry.reader.
+      if [[ -z "$(gcloud_imp artifacts docker tags list "${AR_IMAGE_BASE}" \
+            --filter="tag:${sha}-${img_tag}" --format='value(tag)' 2>/dev/null)" ]]; then
         log_err "image not found: ${image}"
         printf '  Build the matrix for this sha first:\n' >&2
         printf '    make cloud-bench-build    # (submits cicd/cloudbuild.yaml)\n' >&2
