@@ -7,6 +7,7 @@
 //! same plonky2-free code paths.
 
 pub mod events;
+pub mod l5segment;
 pub mod seed;
 pub mod stream;
 pub mod trace;

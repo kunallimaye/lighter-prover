@@ -35,6 +35,7 @@ partial output survives a later crash (e.g. an OOM during proving).
 | `circuit_define`  | After each circuit's `define + build` step        | `layer`, `name`, `wall_ms`, `rss_mb_after`, `ts`                                                                                                |
 | `layer_prove`     | After each `*::prove(...)` call (L1, L2, L3; in #67 tree mode also L2 merges, and L4 with `--l4-check`) | `layer`, `name`, `chunk_idx`, `chunk_total`, `tx_per_proof`, `wall_ms`, `cpu_ms`, `rss_mb_peak`, `rss_mb_after`, `ts`                            |
 | `summary`         | Once at end of `main`                             | `tx_per_proof`, `tx_limit`, `chunks`, `total_wall_ms`, `total_cpu_ms`, `peak_rss_mb`, `ts`                                                      |
+| `l5_segment_batch` | Once after the `--l5-segment-check` (#78) run     | `segment_count`, `segment_sizes`, `per_segment_wall_ms`, `block_count`, `effective_ms_per_block`, `cpu_ms`, `rss_mb_peak`, `ts` (see the L5 segment scheduler section) |
 
 For L3 (`BlockPreExecutionCircuit`, one-shot) the `chunk_idx` and
 `chunk_total` fields are explicitly `null`. For L1/L2 (per-chunk) they
@@ -132,6 +133,66 @@ depth, merges, leaf/merge averages, and the critical-path latency
 ```bash
 ./bench --tx-per-proof 4 --tx-limit 32 --l2-fold tree --ab-check --l4-check
 ```
+
+## L5 segment scheduler (bench --l5-segment-check)
+
+`--l5-segment-check` (issue #78) runs the 8-way L5
+(`CyclicRecursionCircuit`) segment-parallel scheduler. The wrapper circuit
+(`NUM_CHAINS_PER_BATCH = 8`) is designed to accept up to 8 independent
+segment chains and merge their roots in one shot; this driver realizes that
+parallelism. It synthesizes a `--blocks` block sequence from
+`bench_test.json` (the repo ships only a single-block fixture), splits it
+into `--segments` chains, computes each chain's starting on-chain-operations
+keccak prefix on the host (prove-free), produces one L4 (`BlockCircuit`)
+proof per block, then folds each segment's L4 proofs into a running L5 proof
+**in parallel across segments** (rayon). Every resulting segment proof is
+L5-verified. Batch mode only.
+
+```bash
+./bench --l5-segment-check --segments 8 --blocks 64
+```
+
+### Flags
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--l5-segment-check` | off | Enable the L5 segment scheduler (batch mode only) |
+| `--segments N` | 8 | Number of parallel L5 segment chains (`1..=8`, the wrapper's `NUM_CHAINS_PER_BATCH`) |
+| `--blocks N` | 64 | Synthesized block count (must be `>= --segments`) |
+
+It emits a `l5_segment_batch` event:
+
+| `event` | When | Notable fields |
+|---------|------|----------------|
+| `l5_segment_batch` | Once after all segments fold + verify | `segment_count`, `segment_sizes`, `per_segment_wall_ms`, `block_count`, `effective_ms_per_block` (= `max(per_segment_wall_ms) / max(segment_size)`, the parallel critical path per block), `cpu_ms`, `rss_mb_peak` |
+
+### Measurement gate and termination boundary (#83)
+
+The acceptance target — **effective ≤ 200 ms/block on the #10 AMD EPYC 7B13
+baseline** — is a *hardware measurement gate*. This driver delivers the
+instrument (the parallel scheduler + the `effective_ms_per_block` event) and
+proves it **functionally** at small scale: every L5 segment proof verifies.
+Reproduce the headline number on the EPYC baseline with
+`bench --l5-segment-check --segments 8 --blocks 64` and post it on
+[issue #78](https://github.com/kunallimaye/lighter-prover/issues/78).
+
+The **verifying L6 termination is gated on
+[issue #83](https://github.com/kunallimaye/lighter-prover/issues/83)**:
+`WrapperCircuit::prove_inner` additionally needs a `delta_chain_proof`, a
+`blob_evaluation_proof`, and a KZG `WrapperInput` that do not yet exist
+in-repo. When #83 lands, the L6 call pads the unused `chain_proofs[S..8)`
+slots with `chain_proofs[0]` and sets `segment_count = S`; the wrapper
+asserts segment 0's on-chain-operations hash is zero (which the host
+pre-pass guarantees). This driver documents that call shape but does not
+invoke the wrapper.
+
+Within a *single* segment, multi-block folds require a genuinely
+state-chained multi-block dataset (the synthesized clones share state
+roots): the cross-segment dependency this issue targets — the
+on-chain-operations keccak prefix — is what the host pre-pass computes and
+what the scheduler parallelizes. Running with `--blocks N --segments N`
+(one block per segment) exercises the full define → base-proof → witness →
+prove → verify path for every segment in parallel.
 
 ## Streaming mode (bench --stream)
 

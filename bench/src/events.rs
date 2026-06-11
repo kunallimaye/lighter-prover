@@ -119,6 +119,20 @@ pub enum BenchEvent<'a> {
         elapsed_s: f64,
         ts: String,
     },
+    /// 8-way L5 segment-scheduler batch summary (issue #78). Carries the
+    /// parallel critical-path-per-block (`effective_ms_per_block`) headline.
+    L5SegmentBatch {
+        layer: u8,     // = 5
+        name: &'a str, // = "CyclicRecursionCircuit"
+        segment_count: u64,
+        segment_sizes: Vec<u64>,       // blocks per segment
+        per_segment_wall_ms: Vec<u64>, // wall time per segment chain
+        block_count: u64,              // total blocks
+        effective_ms_per_block: f64,   // max(per_segment_wall_ms)/max(segment_size)
+        cpu_ms: Option<u64>,
+        rss_mb_peak: Option<u64>,
+        ts: String,
+    },
 }
 
 /// Serialize an event as `BENCH_EVENT <json>\n` and write+flush it to
@@ -167,10 +181,8 @@ pub fn cpu_time_ms() -> Option<u64> {
         if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
             return None;
         }
-        let user_us = (usage.ru_utime.tv_sec as i64) * 1_000_000
-            + (usage.ru_utime.tv_usec as i64);
-        let sys_us = (usage.ru_stime.tv_sec as i64) * 1_000_000
-            + (usage.ru_stime.tv_usec as i64);
+        let user_us = (usage.ru_utime.tv_sec as i64) * 1_000_000 + (usage.ru_utime.tv_usec as i64);
+        let sys_us = (usage.ru_stime.tv_sec as i64) * 1_000_000 + (usage.ru_stime.tv_usec as i64);
         let total_us = user_us.saturating_add(sys_us);
         if total_us < 0 {
             return None;
@@ -245,15 +257,9 @@ mod tests {
     fn iso8601_known_epochs() {
         assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00Z");
         // 2026-06-10T03:14:22Z -> 1_781_061_262
-        assert_eq!(
-            format_iso8601_utc(1_781_061_262),
-            "2026-06-10T03:14:22Z"
-        );
+        assert_eq!(format_iso8601_utc(1_781_061_262), "2026-06-10T03:14:22Z");
         // 2000-02-29T12:00:00Z (leap-year sanity) -> 951_825_600
-        assert_eq!(
-            format_iso8601_utc(951_825_600),
-            "2000-02-29T12:00:00Z"
-        );
+        assert_eq!(format_iso8601_utc(951_825_600), "2000-02-29T12:00:00Z");
     }
 
     #[test]
@@ -321,6 +327,28 @@ mod tests {
         assert!(json.contains("\"event\":\"stream_summary\""));
         assert!(json.contains("\"phase\":\"final\""));
         assert!(json.contains("\"throughput_tx_s\":49.6"));
+    }
+
+    #[test]
+    fn l5_segment_batch_serialization() {
+        let batch = BenchEvent::L5SegmentBatch {
+            layer: 5,
+            name: "CyclicRecursionCircuit",
+            segment_count: 8,
+            segment_sizes: vec![8, 8, 8, 8, 8, 8, 8, 8],
+            per_segment_wall_ms: vec![7520, 7480, 7600, 7510, 7490, 7530, 7470, 7550],
+            block_count: 64,
+            effective_ms_per_block: 950.0,
+            cpu_ms: Some(60_160),
+            rss_mb_peak: Some(4096),
+            ts: "2026-06-11T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&batch).unwrap();
+        assert!(json.contains("\"event\":\"l5_segment_batch\""));
+        assert!(json.contains("\"segment_count\":8"));
+        assert!(json.contains("\"block_count\":64"));
+        assert!(json.contains("\"effective_ms_per_block\":950.0"));
+        assert!(json.contains("\"name\":\"CyclicRecursionCircuit\""));
     }
 
     #[test]
