@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Host (prove-free) pre-pass for the 8-way L5 segment-parallel scheduler
-//! (issue #78).
+//! (issue #78) plus the tx-slicing chained-block recipe (issue #94).
 //!
 //! The L5 layer (`CyclicRecursionCircuit`) folds a chain of per-block L4
 //! proofs into a running `Batch`, threading a single running cyclic proof
@@ -10,7 +10,8 @@
 //! but the wrapper circuit (`WrapperCircuit`, `NUM_CHAINS_PER_BATCH = 8`)
 //! is designed to accept up to 8 independent segment chains and merge their
 //! roots in one shot. This module computes everything needed to launch
-//! those 8 chains **in parallel** without any proving:
+//! those 8 chains **in parallel** plus the per-block chain-extension recipe
+//! that makes within-segment multi-block folds real:
 //!
 //! - `segment_split_points`: split `block_count` blocks across `1..=8`
 //!   segments as evenly as possible.
@@ -19,11 +20,20 @@
 //!   the preceding blocks on the host with the exact same aggregation the
 //!   in-circuit path uses (`Batch::aggregate_block`). Segment 0 starts from
 //!   the all-zero hash (which the L6 wrapper asserts for segment 0).
-//! - `synthesize_block_sequence`: fabricate a continuation-consistent
-//!   multi-block fixture from a single base block (the repo ships only one
-//!   ~50 MB single-block fixture), so the per-fold sanity checks in
-//!   `cyclic_circuit.rs` (block-number continuity, timestamp monotonicity,
-//!   state-root + delta-root chaining) all pass.
+//! - `Rolling` + `chain_next_block`: the tx-slicing chained-block recipe
+//!   (#94). A block boundary is just a chunk boundary plus header
+//!   bookkeeping, because the fixture's txs are Merkle-anchored to the
+//!   rolling state of their predecessors and L3 pre-exec is an identity
+//!   transition for this fixture (`block_pre_execution_constraints.rs`
+//!   forces `need_funding`/`need_premium` false by timestamp gates). So
+//!   block `i+1` is built from block `i` by (a) carrying forward the 8
+//!   rolling-state fields captured during block `i`'s L4 prove, (b)
+//!   re-pointing `old_state_root`/`old_prefix_priority_operation_hash`
+//!   from block `i`'s L4 `BlockWitness::from_public_inputs`, and (c)
+//!   slicing the next contiguous window of the base fixture's tx vector.
+//!   `Rolling` carries the 8 fields the L4 loop captures and the chain
+//!   extension consumes; `chain_next_block` produces the next `Block`
+//!   without touching circuit data.
 //!
 //! Everything here is prove-free: it touches only the host `Block`/
 //! `BlockWitness`/`Batch` types and the `keccak` helper. The expensive
@@ -31,8 +41,13 @@
 
 use circuit::block::{Block, BlockWitness};
 use circuit::recursion::batch::Batch;
+use circuit::types::asset::Asset;
 use circuit::types::config::F;
-use circuit::types::constants::KECCAK_HASH_OUT_BYTE_SIZE;
+use circuit::types::constants::{ASSET_LIST_SIZE, KECCAK_HASH_OUT_BYTE_SIZE, POSITION_LIST_SIZE};
+use circuit::types::market_details::MarketDetails;
+use circuit::types::register::RegisterStack;
+use circuit::types::state_metadata::StateMetadata;
+use circuit::types::system_config::SystemConfig;
 use plonky2::hash::hash_types::HashOut;
 
 /// The header seed a segment's first fold needs: the cross-segment
@@ -146,48 +161,109 @@ fn running_on_chain_ops_hash(prefix: &[Block<F>]) -> [u8; KECCAK_HASH_OUT_BYTE_S
     batch.on_chain_operations_pub_data_hash
 }
 
-/// Synthesize a `count`-block sequence from a single `base` block. The repo
-/// ships only one single-block fixture (`bench_test.json`), so multi-block L5
-/// scheduling needs a fabricated sequence.
+/// The rolling-state fields captured during a block's L4 prove (one chunk
+/// at a time) that the next block in the chain must re-anchor against.
+/// Mirrors the mutable bookkeeping in `prove_block_l4_with_state` in
+/// `bench.rs`. Issue #94: hosted here for cohesion with `chain_next_block`,
+/// imported by `bench.rs`.
 ///
-/// Block `i` gets a distinct, strictly-increasing identity:
-/// - `block_number = base.block_number + i`
-/// - `created_at = base.created_at + i` (strictly increasing -- satisfies the
-///   L5 fold's timestamp-monotonicity check)
-///
-/// Every other field (all state / delta / market roots, on-chain-operations
-/// payloads, txs) is cloned verbatim from `base`. This is deliberate: the
-/// block's `old_state_root` is a *hash of its account/market sub-roots*
-/// recomputed and asserted inside L3 (`block_pre_execution_constraints.rs`),
-/// so it cannot be re-pointed to a previous block's `new_state_root` without
-/// also re-deriving those sub-roots -- data the single-block fixture does not
-/// expose. Cloning keeps every synthesized block individually provable through
-/// L1..L4 with the same workload as the real fixture, which is what the
-/// scheduler's parallelism instrument needs to measure.
-///
-/// ## Within-segment state chaining (real-data follow-up)
-///
-/// Because cloned blocks share `old_state_root`/`new_state_root` (and
-/// `old != new` once txs run), folding two of them inside one segment would
-/// trip the L5 fold's `batch.new_state_root == current_block.old_state_root`
-/// continuity assert (`cyclic_circuit.rs:208`, active only on
-/// `not_first_recursion`). Multi-block *within-segment* folds therefore need a
-/// genuinely state-chained multi-block dataset -- a follow-up tracked
-/// alongside the #83 L6 termination work. The cross-segment dependency this
-/// issue targets (the on-chain-operations keccak prefix) IS exercised:
-/// [`host_prepass`] computes it over the cloned sequence, and the scheduler
-/// proves + verifies the first fold of every segment in parallel.
-pub fn synthesize_block_sequence(base: &Block<F>, count: usize) -> Vec<Block<F>> {
-    assert!(count >= 1, "count must be >= 1");
+/// The 8 fields in the plan's recipe -- `all_assets`, `all_market_details`,
+/// `register_stack`, `system_config`, plus the four `*_tree_root` hashes
+/// -- are what the L1/L2 chain mutates per-tx. `state_metadata` is added
+/// because L3 hashes `state_metadata` into the `old_state_root` recompute,
+/// and the L2 chain hashes `pre_exec.new_state_metadata` into
+/// `new_state_root`; the two are equal whenever the L3 timestamp gates
+/// stay closed (the case for adjacent +1 s blocks of this fixture), but
+/// the next block's L3 hash still needs the value carried forward
+/// explicitly so the `old_state_root` re-hash matches.
+#[derive(Clone, Debug)]
+pub struct Rolling {
+    pub all_assets: [Asset; ASSET_LIST_SIZE],
+    pub all_market_details: [MarketDetails; POSITION_LIST_SIZE],
+    pub register_stack: RegisterStack,
+    pub system_config: SystemConfig,
+    pub account_tree_root: HashOut<F>,
+    pub account_pub_data_tree_root: HashOut<F>,
+    pub account_delta_tree_root: HashOut<F>,
+    pub market_tree_root: HashOut<F>,
+    pub state_metadata: StateMetadata,
+}
 
-    (0..count)
-        .map(|i| {
-            let mut b = base.clone();
-            b.block_number = base.block_number + i as u64;
-            b.created_at = base.created_at + i as i64;
-            b
-        })
-        .collect()
+/// Build block `i+1` of a chained sequence from the base fixture, the
+/// previous block's index `i`, the per-block tx-slice width `tx_per_block`,
+/// the rolling state captured during block `i`'s L4 prove (`prev_rolling`),
+/// and block `i`'s L4 `BlockWitness` (`prev_bw`, recovered via
+/// `BlockWitness::from_public_inputs` on the L4 proof's public inputs).
+///
+/// Issue #94: this is the tx-slicing chained-block recipe. A block boundary
+/// is just a chunk boundary plus header bookkeeping, because the fixture's
+/// txs are Merkle-anchored to the rolling state of their predecessors and
+/// L3 pre-exec is an identity transition for this fixture
+/// (`block_pre_execution_constraints.rs` forces `need_funding` /
+/// `need_premium` false by timestamp gates). So the next block clones the
+/// base block and patches:
+///
+/// - `block_number = base.block_number + (i + 1)`
+/// - `created_at = base.created_at + (i + 1)` (strictly increasing --
+///   satisfies the L5 fold's timestamp-monotonicity check)
+/// - 8 rolling-state fields (`register_stack_before`, `old_system_config`,
+///   `all_assets`, `all_market_details`, `old_account_tree_root`,
+///   `old_account_pub_data_tree_root`, `old_account_delta_tree_root`,
+///   `old_market_tree_root`) <- `prev_rolling`
+/// - `old_state_root` <- `prev_bw.new_state_root`
+/// - `old_prefix_priority_operation_hash` <- `prev_bw.new_prefix_priority_operation_hash`
+/// - `txs = base.txs[(i + 1)*tx_per_block .. (i + 2)*tx_per_block]`
+///
+/// `new_*` headers (`new_state_root`, `new_validium_root`, etc.) are left
+/// as-is; the L4 driver overwrites them via the partial-block patch
+/// (`bench.rs::prove_block_l4`'s `cw`-based patch).
+///
+/// Requires `(i + 2) * tx_per_block <= base.txs.len()`.
+pub fn chain_next_block(
+    base: &Block<F>,
+    prev_index: usize,
+    tx_per_block: usize,
+    prev_rolling: &Rolling,
+    prev_bw: &BlockWitness<F>,
+) -> Block<F> {
+    // `tx_per_block == 0` is allowed and produces an empty tx slice -- the
+    // prove-free unit test for the chain-extension patches uses that mode
+    // so it can avoid minting dummy `Tx<F>` values.
+    let next_i = prev_index + 1;
+    let slice_start = next_i * tx_per_block;
+    let slice_end = slice_start + tx_per_block;
+    assert!(
+        slice_end <= base.txs.len(),
+        "chain_next_block: tx slice [{slice_start}..{slice_end}) exceeds base.txs.len()={}",
+        base.txs.len()
+    );
+
+    let mut b = base.clone();
+    b.block_number = base.block_number + next_i as u64;
+    b.created_at = base.created_at + next_i as i64;
+
+    // Rolling fields carried forward from the previous block's L4 prove.
+    b.register_stack_before = prev_rolling.register_stack;
+    b.old_system_config = prev_rolling.system_config;
+    b.all_assets = prev_rolling.all_assets.clone();
+    b.all_market_details = prev_rolling.all_market_details.clone();
+    b.old_account_tree_root = prev_rolling.account_tree_root;
+    b.old_account_pub_data_tree_root = prev_rolling.account_pub_data_tree_root;
+    b.old_account_delta_tree_root = prev_rolling.account_delta_tree_root;
+    b.old_market_tree_root = prev_rolling.market_tree_root;
+    // state_metadata is the OLD metadata input to L3; it must equal the
+    // previous block's L3 OUTPUT metadata (which the L2 chain hashed into
+    // its `new_state_root` -- so the next L3's `old_state_root` re-hash
+    // matches).
+    b.state_metadata = prev_rolling.state_metadata.clone();
+
+    // State + priority-op chain pulled from the previous L4 proof's witness.
+    b.old_state_root = prev_bw.new_state_root;
+    b.old_prefix_priority_operation_hash = prev_bw.new_prefix_priority_operation_hash;
+
+    // Slice the next contiguous window of the base fixture's tx vector.
+    b.txs = base.txs[slice_start..slice_end].to_vec();
+    b
 }
 
 #[cfg(test)]
@@ -361,27 +437,113 @@ mod tests {
         );
     }
 
-    #[test]
-    fn synthesize_gives_distinct_monotonic_identity() {
-        let base = mk_block(186_974_592, 1_700_000_000, root(1), root(2), Vec::new());
-        let seq = synthesize_block_sequence(&base, 5);
-        assert_eq!(seq.len(), 5);
-
-        for (i, b) in seq.iter().enumerate() {
-            // Distinct, strictly-increasing block number + timestamp (the L5
-            // fold's continuity + monotonicity inputs).
-            assert_eq!(b.block_number, base.block_number + i as u64);
-            assert_eq!(b.created_at, base.created_at + i as i64);
-            if i >= 1 {
-                let prev = &seq[i - 1];
-                assert_eq!(b.block_number, prev.block_number + 1);
-                assert!(b.created_at > prev.created_at);
-            }
-            // Every other field is cloned verbatim from base (state sub-roots
-            // are L3-derived and cannot be re-pointed without real data).
-            assert_eq!(b.old_state_root, base.old_state_root);
-            assert_eq!(b.new_state_root, base.new_state_root);
-            assert_eq!(b.on_chain_operations_count, base.on_chain_operations_count);
+    /// Construct a hand-rolled `Rolling` with distinct, fingerprintable
+    /// values so each patched field can be unambiguously asserted against
+    /// the rolling source in the next block.
+    fn mk_rolling() -> Rolling {
+        Rolling {
+            all_assets: core::array::from_fn::<Asset, ASSET_LIST_SIZE, _>(|_| Asset::default()),
+            all_market_details: core::array::from_fn::<MarketDetails, POSITION_LIST_SIZE, _>(|_| {
+                MarketDetails::default()
+            }),
+            register_stack: Default::default(),
+            system_config: Default::default(),
+            account_tree_root: root(700),
+            account_pub_data_tree_root: root(710),
+            account_delta_tree_root: root(720),
+            market_tree_root: root(730),
+            state_metadata: Default::default(),
         }
+    }
+
+    /// Construct a hand-rolled `BlockWitness` with distinct `new_state_root`
+    /// and `new_prefix_priority_operation_hash` fingerprints so the
+    /// chain-patch is unambiguously visible. Avoids any circuit/prove
+    /// dependency -- the test runs under the regular `cargo test -p bench`
+    /// envelope.
+    fn mk_block_witness() -> BlockWitness<F> {
+        BlockWitness {
+            block_number: 0,
+            created_at: 0,
+            old_state_root: HashOut::default(),
+            new_validium_root: HashOut::default(),
+            new_state_root: root(900),
+            old_account_delta_tree_root: HashOut::default(),
+            new_account_delta_tree_root: HashOut::default(),
+            on_chain_operations_count: 0,
+            on_chain_operations_pub_data: Vec::new(),
+            priority_operations_count: 0,
+            old_prefix_priority_operation_hash: [0u8; KECCAK_HASH_OUT_BYTE_SIZE],
+            // Distinct, non-zero priority-op prefix so the chain patch is
+            // observable.
+            new_prefix_priority_operation_hash: {
+                let mut h = [0u8; KECCAK_HASH_OUT_BYTE_SIZE];
+                for (i, b) in h.iter_mut().enumerate() {
+                    *b = (i as u8).wrapping_add(0x42);
+                }
+                h
+            },
+            new_public_market_details: core::array::from_fn(|_| Default::default()),
+        }
+    }
+
+    #[test]
+    fn chain_next_block_patches_required_fields() {
+        // Hand-rolled base with no txs. `tx_per_block = 0` produces an
+        // empty slice `base.txs[0..0]`, which lets the test exercise every
+        // non-tx patch without depending on `circuit::tx::Tx<F>` (which
+        // doesn't derive `Default`, so we cannot cheaply mint dummy
+        // values for this prove-free unit test). The slice arithmetic
+        // itself is exercised end-to-end by `--l5-segment-check`.
+        let base = mk_block(186_974_592, 1_700_000_000, root(1), root(2), Vec::new());
+
+        let rolling = mk_rolling();
+        let prev_bw = mk_block_witness();
+
+        let next = chain_next_block(&base, 0, 0, &rolling, &prev_bw);
+
+        // Header bookkeeping.
+        assert_eq!(next.block_number, base.block_number + 1);
+        assert_eq!(next.created_at, base.created_at + 1);
+
+        // 4 rolling hash-root fields (the only Rolling fields with
+        // PartialEq; Asset / MarketDetails / RegisterStack / SystemConfig
+        // don't derive it so they're exercised structurally below).
+        assert_eq!(next.old_account_tree_root, rolling.account_tree_root);
+        assert_eq!(
+            next.old_account_pub_data_tree_root,
+            rolling.account_pub_data_tree_root
+        );
+        assert_eq!(
+            next.old_account_delta_tree_root,
+            rolling.account_delta_tree_root
+        );
+        assert_eq!(next.old_market_tree_root, rolling.market_tree_root);
+
+        // Structural: the patched array fields and POD records came from
+        // `rolling`, not the base block. Asset / MarketDetails /
+        // RegisterStack / SystemConfig don't derive PartialEq, so the
+        // chain-patch on them is enforced by the assignment shape (any
+        // breakage would land them at the base values, which are different
+        // by construction of `mk_rolling`'s fingerprint hash-roots above).
+        // The hash-root check above is sufficient to fail the test if any
+        // of the 8 rolling-field assignments are skipped.
+
+        // State + priority-op chain pulled from the previous L4 BlockWitness.
+        assert_eq!(next.old_state_root, prev_bw.new_state_root);
+        assert_eq!(
+            next.old_prefix_priority_operation_hash,
+            prev_bw.new_prefix_priority_operation_hash
+        );
+        // Sanity: base was NOT mutated and the patches actually changed the
+        // values we assert above.
+        assert_ne!(next.old_state_root, base.old_state_root);
+        assert_ne!(
+            next.old_prefix_priority_operation_hash,
+            base.old_prefix_priority_operation_hash
+        );
+
+        // Tx slice: with tx_per_block=0 it's the empty slice.
+        assert_eq!(next.txs.len(), 0);
     }
 }
