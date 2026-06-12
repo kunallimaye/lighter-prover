@@ -58,7 +58,10 @@ use plonky2::plonk::proof::{ProofWithPublicInputs, ProofWithPublicInputsTarget};
 use plonky2::timed;
 use plonky2::util::timing::TimingTree;
 
-use super::batch::{BATCH_TARGET_INDEX, BatchTarget, SEGMENT_INFO_INDEX, SegmentInfoTarget};
+use super::batch::{
+    BATCH_TARGET_INDEX, Batch, BatchTarget, BatchTargetWitness, SEGMENT_INFO_INDEX, SegmentInfo,
+    SegmentInfoTarget, SegmentInfoTargetWitness,
+};
 use crate::keccak::keccak::CircuitBuilderKeccak;
 use crate::types::config::{Builder, C, D, F};
 
@@ -265,8 +268,38 @@ impl Circuit<C, F, D> for BatchMergeCircuit {
         pw.set_bool_target(target.right_is_merge, right_is_merge)?;
         pw.set_verifier_data_target(&target.self_verifier_data, &circuit_data.verifier_only)?;
 
-        // All public-input targets (new_batch, segment_info) receive their
-        // values through copy constraints from the child proofs' public inputs.
+        // Issue #93: the merged `new_batch`/`segment_info` public-input
+        // targets must be set EXPLICITLY. They are bound to the in-circuit
+        // merge result only through copy constraints (`connect_batches`/
+        // `connect_segments`), and copy propagation does not reach the
+        // build-time public-input hash gates — without concrete witness
+        // values here, the PI-hash Poseidon2 generators never run and any
+        // prove fails with "184 generators weren't run". Compute the expected
+        // values with the host mirrors of the in-circuit merge semantics:
+        // `Batch::merge_consecutive` (old_* from left, new_* from right,
+        // counts summed) and `SegmentInfo::stitch` (the merged node carries
+        // the LEFT child's segment-start digest). The fallible variants turn
+        // a broken seam into an error instead of a panic; the circuit
+        // enforces the same invariants, so any mismatch here could not have
+        // proven anyway.
+        let left_batch = Batch::<F>::from_public_inputs(&left_proof.public_inputs);
+        let right_batch = Batch::<F>::from_public_inputs(&right_proof.public_inputs);
+        let left_segment = SegmentInfo::from_public_inputs(
+            &left_proof.public_inputs[BATCH_TARGET_INDEX..SEGMENT_INFO_INDEX],
+        );
+        let right_segment = SegmentInfo::from_public_inputs(
+            &right_proof.public_inputs[BATCH_TARGET_INDEX..SEGMENT_INFO_INDEX],
+        );
+
+        let merged_batch = left_batch.try_merge_consecutive(&right_batch)?;
+        let merged_segment = left_segment.try_stitch(
+            &right_segment,
+            &left_batch.on_chain_operations_pub_data_hash,
+        )?;
+
+        pw.set_batch_target(&target.new_batch, &merged_batch)?;
+        pw.set_segment_info_target(&target.segment_info, &merged_segment)?;
+
         Ok(pw)
     }
 
