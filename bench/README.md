@@ -189,17 +189,21 @@ done
 
 ## L5 segment scheduler (bench --l5-segment-check)
 
-`--l5-segment-check` (issue #78) runs the 8-way L5
+`--l5-segment-check` (issue #78, extended by #94) runs the 8-way L5
 (`CyclicRecursionCircuit`) segment-parallel scheduler. The wrapper circuit
 (`NUM_CHAINS_PER_BATCH = 8`) is designed to accept up to 8 independent
 segment chains and merge their roots in one shot; this driver realizes that
-parallelism. It synthesizes a `--blocks` block sequence from
-`bench_test.json` (the repo ships only a single-block fixture), splits it
-into `--segments` chains, computes each chain's starting on-chain-operations
-keccak prefix on the host (prove-free), produces one L4 (`BlockCircuit`)
-proof per block, then folds each segment's L4 proofs into a running L5 proof
-**in parallel across segments** (rayon). Every resulting segment proof is
-L5-verified. Batch mode only.
+parallelism. It builds a **genuinely state-chained `--blocks`-block
+fixture** by tx-slicing `bench_test.json` (the repo ships only a
+single-block 500-tx fixture), splits it into `--segments` chains, computes
+each chain's starting on-chain-operations keccak prefix on the host
+(prove-free), produces one L4 (`BlockCircuit`) proof per block while
+capturing the per-chunk rolling state, and uses that rolling state plus the
+previous block's L4 `BlockWitness` to clone the next block in the chain
+(issue #94's recipe: `bench/src/l5segment.rs::chain_next_block`). It then
+folds each segment's L4 proofs into a running L5 proof **in parallel across
+segments** (rayon). Every resulting segment proof is L5-verified. Batch
+mode only.
 
 ```bash
 ./bench --l5-segment-check --segments 8 --blocks 64
@@ -211,7 +215,17 @@ L5-verified. Batch mode only.
 |------|---------|---------|
 | `--l5-segment-check` | off | Enable the L5 segment scheduler (batch mode only) |
 | `--segments N` | 8 | Number of parallel L5 segment chains (`1..=8`, the wrapper's `NUM_CHAINS_PER_BATCH`) |
-| `--blocks N` | 64 | Synthesized block count (must be `>= --segments`) |
+| `--blocks N` | 64 | Chained block count (must be `>= --segments` AND satisfy `--blocks * --tx-per-proof <= DEFAULT_TX_LIMIT = 480`) |
+
+The `blocks × tx_per_proof ≤ 480` bound is enforced at parse time (issue
+#94): each chained block consumes one disjoint L1 chunk's worth of txs
+from the 500-tx fixture (per-block tx slice = `tx_per_proof` =
+`tx_per_block`), so the headline `--blocks 64 --segments 8` invocation is
+runnable at the default `--tx-per-proof 4` (`64 × 4 = 256 ≤ 480 ≤ 500`).
+Increasing `--tx-per-proof` reduces the maximum runnable `--blocks`
+proportionally; the guard rejects over-budget invocations with a precise
+error naming all three quantities (`blocks`, `tx_per_block`, the 480
+ceiling).
 
 It emits a `l5_segment_batch` event:
 
@@ -224,10 +238,14 @@ It emits a `l5_segment_batch` event:
 The acceptance target — **effective ≤ 200 ms/block on the #10 AMD EPYC 7B13
 baseline** — is a *hardware measurement gate*. This driver delivers the
 instrument (the parallel scheduler + the `effective_ms_per_block` event) and
-proves it **functionally** at small scale: every L5 segment proof verifies.
-Reproduce the headline number on the EPYC baseline with
-`bench --l5-segment-check --segments 8 --blocks 64` and post it on
-[issue #78](https://github.com/kunallimaye/lighter-prover/issues/78).
+proves it **functionally**: every L5 segment proof verifies, including
+within-segment continuity folds (`not_first_recursion = true` on chained
+blocks, issue #94). Reproduce the headline number on the EPYC baseline
+with `bench --l5-segment-check --segments 8 --blocks 64` and post it on
+[issue #78](https://github.com/kunallimaye/lighter-prover/issues/78); the
+full per-machine measurement session is tracked on
+[issue #90](https://github.com/kunallimaye/lighter-prover/issues/90) and is
+re-runnable on the new chained fixture.
 
 The **verifying L6 termination is gated on
 [issue #83](https://github.com/kunallimaye/lighter-prover/issues/83)**:
@@ -239,22 +257,26 @@ asserts segment 0's on-chain-operations hash is zero (which the host
 pre-pass guarantees). This driver documents that call shape but does not
 invoke the wrapper.
 
-Within a *single* segment, multi-block folds require a genuinely
-state-chained multi-block dataset (the synthesized clones share state
-roots): the cross-segment dependency this issue targets — the
-on-chain-operations keccak prefix — is what the host pre-pass computes and
-what the scheduler parallelizes. Running with `--blocks N --segments N`
-(one block per segment) exercises the full define → base-proof → witness →
-prove → verify path for every segment in parallel.
+Within-segment multi-block folds exercise the L5 fold's
+`batch.new_state_root == current_block.old_state_root` continuity assert
+(`cyclic_circuit.rs:208-213`, active on `not_first_recursion`). Issue
+#94's tx-slicing recipe satisfies this assert by re-anchoring each chained
+block against the rolling state and the L4 `BlockWitness` of its
+predecessor — verified at small scale by
+`bench --l5-segment-check --segments 4 --blocks 4` (4 single-block
+segments, no within-segment fold) and
+`bench --l5-segment-check --segments 2 --blocks 4` (2 segments × 2
+blocks, exercising one within-segment continuity fold per segment).
 
 ## Pre-L5 tree-fold mode (bench --l5-fold tree)
 
-`--l5-fold tree` (issue #82, ADR-0003 §D5) is the L5 analogue of the L2
-tree-fold one layer up: it builds the pre-L5 block-proof aggregation
-`BatchMergeCircuit` (`circuit/src/recursion/batch_merge_constraints.rs`),
-asserts the **self-shape gate** `merge.common == l5.common` (the merge
-node builds into the L5 cyclic circuit's exact 2^15 / 1496-PI shape, so
-its root is consumable anywhere an L5 proof is), and wires the log-depth
+`--l5-fold tree` (issue #82, extended by #94 + PR #96, ADR-0003 §D5) is the
+L5 analogue of the L2 tree-fold one layer up: it builds the pre-L5
+block-proof aggregation `BatchMergeCircuit`
+(`circuit/src/recursion/batch_merge_constraints.rs`), asserts the
+**self-shape gate** `merge.common == l5.common` (the merge node builds
+into the L5 cyclic circuit's exact 2^15 / 1496-PI shape, so its root is
+consumable anywhere an L5 proof is), and **live-proves** the log-depth
 pairwise fold of per-block L5 `Batch` proofs (carrying odd proofs up a
 level, mirroring `--l2-fold tree`). Two L5 children are merged by
 `BatchTarget::conditionally_merge_consecutive` (contiguity, monotonic
@@ -263,19 +285,23 @@ plus the on-chain-ops keccak **start-digest stitch**
 (`SegmentInfoTarget::connect_segments`, escape hatch iii) — the same
 stitch L6 uses, which makes the keccak chain associative across the tree.
 
-This path is **build-validated and A/B-wired**; it does **not** execute a
-live L5 prove in-workspace. The timed ≥4-leaf prove on the AMD EPYC 7B13
-baseline (confirming ≈0.94 s/step and the log₂(N)·0.94 s critical path)
-is a documented follow-up run requiring dedicated hardware + long
-wall-clock. The default `--l5-fold serial` is unchanged.
+Each tree leaf is a real per-block L5 fold of the chained fixture built
+by `build_chained_blocks_and_l4_proofs` (#94, shared with
+`--l5-segment-check`). Each tree-level merge calls
+`BatchMergeCircuit::prove`, which uses PR #96's `generate_witness` fix
+(commit `351363d` on `main`) to populate the merged `Batch` / `SegmentInfo`
+public-input targets. The root proof verifies against `merge_data` (or
+`l5_data` for the trivial single-leaf case). The default `--l5-fold
+serial` is unchanged.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--l5-fold serial\|tree` | `serial` | L5 fold strategy (batch mode only; `tree` build-validates `BatchMergeCircuit` and wires the host-level fold) |
-| `--l5-ab-check` | off | Tree mode: also serial-fold the same batches and assert element-wise equality of the two roots' semantic public inputs (`Batch`+`SegmentInfo`, excluding trailing VK PIs) |
+| `--l5-fold serial\|tree` | `serial` | L5 fold strategy (batch mode only; `tree` live-proves ≥4-leaf pairwise tree fold) |
+| `--blocks N` | 64 | Leaf count: real chained blocks consumed from `bench_test.json`. Same `blocks × tx_per_proof ≤ 480` parse-time guard as `--l5-segment-check`. The driver pads up to 4 leaves internally so the tree has at least two levels. |
+| `--l5-ab-check` | off | Tree mode: also host-mirror serial-fold the same batches and assert element-wise equality of the two roots' semantic public inputs (`Batch`+`SegmentInfo`, excluding trailing VK PIs) |
 
 ```bash
-./bench --l5-fold tree --l5-ab-check
+./bench --l5-fold tree --blocks 4
 ```
 
 ## Streaming mode (bench --stream)

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bench::events::{self, BenchEvent, cpu_time_ms, current_rss_mb, now_iso8601, peak_rss_mb};
-use bench::l5segment::{host_prepass, segment_split_points, synthesize_block_sequence};
+use bench::l5segment::{Rolling, chain_next_block, host_prepass, segment_split_points};
 use bench::seed::{ChunkSeed, seed_from_state};
 use circuit::block::{Block, BlockWitness};
 use circuit::block_constraints::{BlockCircuit, Circuit as _};
@@ -363,9 +363,12 @@ fn main() {
         std::process::exit(2);
     }
 
-    // Issue #78: validate the L5 segment scheduler knobs up-front. The
-    // upper bound is the wrapper's NUM_CHAINS_PER_BATCH (8); blocks must
-    // fill at least one block per segment.
+    // Issue #78 + #94: validate the L5 segment scheduler knobs up-front.
+    // The upper bound is the wrapper's NUM_CHAINS_PER_BATCH (8); blocks
+    // must fill at least one block per segment; and the total tx budget
+    // `blocks * tx_per_block` (where tx_per_block = tx_per_proof, one L1
+    // chunk per chained block per #94's recipe) must fit within the
+    // fixture's DEFAULT_TX_LIMIT ceiling (480 of the 500-tx fixture).
     if args.l5_segment_check {
         if args.segments < 1 || args.segments > 8 {
             eprintln!(
@@ -378,6 +381,33 @@ fn main() {
             eprintln!(
                 "error: --blocks ({}) must be >= --segments ({}); each segment needs at least one block",
                 args.blocks, args.segments
+            );
+            std::process::exit(2);
+        }
+        let tx_per_block = args.tx_per_proof;
+        let total_txs = args.blocks.saturating_mul(tx_per_block);
+        if total_txs > DEFAULT_TX_LIMIT {
+            eprintln!(
+                "error: --blocks ({}) * tx_per_block ({}) = {} exceeds the fixture ceiling \
+                 DEFAULT_TX_LIMIT ({}); the tx-slicing chained-block recipe (#94) needs a \
+                 disjoint tx window per block. Reduce --blocks or --tx-per-proof.",
+                args.blocks, tx_per_block, total_txs, DEFAULT_TX_LIMIT
+            );
+            std::process::exit(2);
+        }
+    }
+    // Issue #94: the same `blocks * tx_per_block <= DEFAULT_TX_LIMIT`
+    // bound applies to the `--l5-fold tree` path because it now consumes
+    // the real chained fixture rather than the synthetic-batches stub.
+    if args.l5_fold == L5FoldMode::Tree {
+        let tx_per_block = args.tx_per_proof;
+        let total_txs = args.blocks.saturating_mul(tx_per_block);
+        if total_txs > DEFAULT_TX_LIMIT {
+            eprintln!(
+                "error: --blocks ({}) * tx_per_block ({}) = {} exceeds the fixture ceiling \
+                 DEFAULT_TX_LIMIT ({}); --l5-fold tree consumes the same chained-block \
+                 fixture as --l5-segment-check (#94). Reduce --blocks or --tx-per-proof.",
+                args.blocks, tx_per_block, total_txs, DEFAULT_TX_LIMIT
             );
             std::process::exit(2);
         }
@@ -563,18 +593,23 @@ fn main() {
         return;
     }
 
-    // Issue #82: pre-L5 block-proof aggregation tree-fold. Build-validates the
-    // `BatchMergeCircuit` against the L5 cyclic self-shape and wires the
-    // host-level pairwise tree fold + A/B check. The live timed prove is a
-    // documented follow-up (does NOT run a full L5 prove in-workspace).
+    // Issue #82 + #94: pre-L5 block-proof aggregation tree-fold. Lives-proves
+    // a >=4-leaf tree on the genuinely state-chained fixture built by
+    // `build_chained_blocks_and_l4_proofs` (#94), using the merged PR #96
+    // (`BatchMergeCircuit::generate_witness`) fix.
     if args.l5_fold == L5FoldMode::Tree {
         run_l5_tree_fold(
             &args,
             &block,
-            effective_limit,
             &data,
+            &bt,
             &pre_exec_data,
+            &pbt,
             &chain_circuit_data,
+            &chain_circuit_t,
+            chain_circuit.block_tx_witness_size,
+            &dummy_tx_chain_circuit,
+            &dummy_proof,
             bench_start,
             bench_cpu_start,
         );
@@ -2037,41 +2072,30 @@ fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
     )
     .expect("L5_SEGMENT_CHECK: L5 dummy proof");
 
-    // ---- 2. Synthesize the multi-block fixture. ----
-    let blocks = synthesize_block_sequence(base_block, args.blocks);
-
-    // ---- 3. One L4 proof per block (serial up-front). ----
-    info!(
-        "L5_SEGMENT_CHECK: proving {} per-block L4 proofs (serial)...",
-        blocks.len()
+    // ---- 2 + 3. Build the state-chained block sequence and one L4 proof
+    // per block (serial up-front). Issue #94: blocks are constructed
+    // **inline with proving** so each block i+1 can re-anchor against the
+    // rolling state captured during block i's L4 prove and against block
+    // i's L4 BlockWitness. The shared helper is also used by
+    // `run_l5_tree_fold` so the two drivers consume the exact same
+    // chained-fixture construction.
+    let (blocks, l4_proofs) = build_chained_blocks_and_l4_proofs(
+        args,
+        base_block,
+        args.blocks,
+        &l1_data,
+        &l1_target,
+        &l3_data,
+        &l3_target,
+        &l2_data,
+        &l2_target,
+        block_tx_witness_size,
+        &dummy_l2_circuit,
+        &dummy_l2_proof,
+        &l4_data,
+        &l4_target,
+        "L5_SEGMENT_CHECK",
     );
-    let mut l4_proofs: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(blocks.len());
-    for (i, block) in blocks.iter().enumerate() {
-        let l4_t = Instant::now();
-        let l4_proof = prove_block_l4(
-            args,
-            block,
-            &l1_data,
-            &l1_target,
-            &l3_data,
-            &l3_target,
-            &l2_data,
-            &l2_target,
-            block_tx_witness_size,
-            &dummy_l2_circuit,
-            &dummy_l2_proof,
-            &l4_data,
-            &l4_target,
-        );
-        info!(
-            "L5_SEGMENT_CHECK: L4 proof {}/{} (block {}) in {:?}",
-            i + 1,
-            blocks.len(),
-            block.block_number,
-            l4_t.elapsed()
-        );
-        l4_proofs.push(l4_proof);
-    }
 
     // ---- 4. Split + host pre-pass (prove-free). ----
     let split_points = segment_split_points(blocks.len(), args.segments);
@@ -2209,9 +2233,16 @@ fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
 /// Produce a single block's L4 (`BlockCircuit`) proof by running the full
 /// L3 (pre-exec) + L1/L2 (tx + chain fold) + L4 pipeline for that block.
 /// Used by the #78 L5 segment scheduler, which needs one L4 proof per
-/// synthesized block before the parallel L5 fold. Mirrors the structures in
-/// `main`'s serial batch flow; everything here is per-block and shape-stable.
-#[allow(clippy::too_many_arguments)]
+/// block before the parallel L5 fold. Mirrors the structures in `main`'s
+/// serial batch flow; everything here is per-block and shape-stable.
+///
+/// Thin delegate over `prove_block_l4_with_state` that drops the rolling
+/// state captured during the final chunk update. Use
+/// `prove_block_l4_with_state` directly when you need the rolling state to
+/// feed `chain_next_block` and build the next chained block (#94). Kept
+/// for callers that don't need the chain extension (the current in-tree
+/// driver uses the with-state variant via `build_chained_blocks_and_l4_proofs`).
+#[allow(clippy::too_many_arguments, dead_code)]
 fn prove_block_l4(
     args: &Args,
     block: &Block<F>,
@@ -2227,6 +2258,46 @@ fn prove_block_l4(
     l4_data: &CircuitData<F, C, D>,
     l4_target: &circuit::block_constraints::BlockTarget,
 ) -> ProofWithPublicInputs<F, C, D> {
+    prove_block_l4_with_state(
+        args,
+        block,
+        l1_data,
+        l1_target,
+        l3_data,
+        l3_target,
+        l2_data,
+        l2_target,
+        block_tx_witness_size,
+        dummy_l2_circuit,
+        dummy_l2_proof,
+        l4_data,
+        l4_target,
+    )
+    .0
+}
+
+/// Same signature as `prove_block_l4` (and produces the same L4 proof), but
+/// additionally returns the 8 rolling-state fields captured after the final
+/// L1 chunk update. Issue #94: this rolling state is exactly what
+/// `chain_next_block` needs to clone the next block in a state-chained
+/// sequence (the rolling state and the L4 proof's `BlockWitness` together
+/// fully determine the next block's `old_*` and 8 carried fields).
+#[allow(clippy::too_many_arguments)]
+fn prove_block_l4_with_state(
+    args: &Args,
+    block: &Block<F>,
+    l1_data: &CircuitData<F, C, D>,
+    l1_target: &BlockTxTarget,
+    l3_data: &CircuitData<F, C, D>,
+    l3_target: &circuit::block_pre_execution_constraints::BlockPreExecutionTarget,
+    l2_data: &CircuitData<F, C, D>,
+    l2_target: &BlockTxChainTarget,
+    block_tx_witness_size: usize,
+    dummy_l2_circuit: &CircuitData<F, C, D>,
+    dummy_l2_proof: &ProofWithPublicInputs<F, C, D>,
+    l4_data: &CircuitData<F, C, D>,
+    l4_target: &circuit::block_constraints::BlockTarget,
+) -> (ProofWithPublicInputs<F, C, D>, Rolling) {
     // L3: pre-execution.
     let block_pre_exec = BlockPreExec::from_block(block);
     let pre_proof = BlockPreExecutionCircuit::prove(l3_data, &block_pre_exec, l3_target)
@@ -2330,38 +2401,184 @@ fn prove_block_l4(
 
     let pw = BlockCircuit::generate_witness(l4_target, &pblock, &pre_proof, &current_chain_proof)
         .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L4 witness gen failed: {err:?}"));
-    l4_data
+    let l4_proof = l4_data
         .prove(pw)
-        .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L4 prove failed: {err:?}"))
+        .unwrap_or_else(|err| panic!("L5_SEGMENT_CHECK: L4 prove failed: {err:?}"));
+
+    let rolling = Rolling {
+        all_assets,
+        all_market_details,
+        register_stack,
+        system_config,
+        account_tree_root,
+        account_pub_data_tree_root,
+        account_delta_tree_root,
+        market_tree_root,
+        // L3-output metadata: this is what block 0's L2 hashed into its
+        // `new_state_root`. The L3 timestamp gates (line ~621-642 in
+        // `block_pre_execution_constraints.rs`) are closed for the
+        // chained fixture (created_at advances by 1 s; gate is
+        // `current_block_time >= next_gate_time` for funding/oracle/
+        // premium), so `new_state_metadata == state_metadata` in
+        // practice -- but we carry the L3 output explicitly so the next
+        // block's L3 input is provably the same value.
+        state_metadata,
+    };
+    (l4_proof, rolling)
 }
 
-/// Issue #82: pre-L5 block-proof aggregation tree-fold driver.
+/// Issue #94: shared helper that builds the `n_blocks`-long state-chained
+/// block sequence and proves one L4 per block, returning both vectors in
+/// lock-step. The L4 loop is the only place that captures the rolling
+/// state and the L4 `BlockWitness` -- both feed `chain_next_block` to
+/// produce block `i+1` immediately after block `i`'s L4 prove finishes.
 ///
-/// This BUILD-VALIDATES the `BatchMergeCircuit` and WIRES the log-depth fold,
-/// but deliberately does NOT execute a live L5 prove: the timed >=4-leaf prove
-/// on dedicated EPYC hardware is a documented follow-up run (#90 / ADR-0003
-/// §D5). It builds L4 -> L5 (`CyclicRecursionCircuit`) -> `BatchMergeCircuit`,
-/// asserts the self-shape gate `merge.common == l5.common`, wires the pairwise
-/// tree fold over a `level` vector of per-block L5 `Batch` proofs (carrying odd
-/// proofs up a level) using the host `Batch::merge_consecutive` /
-/// `SegmentInfo::stitch` mirrors, and with `--l5-ab-check` compares the tree
+/// Per-block tx slice width is `args.tx_per_proof` (one L1 chunk per
+/// block), which keeps `--blocks 64 --segments 8` runnable inside the
+/// 500-tx fixture (64 * 4 = 256 <= 500) at the default `tx_per_proof=4`.
+/// The total-tx budget is enforced by the parse-time guard
+/// (`blocks * tx_per_block <= DEFAULT_TX_LIMIT = 480`), so callers can
+/// trust the slice arithmetic stays within both the fixture and the
+/// repo's tx-limit ceiling.
+///
+/// Used by both `run_l5_segment_check` (#78) and `run_l5_tree_fold` (#82)
+/// so the two L5 driver paths build identical chained fixtures.
+#[allow(clippy::too_many_arguments)]
+fn build_chained_blocks_and_l4_proofs(
+    args: &Args,
+    base_block: &Block<F>,
+    n_blocks: usize,
+    l1_data: &CircuitData<F, C, D>,
+    l1_target: &BlockTxTarget,
+    l3_data: &CircuitData<F, C, D>,
+    l3_target: &circuit::block_pre_execution_constraints::BlockPreExecutionTarget,
+    l2_data: &CircuitData<F, C, D>,
+    l2_target: &BlockTxChainTarget,
+    block_tx_witness_size: usize,
+    dummy_l2_circuit: &CircuitData<F, C, D>,
+    dummy_l2_proof: &ProofWithPublicInputs<F, C, D>,
+    l4_data: &CircuitData<F, C, D>,
+    l4_target: &circuit::block_constraints::BlockTarget,
+    label: &str,
+) -> (Vec<Block<F>>, Vec<ProofWithPublicInputs<F, C, D>>) {
+    assert!(n_blocks >= 1, "{label}: n_blocks must be >= 1");
+    // One L1 chunk per block; the parse-time guard already enforced
+    // `n_blocks * tx_per_block <= DEFAULT_TX_LIMIT <= base.txs.len()`.
+    let tx_per_block = args.tx_per_proof;
+
+    let mut blocks: Vec<Block<F>> = Vec::with_capacity(n_blocks);
+    let mut l4_proofs: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(n_blocks);
+
+    // Block 0 is the base block sliced down to its first `tx_per_block` txs
+    // so the L1/L2 driver sees the same per-block workload as every other
+    // chained block. (`prove_block_l4_with_state` aligns down to the
+    // largest multiple of `tx_per_proof`, so unsliced this would happily
+    // run all 500 txs and the chain math would over-budget the fixture.)
+    let mut block0 = base_block.clone();
+    let block0_slice_end = tx_per_block.min(block0.txs.len());
+    block0.txs = block0.txs[..block0_slice_end].to_vec();
+    blocks.push(block0);
+
+    info!(
+        "{label}: proving {} per-block L4 proofs over a tx-sliced chained fixture \
+         (tx_per_block={}, total_txs_used={})",
+        n_blocks,
+        tx_per_block,
+        n_blocks * tx_per_block,
+    );
+
+    for i in 0..n_blocks {
+        let l4_t = Instant::now();
+        let (l4_proof, rolling) = prove_block_l4_with_state(
+            args,
+            &blocks[i],
+            l1_data,
+            l1_target,
+            l3_data,
+            l3_target,
+            l2_data,
+            l2_target,
+            block_tx_witness_size,
+            dummy_l2_circuit,
+            dummy_l2_proof,
+            l4_data,
+            l4_target,
+        );
+        info!(
+            "{label}: L4 proof {}/{} (block {}) in {:?}",
+            i + 1,
+            n_blocks,
+            blocks[i].block_number,
+            l4_t.elapsed()
+        );
+
+        // Issue #94: patch the `new_*` fields of `blocks[i]` to match what
+        // the L4 proof actually produced. `prove_block_l4_with_state`
+        // applies the partial-block patch only to its internal `pblock`,
+        // not the caller's block; without this re-patch, the `host_prepass`
+        // call below in `run_l5_segment_check` would feed `aggregate_block`
+        // the STALE base-fixture `new_*` values via `BlockWitness::from_block`,
+        // tripping `Batch::aggregate_block`'s state-root continuity assert
+        // at the second segment seam (segments k >= 2 fold >=2 prefix
+        // blocks). Re-read the partial-block patch from the L4 BlockWitness
+        // (parsed from the proof's PIs) so the host view of `blocks[i]`
+        // matches the in-circuit view exactly.
+        let bw = BlockWitness::from_public_inputs(&l4_proof.public_inputs, 1, 1);
+        {
+            let b = &mut blocks[i];
+            b.new_validium_root = bw.new_validium_root;
+            b.new_state_root = bw.new_state_root;
+            b.new_account_delta_tree_root = bw.new_account_delta_tree_root;
+            b.on_chain_operations_count = bw.on_chain_operations_count;
+            b.on_chain_operations_pub_data = bw.on_chain_operations_pub_data.clone();
+            b.priority_operations_count = bw.priority_operations_count;
+            b.new_prefix_priority_operation_hash = bw.new_prefix_priority_operation_hash;
+            b.new_public_market_details = bw.new_public_market_details.clone();
+        }
+
+        // Chain the next block immediately, while the rolling state and
+        // the L4 BlockWitness are in scope. Skip the extension on the
+        // last block.
+        if i + 1 < n_blocks {
+            let next = chain_next_block(base_block, i, tx_per_block, &rolling, &bw);
+            blocks.push(next);
+        }
+        l4_proofs.push(l4_proof);
+    }
+
+    (blocks, l4_proofs)
+}
+
+/// Issue #82 + #94: pre-L5 block-proof aggregation tree-fold driver.
+///
+/// Builds L4 -> L5 (`CyclicRecursionCircuit`) -> `BatchMergeCircuit`, asserts
+/// the self-shape gate `merge.common == l5.common`, lives-proves one L5 fold
+/// per block of the chained fixture built by
+/// `build_chained_blocks_and_l4_proofs` (#94), then wires the pairwise log-depth
+/// tree fold over those real per-block L5 proofs using the merged PR #96
+/// `BatchMergeCircuit::generate_witness` path. Carries odd proofs up a level,
+/// mirroring `--l2-fold tree`. With `--l5-ab-check` it also compares the tree
 /// root vs the L5 serial fold element-wise on the semantic PI surface.
 #[allow(clippy::too_many_arguments)]
 fn run_l5_tree_fold(
     args: &Args,
     block: &Block<F>,
-    effective_limit: usize,
+    l1_data: &CircuitData<F, C, D>,
+    l1_target: &BlockTxTarget,
     l3_data: &CircuitData<F, C, D>,
-    pre_exec_data: &CircuitData<F, C, D>,
-    chain_circuit_data: &CircuitData<F, C, D>,
+    l3_target: &circuit::block_pre_execution_constraints::BlockPreExecutionTarget,
+    l2_data: &CircuitData<F, C, D>,
+    l2_target: &BlockTxChainTarget,
+    block_tx_witness_size: usize,
+    dummy_l2_circuit: &CircuitData<F, C, D>,
+    dummy_l2_proof: &ProofWithPublicInputs<F, C, D>,
     bench_start: Instant,
     bench_cpu_start: Option<u64>,
 ) {
-    let _ = (l3_data, effective_limit);
-
     // ---- Build the L4 -> L5 -> merge circuit chain.
     let l4_define_t = Instant::now();
-    let l4 = BlockCircuit::define(CIRCUIT_CONFIG, pre_exec_data, chain_circuit_data, 1);
+    let l4 = BlockCircuit::define(CIRCUIT_CONFIG, l3_data, l2_data, 1);
+    let l4_target = l4.target;
     let l4_data = l4.builder.build::<C>();
     info!(
         "L5_TREEFOLD: L4 BlockCircuit defined+built in {:?} (degree 2^{})",
@@ -2424,42 +2641,118 @@ fn run_l5_tree_fold(
         l5_data.common.degree_bits()
     );
 
-    // ---- Build a small set of semantically-valid, contiguous per-block L5
-    // batches to exercise the fold wiring. Each batch is a single-block L5
-    // `Batch` whose ranges/roots/priority-prefix chain are stitched so the
-    // merge invariants hold. (The live prove will replace these with real L5
-    // proofs; the topology and invariant checks are identical.)
-    let num_leaves = 4usize; // >= 4 so we exercise multiple tree levels
-    let leaves: Vec<Batch<F>> = build_synthetic_l5_batches(block, num_leaves);
-    info!(
-        "L5_TREEFOLD: {} synthetic per-block L5 batches built (contiguous block range {}..={})",
+    // ---- L5 dummy proof (over the L5 common data) for the conditional cyclic
+    // verifier slot, used by `CyclicRecursionCircuit::prove`.
+    let l5_dummy_circuit = dummy_circuit(&l5_data.common);
+    let l5_dummy_proof = cyclic_base_proof(
+        &l5_data.common,
+        &l5_data.verifier_only,
+        &l5_dummy_circuit,
+        Vec::<F>::new().iter().copied().enumerate().collect(),
+    )
+    .expect("L5_TREEFOLD: L5 dummy proof");
+
+    // ---- Issue #94: build the genuinely state-chained fixture and prove
+    // one L4 per block, then one single-block L5 fold per block to produce
+    // the per-block L5 leaf proofs that feed the tree.
+    let num_leaves = args.blocks.max(4); // >=4 leaves exercises multiple tree levels (#82 acceptance)
+    let (blocks, l4_proofs) = build_chained_blocks_and_l4_proofs(
+        args,
+        block,
         num_leaves,
-        leaves.first().map(|b| b.end_block_number).unwrap_or(0),
-        leaves.last().map(|b| b.end_block_number).unwrap_or(0),
+        l1_data,
+        l1_target,
+        l3_data,
+        l3_target,
+        l2_data,
+        l2_target,
+        block_tx_witness_size,
+        dummy_l2_circuit,
+        dummy_l2_proof,
+        &l4_data,
+        &l4_target,
+        "L5_TREEFOLD",
     );
 
-    // The segment-start digests: leaf k's segment starts where leaf k-1's
-    // running on-chain-ops hash ended (the L6 seam contract). Leaf 0 starts at
-    // the zero digest (first segment is empty, per wrapper_circuit.rs:160-165).
-    let segments: Vec<SegmentInfo> = leaves
-        .iter()
-        .scan([0u8; 32], |start, leaf| {
-            let seg = SegmentInfo {
-                old_on_chain_operations_pub_data_hash: *start,
-            };
-            *start = leaf.on_chain_operations_pub_data_hash;
-            Some(seg)
-        })
-        .collect();
+    info!(
+        "L5_TREEFOLD: proving {} per-block L5 leaf proofs (one single-block fold each)...",
+        num_leaves
+    );
 
-    // ---- Pairwise merge up the tree. Each entry carries (batch, segment,
-    // is_merge), mirroring the (proof, is_merge) carry in `run_tree_fold`.
-    let mut level: Vec<(Batch<F>, SegmentInfo, bool)> = leaves
-        .iter()
-        .cloned()
-        .zip(segments.iter().cloned())
-        .map(|(b, s)| (b, s, false))
-        .collect();
+    // Per-block single-block L5 `Batch` (host mirror) and `SegmentInfo`
+    // start-digest. Leaf k's segment starts where the running on-chain-ops
+    // keccak hash sits after folding all preceding blocks. Leaf 0 starts at
+    // the zero digest (first segment is empty, per wrapper_circuit.rs:160-165).
+    let mut leaf_proofs: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(num_leaves);
+    let mut leaf_batches: Vec<Batch<F>> = Vec::with_capacity(num_leaves);
+    let mut leaf_segments: Vec<SegmentInfo> = Vec::with_capacity(num_leaves);
+    let mut running_on_chain = [0u8; KECCAK_HASH_OUT_BYTE_SIZE];
+
+    for (i, l4_proof) in l4_proofs.iter().enumerate() {
+        // SegmentInfo for this single-block L5 chain: anchored at the
+        // running on-chain-ops digest accumulated by all preceding blocks.
+        let segment_info = SegmentInfo {
+            old_on_chain_operations_pub_data_hash: running_on_chain,
+        };
+
+        // Host mirror of the single-block L5 Batch: a fresh Batch absorbing
+        // exactly one block's L4 BlockWitness (same aggregation the
+        // in-circuit fold computes).
+        let block_witness = BlockWitness::from_public_inputs(&l4_proof.public_inputs, 1, 1);
+        let mut batch = Batch::<F>::default();
+        batch.aggregate_block(&block_witness);
+
+        // Live L5 prove: fresh cyclic base proof seeded with the segment
+        // info + one fold (`not_first_recursion = false`).
+        let cyclic_base = CyclicRecursionCircuit::cyclic_base_proof(&l5_data, &segment_info);
+        let leaf_t = Instant::now();
+        let l5_proof = CyclicRecursionCircuit::prove(
+            &l5_circuit.target,
+            &l5_data,
+            &batch,
+            &segment_info,
+            false,
+            &cyclic_base,
+            &l5_dummy_proof,
+            l4_proof,
+        )
+        .unwrap_or_else(|err| {
+            panic!("L5_TREEFOLD: leaf L5 prove for block {i} failed: {err:?}")
+        });
+        info!(
+            "L5_TREEFOLD: L5 leaf {}/{} (block {}) in {:?}",
+            i + 1,
+            num_leaves,
+            blocks[i].block_number,
+            leaf_t.elapsed()
+        );
+
+        // Advance the running on-chain-ops digest for the next leaf.
+        running_on_chain = batch.on_chain_operations_pub_data_hash;
+
+        leaf_proofs.push(l5_proof);
+        leaf_batches.push(batch);
+        leaf_segments.push(segment_info);
+    }
+
+    info!(
+        "L5_TREEFOLD: {} live L5 leaf proofs built (contiguous block range {}..={})",
+        num_leaves,
+        leaf_batches.first().map(|b| b.end_block_number).unwrap_or(0),
+        leaf_batches.last().map(|b| b.end_block_number).unwrap_or(0),
+    );
+
+    // ---- Pairwise live merge up the tree. Each entry carries
+    // (proof, batch, segment, is_merge); the BatchMergeCircuit live-proves
+    // each pairwise merge using PR #96 (`generate_witness`) to populate the
+    // merged Batch/SegmentInfo PIs.
+    let mut level: Vec<(ProofWithPublicInputs<F, C, D>, Batch<F>, SegmentInfo, bool)> =
+        leaf_proofs
+            .into_iter()
+            .zip(leaf_batches.iter().cloned())
+            .zip(leaf_segments.iter().cloned())
+            .map(|((p, b), s)| (p, b, s, false))
+            .collect();
 
     let mut depth = 0usize;
     let mut merges = 0usize;
@@ -2467,39 +2760,75 @@ fn run_l5_tree_fold(
         depth += 1;
         let mut next = Vec::with_capacity(level.len() / 2 + 1);
         let mut iter = level.into_iter();
-        while let Some(left) = iter.next() {
+        while let Some((left_proof, left_batch, left_segment, left_is_merge)) = iter.next() {
             match iter.next() {
-                Some(right) => {
-                    // Seam: right's segment-start digest must equal left's
-                    // running on-chain-ops hash (escape hatch iii stitch).
-                    let stitched_segment = left
-                        .1
-                        .try_stitch(&right.1, &left.0.on_chain_operations_pub_data_hash)
+                Some((right_proof, right_batch, right_segment, right_is_merge)) => {
+                    // Host mirror: stitched segment + merged batch must
+                    // match exactly what the in-circuit merge computes.
+                    let stitched_segment = left_segment
+                        .try_stitch(&right_segment, &left_batch.on_chain_operations_pub_data_hash)
                         .unwrap_or_else(|err| {
                             panic!("L5_TREEFOLD merge #{merges} (level {depth}) seam stitch failed: {err:?}")
                         });
-                    let merged_batch = left
-                        .0
-                        .try_merge_consecutive(&right.0)
+                    let merged_batch = left_batch
+                        .try_merge_consecutive(&right_batch)
                         .unwrap_or_else(|err| {
                             panic!("L5_TREEFOLD merge #{merges} (level {depth}) batch merge failed: {err:?}")
                         });
+
+                    // Live merge prove.
+                    let merge_t = Instant::now();
+                    let merge_proof = BatchMergeCircuit::prove(
+                        &merge_circuit.target,
+                        &merge_data,
+                        &left_proof,
+                        left_is_merge,
+                        &right_proof,
+                        right_is_merge,
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!("L5_TREEFOLD merge #{merges} (level {depth}) live prove failed: {err:?}")
+                    });
+                    info!(
+                        "L5_TREEFOLD: merge #{} (level {}) live-proved in {:?}",
+                        merges,
+                        depth,
+                        merge_t.elapsed()
+                    );
+
                     merges += 1;
-                    next.push((merged_batch, stitched_segment, true));
+                    next.push((merge_proof, merged_batch, stitched_segment, true));
                 }
                 None => {
                     info!("L5_TREEFOLD level {depth}: odd proof carried up to the next level");
-                    next.push(left);
+                    next.push((left_proof, left_batch, left_segment, left_is_merge));
                 }
             }
         }
         level = next;
     }
-    let (root_batch, root_segment, _root_is_merge) =
+    let (root_proof, root_batch, root_segment, root_is_merge) =
         level.pop().expect("L5 tree fold produced no root");
 
+    // Functional acceptance: the root proof verifies against the data
+    // whose VK is embedded in the root. `merge.common == l5.common` (the
+    // #82 self-shape gate), but `merge.verifier_only != l5.verifier_only`,
+    // so we must select the correct verifier_data based on whether the
+    // root came out of a merge or a leaf L5 prove. (BatchMergeCircuit::prove
+    // also runs an internal verify, so the merge path is double-verified
+    // here; the leaf-only path needs this explicit verify.)
+    let (root_verify_data, root_verify_label) = if root_is_merge {
+        (&merge_data, "merge VK")
+    } else {
+        (&l5_data, "L5 leaf VK")
+    };
+    root_verify_data
+        .verify(root_proof.clone())
+        .unwrap_or_else(|err| panic!("L5_TREEFOLD: root proof verify failed ({root_verify_label}): {err:?}"));
+
     info!(
-        "L5_TREEFOLD wired: leaves={} depth={} merges={} root_block_range={}..={} root_batch_size={}",
+        "L5_TREEFOLD wired+proved: leaves={} depth={} merges={} root_block_range={}..={} \
+         root_batch_size={} root_verify=PASS",
         num_leaves,
         depth,
         merges,
@@ -2510,26 +2839,23 @@ fn run_l5_tree_fold(
         root_batch.batch_size,
     );
 
-    // ---- A/B: serial fold over the SAME batches; root PIs must match.
+    // ---- A/B: serial L5 fold over the SAME leaves (host-mirror only --
+    // the live serial L5 fold is exercised by `--l5-segment-check
+    // --segments 1`). Root semantic PIs of the host-mirror serial fold
+    // must equal the live tree root's semantic PIs.
     if args.l5_ab_check {
         info!(
-            "L5_AB_CHECK: running serial L5 fold over the same {} batches...",
+            "L5_AB_CHECK: running host-mirror serial L5 fold over the same {} leaves...",
             num_leaves
         );
-        let mut serial_batch = leaves[0].clone();
-        for right in &leaves[1..] {
+        let mut serial_batch = leaf_batches[0].clone();
+        for right in &leaf_batches[1..] {
             serial_batch = serial_batch
                 .try_merge_consecutive(right)
                 .unwrap_or_else(|err| panic!("L5_AB_CHECK serial step failed: {err:?}"));
         }
-        // The serial fold's segment is always the first leaf's start digest
-        // (the running chain is anchored at the segment start), same as the
-        // tree root's left-anchored segment.
-        let serial_segment = segments[0].clone();
+        let serial_segment = leaf_segments[0].clone();
 
-        // Semantic PI surface: the `Batch` PIs followed by the `SegmentInfo`
-        // PIs. The trailing verifier-key PIs differ by construction (L5 leaf
-        // VK in the serial root, merge VK in the tree root) and are excluded.
         let tree_pis = batch_segment_public_inputs(&root_batch, &root_segment);
         let serial_pis = batch_segment_public_inputs(&serial_batch, &serial_segment);
         assert_eq!(
@@ -2558,9 +2884,8 @@ fn run_l5_tree_fold(
     }
 
     info!(
-        "L5_TREEFOLD DONE: BatchMergeCircuit build-validated against the L5 self-shape and the \
-         log-depth fold wired. The live timed >=4-leaf prove on EPYC hardware is a documented \
-         follow-up run (see issue #82 / ADR-0003 §D5)."
+        "L5_TREEFOLD DONE: live ≥4-leaf tree-fold proved on the genuinely state-chained fixture \
+         (#94 + PR #96, commit 351363d). Root proof verified against the L5 self-shape."
     );
 
     let total_wall_ms = bench_start.elapsed().as_millis() as u64;
@@ -2574,81 +2899,6 @@ fn run_l5_tree_fold(
         peak_rss_mb: peak_rss_mb(),
         ts: now_iso8601(),
     });
-}
-
-/// Build `n` contiguous single-block L5 `Batch` values seeded from the test
-/// block, with the state/delta-root and priority-prefix keccak chains stitched
-/// so the merge invariants hold. Used only by `run_l5_tree_fold` to exercise
-/// the fold wiring without a live prove.
-fn build_synthetic_l5_batches(block: &Block<F>, n: usize) -> Vec<Batch<F>> {
-    let mut out = Vec::with_capacity(n);
-    // Threaded state across blocks: each block's new_* feeds the next's old_*.
-    let mut state_root = block.old_state_root;
-    let mut delta_root = block.old_account_delta_tree_root;
-    let mut prio_prefix = block.old_prefix_priority_operation_hash;
-    let mut on_chain_running = [0u8; 32];
-    let base_block = block.block_number;
-    let base_ts = block.created_at;
-
-    for i in 0..n {
-        let new_state_root = HashOut::<F>::from([
-            F::from_canonical_u64(1_000 + i as u64),
-            F::from_canonical_u64(2_000 + i as u64),
-            F::from_canonical_u64(3_000 + i as u64),
-            F::from_canonical_u64(4_000 + i as u64),
-        ]);
-        let new_delta_root = HashOut::<F>::from([
-            F::from_canonical_u64(5_000 + i as u64),
-            F::from_canonical_u64(6_000 + i as u64),
-            F::from_canonical_u64(7_000 + i as u64),
-            F::from_canonical_u64(8_000 + i as u64),
-        ]);
-        // Advance the priority-prefix keccak chain by one op so the seam
-        // invariant (`left.new == right.old`) is exercised non-trivially.
-        let new_prio_prefix: [u8; 32] = {
-            let mut input = Vec::with_capacity(64);
-            input.extend_from_slice(&prio_prefix);
-            input.extend_from_slice(&[i as u8; 32]);
-            keccak(&input)
-        };
-        // Advance the on-chain-ops running hash by one op (non-empty leaf).
-        let new_on_chain_running: [u8; 32] = {
-            let mut input = Vec::with_capacity(64);
-            input.extend_from_slice(&on_chain_running);
-            input.extend_from_slice(&[(i as u8).wrapping_add(100); 32]);
-            keccak(&input)
-        };
-
-        out.push(Batch::<F> {
-            end_block_number: base_block + i as u64,
-            batch_size: 1,
-            first_created_at: base_ts + i as i64,
-            last_created_at: base_ts + i as i64,
-            old_state_root: state_root,
-            new_validium_root: HashOut::<F>::from([
-                F::from_canonical_u64(9_000 + i as u64),
-                F::from_canonical_u64(9_100 + i as u64),
-                F::from_canonical_u64(9_200 + i as u64),
-                F::from_canonical_u64(9_300 + i as u64),
-            ]),
-            new_state_root,
-            old_account_delta_tree_root: delta_root,
-            new_account_delta_tree_root: new_delta_root,
-            on_chain_operations_pub_data_hash: new_on_chain_running,
-            priority_operations_count: 1,
-            old_prefix_priority_operation_hash: prio_prefix,
-            new_prefix_priority_operation_hash: new_prio_prefix,
-            new_public_market_details: core::array::from_fn(|_| {
-                circuit::types::market_details::PublicMarketDetails::default()
-            }),
-        });
-
-        state_root = new_state_root;
-        delta_root = new_delta_root;
-        prio_prefix = new_prio_prefix;
-        on_chain_running = new_on_chain_running;
-    }
-    out
 }
 
 /// Concatenate a `Batch`'s and a `SegmentInfo`'s public inputs in L5 layout
