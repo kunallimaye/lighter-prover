@@ -21,6 +21,22 @@ The streaming bench (#48 feeder, #49 consumer) measures L1-L3 capacity of a colo
 
 Implications: a single sequential L2 fold caps one prover at ~8-12 tx/s; a single sequential L5 folder caps the *entire system* at ~1.06 blocks/s vs 4.4 needed at peak. Horizontal scaling alone cannot fix L5; associative folding can fix both.
 
+## Terminology
+
+**Guiding principle: a measurement only earns its compute if it changes a decision.** If a run would not move a decision, the conclusion is recorded from existing evidence rather than re-proved.
+
+| Term | Plain meaning | Status |
+|---|---|---|
+| **S** | transactions per smallest proof (chunk size) | answered (~8-10) |
+| **chunk** | the smallest unit of proving (one S-sized proof) — standardized term (formerly also 'leaf') | — |
+| **k** | how many machines one block's chunks split across | decided: always split wide, k ≈ chunk count |
+| **M** | how many chunks one machine proves at once (threads in a box) | decided: small M, large k (intra-machine scales poorly) |
+| **cell** | one worker machine | — |
+| **lag** | block arrival → proof ready | decided (SLO p50≤20s / p99≤40s) |
+| **throughput** | blocks/s across the fleet | pending (#95) |
+
+Narrative + benchmark ledger: Discussion #77.
+
 ## Decisions
 
 ### D1 — The unit of scaling is the prover cell
