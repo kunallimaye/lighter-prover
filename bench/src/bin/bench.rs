@@ -2286,7 +2286,8 @@ fn run_l6_inner_inner(args: &Args) {
             // SUCCESS PATH (reached once the empty-delta L5 chain generator lands).
             // prove_empty_l5_chain returns the base empty segment(s); pad
             // chain_proofs[S..8) with chain_proofs[0] and set segment_count=S
-            // (padding convention, see L5_SEGMENT_CHECK note ~bench.rs:2589).
+            // (padding convention, see the L5_SEGMENT_CHECK note that documents
+            // padding chain_proofs[S..8) with chain_proofs[0] + segment_count=S).
             assert!(
                 !chain_proofs.is_empty() && chain_proofs.len() <= NUM_CHAINS_PER_BATCH,
                 "L6_INNER: prove_empty_l5_chain must return 1..=NUM_CHAINS_PER_BATCH segments"
