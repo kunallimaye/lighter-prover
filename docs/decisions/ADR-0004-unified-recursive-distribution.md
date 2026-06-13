@@ -359,11 +359,17 @@ built (#75), **the next structural lever is reducing L4.** This ADR does
 **not** design the L4 fix; it names it as the **derived next question** —
 the only term left that moving `c` (faster machine class) or `l` (block
 size) cannot help, and that the distribution primitive cannot parallelize.
-L4 reduction has **no issue yet**; filing one is the recommended follow-up.
-Per the L4-streaming spike (below), that L4 work — *when* triggered — is
-**circuit surgery on `BlockCircuit`'s two verify subgraphs**, not streaming
-or distribution; so the follow-up should be filed as a **GATED / parked
-design issue (do-not-start-until-triggered)**, not an active workstream.
+L4 reduction is now tracked in **#113** (coordinator pool), which reframes
+the picture: the **sustained-load** L4 question is no longer open — it is
+answered by running a *pool* of coordinators (see the appended subsection
+below), since coordinator work is stateless and independent per block and
+therefore scales horizontally exactly like the chunk-prover cells. What
+remains gated is the **single-block / cold-start / burst-tail floor** only:
+per the L4-streaming spike (below), reducing *that* floor — *when* triggered
+— is **circuit surgery on `BlockCircuit`'s two verify subgraphs**, not
+streaming or distribution; so the circuit-surgery work stays a **GATED /
+parked design issue (do-not-start-until-triggered)**, not an active
+workstream.
 
 **L4 streaming is structurally blocked (spike, 2026-06-13).** A dedicated
 spike (workspace `pilot-l4-streaming-spike-69a42a1a`, tip `f935af4`) asked
@@ -402,6 +408,10 @@ the streaming question and parked the structural-lever question:
   either finds an opening, §6.1 gets a follow-up amendment. **This ADR
   ships with the streaming verdict settled; the structural-lever question
   remains open.**
+
+**Sustained-load L4 scales by the coordinator pool, not by reducing L4 (measured, 2026-06-13).**
+The per-block L4 prove (~2.9s, c4a-highcpu-64) is irreducible (streaming + structural spikes), so it bounds a single coordinator doing one block at a time — but NOT sustained throughput. Coordinator work (fold + L4) is stateless and independent per block (L4 scheduling spike, #112), so coordinators are a horizontally-scalable POOL — the same scaling property as the chunk-prover cells — with blocks distributed by the existing block-dispatch layer (§D2; #75), coordinators being a second consumer class on it. **L4 runs on coordinators, independent of the L1/L3 chunk-prover cells: there is no cross-layer CPU contention** (the earlier 'L4 contends with L1 proving' framing was wrong — different machines). Pool size is ~1% of the cell fleet (negligible infra) and is sized by #95.
+A utilization measurement (dedicated c4a-highcpu-64, tip 1211ffc; calibration/coordinator-utilization-c4a-highcpu-64.json) found the coordinator workload leaves substantial CPU headroom — the fold leaves the box ~⅔ idle (no core pinned) and L4 is mostly single-threaded serial work with only a ~1s all-core burst — so running several blocks per coordinator at once is a PROMISING efficiency multiplier that would shrink the pool, but it is NOT YET PROVEN (it depends on L4 bursts interleaving rather than colliding; concurrency scaled poorly at L2/L5). The pool (proven) is the primary lever; per-coordinator concurrency (to validate) is a bonus that tunes the count. Tracked in #113.
 
 ### 6.2 The coordinator is a compute node, not a dispatcher — size it in `c`
 
@@ -444,7 +454,7 @@ independent project. Recast:
           └─► §6.2 coordinator-as-class       ─┘        │
                                                         └─► #75 (build coordinator + cross-cell)
    #83 (L6 gate) ── parallel track; gates batch-finalization (§5), NOT block-proof lag
-   [NEW] L4 reduction (§6.1) ── derived next lever; no issue yet; file one.
+   #113 (coordinator pool, §6.1) ── sustained-load L4 lever (pool primary, per-coordinator concurrency to validate); single-block/cold-start floor stays gated behind the circuit-surgery trigger.
 ```
 
 ---
