@@ -2,7 +2,7 @@
 
 **Status**: Proposed
 **Date**: 2026-06-13
-**Verified-at-tip**: `f935af4e681377a4f6f30212ab4c574fc49b1c9e` (fresh clone; every file:line and constant below re-verified at this SHA)
+**Verified-at-tip**: `6b71f0d873179959e091e1bb88b75bb7b002dc8f` (fresh clone; every file:line and constant below re-verified at this SHA)
 **Issues**: design capstone for the parallel-proof-generation story (#75); recasts #61 #101 #83 #95 as parameters; generalizes the k=1 bound flagged by #107; supersedes the record amended by #99
 **Companion sessions (referenced, NOT duplicated)**: the #107 remediation (Tier-1 SLO-model relabel, items #19–22) and the #99 ADR-0003 amendment run in parallel; this ADR cites their outputs rather than restating them.
 
@@ -70,21 +70,23 @@ the repo still hard-codes the **k=1, one-block-one-cell** instance as if
 it were the whole architecture — 26 items across ADR wording, code, the
 SLO model, and operator docs. Its triage splits them into three tiers:
 
-- **Tier 1 (live defect, #107 items #19–22):** the `full_split_wall` term
-  in `scripts/s-calibrate-report.py:24-33` uses the *word* "always-split"
+- **Tier 1 (live defect, #107 items #19–22):** the `single_machine_wall`
+  term (renamed from `full_split_wall` by #108) in
+  `scripts/s-calibrate-report.py:28-29` uses the *word* "always-split"
   but computes the whole split block's wall **from one machine's constants
   with no network / cross-cell term** — the opposite meaning. Those
   verdicts are baked into versioned `calibration/*.json` and asserted by
   CI, and **#95 will consume them.** **This ADR resolves the conceptual
   gap that Tier 1 flags:** §4 writes the cross-cell `lag(c, l)` that
-  `full_split_wall` is *not*, and names the existing single-machine
-  formula as the **k=1 lower bound** of it. The Tier-1 *rename itself is
-  unbuilt* — there is **no remediation PR for #107** as of this tip; the
-  corrected/renamed bound does not yet exist in code. Coordinate the
-  rename in the Tier-1 PR; this ADR is its conceptual anchor, not its
-  implementation.
+  `single_machine_wall` is *not*, and names the existing single-machine
+  formula as the **k=1 lower bound** of it. The Tier-1 *rename landed in
+  **#108 (merged)*** — `single_machine_wall` now exists in the
+  `calibration/*.json` data and in `scripts/s-calibrate-report.py`. This
+  ADR is the home of the cross-cell wall that `single_machine_wall`
+  lower-bounds (it is that wall's k=1 lower bound).
 - **Tier 2 (amend the record):** ADR-0003 §D1/§D2/§D6 wording — folded
-  into **#99's** authorized in-place amendment (NOT re-litigated here).
+  into **#99's** authorized in-place amendment, which **landed in #109 +
+  #111 (both merged)** (NOT re-litigated here).
 - **Tier 3 (not defects, #75 scope):** the in-process engine + the
   known-unbuilt coordinator plumbing. The merged circuit work (PR #69 L2
   tree-fold; #82 pre-L5 merge tree, build-validated as `BatchMergeCircuit`;
@@ -213,22 +215,23 @@ L4                  = 2.928 s
 For a 9,000-tx block at S=9, k = ceil(9000/9) = 1,000 chunks → merge depth
 `ceil(log2(1000)) = 10` → merge term ≈ 2.751 s, giving a central path of
 **3.051 + 2.751 + 2.928 ≈ 8.73 s.** This reproduces, to the millisecond,
-the committed `full_split_wall_9000 = 8.730` and `slo_slack_min = 11.270`
+the committed `single_machine_wall_9000 = 8.730` and `slo_slack_min = 11.270`
 in `calibration/c4a-highcpu-64.json` (S=9 row).
 
 > **This is exactly the #107 Tier-1 quantity, correctly named.** The
-> committed `full_split_wall(S, B)` (`scripts/s-calibrate-report.py:24-33`)
-> is `L1_chunk_wall + ceil(log2(B/S))·MERGE_S + L4_WALL` — **one machine's
-> constants, no network / cross-cell term.** It is a **legitimate number:
+> committed `single_machine_wall(S, B)` (the formula lives in
+> `scripts/s-calibrate-report.py`, docstring lines 28–29 at this tip after
+> the #108 rename) is `L1_chunk_wall + ceil(log2(B/S))·MERGE_S + L4_WALL`
+> — **one machine's constants, no network / cross-cell term.** It is a
+> **legitimate number:
 > the k=1 LOWER BOUND** of `lag(c, l)` — the wall a *single* machine would
 > hit if it could hold all k chunks (the perfect-parallel, zero-transport,
 > zero-straggler floor). `lag(c, l)` is that floor **plus** `witness_move`
 > (UNMODELED), **plus** real cross-cell transport (≈0.02% of prove, #97 —
 > negligible but real), **plus** the straggler/recovery tail (§3.4). The
-> #107 Tier-1 PR should rename `full_split_wall` to a "single-machine
-> lower bound on the cross-cell wall"; **this ADR is the home of the
-> cross-cell wall itself.** Coordinate the name with that PR; do not
-> duplicate its diff here.
+> #107 Tier-1 PR (#108, merged) renamed `full_split_wall` to
+> `single_machine_wall`, the single-machine lower bound; **this ADR is the
+> home of the cross-cell wall itself.**
 
 ### 3.4 The tail (p99) — model lag as a distribution
 
@@ -285,7 +288,7 @@ For the deployment candidate `c4a-highcpu-64` at S=9 (measured, §3.3):
 | 4,000 tx | 445 | 8.455 s | +11.55 s |
 | 9,000 tx | 1,000 | 8.730 s | +11.27 s |
 
-(All three rows are the committed `full_split_wall_*` values in the S=9 row
+(All three rows are the committed `single_machine_wall_*` values in the S=9 row
 of `calibration/c4a-highcpu-64.json` — the k=1 lower bound; the real
 cross-cell `lag` is these **plus** UNMODELED `witness_move` and the §3.4
 tail.) The **block-size-independence** of the floor (~8–9 s across a 18×
@@ -357,6 +360,48 @@ built (#75), **the next structural lever is reducing L4.** This ADR does
 the only term left that moving `c` (faster machine class) or `l` (block
 size) cannot help, and that the distribution primitive cannot parallelize.
 L4 reduction has **no issue yet**; filing one is the recommended follow-up.
+Per the L4-streaming spike (below), that L4 work — *when* triggered — is
+**circuit surgery on `BlockCircuit`'s two verify subgraphs**, not streaming
+or distribution; so the follow-up should be filed as a **GATED / parked
+design issue (do-not-start-until-triggered)**, not an active workstream.
+
+**L4 streaming is structurally blocked (spike, 2026-06-13).** A dedicated
+spike (workspace `pilot-l4-streaming-spike-69a42a1a`, tip `f935af4`) asked
+whether L4 can be streamed, distributed, or otherwise hidden. It settled
+the streaming question and parked the structural-lever question:
+
+- **Streaming L4 is impossible.** Beginning L4 before its input fold
+  completes cannot be done: `BlockCircuit` must verify the **COMPLETE
+  folded chain proof** — a hard data dependency (same class as the L5
+  keccak-chain block), **not** an engineering gap. So L4 reduction, if ever
+  triggered, means **circuit surgery** — decomposing `BlockCircuit`'s two
+  verify subgraphs — not streaming and not distribution.
+- **The surviving levers don't touch the tail.** Cross-block pipelining
+  (hide L4 behind the next block's chunk-proving) and fast-shape
+  coordinators remove L4 from **steady-state** lag but **not** from
+  **single-block / cold-start / burst-tail** lag. Those three cases leave
+  an **irreducible floor**: `tail_lag ≥ wall(L3) + wall(L4)` on the
+  coordinator's shape.
+- **This floor binds the p99 tail specifically.** The cold-start /
+  burst-tail cases **are** the p99 cases — already the weakest half of the
+  governing equation (§0), so the L4 floor lands exactly where there is
+  least slack.
+- **PRE-COMMITTED TRIGGER (recorded so it is unambiguous).** If `lag_p99`
+  must be tighter than `wall(L3) + wall(L4)` on the best attainable
+  coordinator shape, then either **(i)** run a dedicated L4-circuit spike
+  to split `BlockCircuit`'s two verify subgraphs, or **(ii)** renegotiate
+  the lag bound. The per-shape L4 floor for the trigger **is the §3.2
+  L4-per-shape table** (2.789 s on c4a-highcpu-72 … 16.087 s on
+  c4a-highcpu-4); coordinator-shape choice is therefore a
+  **floor-setting decision, not merely a preference.**
+- **Recommended approach: (b) pipelining + fast-shape coordinator**, with
+  the pre-committed trigger above held in reserve for circuit surgery if
+  the SLO proves tighter than the floor allows on attainable hardware.
+- **Note (open).** Two further structural spikes are in flight — *is L4
+  necessarily per-block?* and *can any L4 work move to chunk level?* If
+  either finds an opening, §6.1 gets a follow-up amendment. **This ADR
+  ships with the streaming verdict settled; the structural-lever question
+  remains open.**
 
 ### 6.2 The coordinator is a compute node, not a dispatcher — size it in `c`
 
@@ -385,15 +430,15 @@ independent project. Recast:
 | **#101** | p99 straggler tail (§3.4) | partially measurable now (needs wider per-chunk variance than n=3). |
 | **#83** | L5/L6 batch-finalization tail (§5) | **UNMODELED** L6 gate; bounds end-to-end batch demonstration. |
 | **#95** | consumes the solved equation (§4.1) | ready once `c`-by-class (§6.2) and `witness_move` (#61) land. |
-| **#107 Tier 1** | the **k=1 lower bound** this ADR generalizes (§3.3) | rename unbuilt; this ADR is its conceptual anchor. |
-| **#99 / Tier 2** | the ADR-0003 record this ADR supersedes (§1) | amendment authorized, in-place (not a new ADR). |
+| **#107 Tier 1** | the **k=1 lower bound** this ADR generalizes (§3.3) | renamed (#108, merged); this ADR is the cross-cell wall it lower-bounds. |
+| **#99 / Tier 2** | the ADR-0003 record this ADR supersedes (§1) | amendment landed in-place (#109 + #111, both merged; not a new ADR). |
 | **#75** | the coordinator + cross-cell plumbing that *executes* `lag(c,l)` | design-gated; consumes §2 primitive + §6.2 sizing. |
 
 **Resulting dependency order** (what unblocks what):
 
 ```
 #99 (amend record; permit chunk-grain crossing)              ── record gate
-   └─► #107 Tier 1 (rename full_split_wall = k=1 lower bound) ── name gate
+   └─► #107 Tier 1 (renamed full_split_wall→single_machine_wall = k=1 lower bound; #108 merged) ── name gate
           └─► #61 (witness_move term)        ─┐
           └─► #101 (p99 straggler tail)       ├─► #95 (solve lag=bound → c)
           └─► §6.2 coordinator-as-class       ─┘        │
@@ -433,7 +478,8 @@ measurement of the running system — the central path is measured, the
 tail and the witness term are not.
 
 **Supersession.** This ADR supersedes the k=1 framing in ADR-0003 §D2/§D6
-(the one-block-one-cell assumption) and the record #99 amends; it does
+(the one-block-one-cell assumption) and the record #99 amended (landed via
+#109 + #111, both merged); it does
 **not** supersede ADR-0003's measured constants or D5 hybrid, which it
 builds on. ADR-0003 remains authoritative for the cell engine; this ADR is
 authoritative for the cross-cell distribution model and the governing
