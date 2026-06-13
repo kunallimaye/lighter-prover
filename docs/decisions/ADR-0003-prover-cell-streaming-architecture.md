@@ -84,3 +84,60 @@ Plus the D5 hybrid L5 layer (8 parallel segment folders, each a log-depth merge 
 2. Path A's 117.5 ms figure assumes 8 concurrent L5 proves scale linearly on one host (rayon contention; #78's measured acceptance criterion settles it). Path C's merge circuit (`BatchMergeCircuit`, #82 + PR #96) is build-validated into the L5 self-shape AND now live-proves a ≥4-leaf tree on the genuinely state-chained fixture introduced by #94 (in-workspace at ≈0.94 s/L5 step, ≈0.95 s/merge step; root verifies). The remaining perf item is the dedicated-hardware measurement session (EPYC 7B13 baseline, #90), now re-runnable on the new chained fixture; the previous "build-validated but prove-deferred" caveat is retired. The L6 end-to-end gate (#83) bounds when any full verifying batch proof is demonstrable.
 3. L4 at 5.14 s is now ~⅓ of the cell wall; if it becomes the binding term after D3, intra-cell L4 pipelining (prove block H's L4 while H+1's L1 runs) is the next lever — not designed here.
 4. All measurements are single-machine (EPYC 7B13); cross-shape variance (the comparison fleet's domain) may shift constants but not structure.
+
+## Amendment (cross-cell chunk distribution, 2026-06-13)
+
+This amendment (a) delivers the authorized §D6/§D2 chunk-grain-distribution change from issue **#99** (author go-ahead granted on that issue, per the #84 reconciliation precedent), and (b) extends it per **issue #107 Tier 2** to correct the "one-block-one-cell" wording in §D1/§D2/§D6 that asserts the single-cell world as permanent. Cross-linked from **Discussion #97** (case + spike evidence) and **Discussion #77** (proof-lag bound / three-dial framework), as required by #99's acceptance criteria.
+
+**Numbering rationale**: this is an *in-place* amendment, NOT a new ADR-0004. ADR-0002 is still reserved for #10's deliverable and the duplicate-ADR-0001 collision (#68) is unresolved; adding a fourth number before the numbering is healed compounds the mess. The original §D1-§D8 / Consequences / Risks body stays in place; this block supersedes specific sentences by quoting them verbatim and marking them, so the change history stays legible.
+
+### What changed: the always-split model
+
+The normative architecture is now **always-split**: a *single* block's chunks fan out across *multiple* machines (cells); each chunk (leaf) proof travels over the network to a folding/coordinator node; that node folds the merge tree and runs L4 locally (co-located merges). The block→cell exclusive binding the body describes is the **k=1 special case** of this chunk-grain dispatch model, not the architecture itself.
+
+The k policy is **decided: always-split** (per the #99 author comment — with the Discussion #77 proof-lag bound now landed at p50 ≤ 20 s / p99 ≤ 40 s (L1→L4), even a 500-tx block requires k ≈ 13; the size-threshold hybrid dissolves).
+
+**Why leaf crossing is now permitted, but merges still are not** — this is the crux, and it does NOT overturn the original §D6 transport-tax argument. That argument was derived at **merge grain** and remains fully operative there (reaffirmed below): a 100-300 ms round-trip is ~100% tax on a ~0.5 s fold step, so merges stay co-located on the coordinator/folding node. At **leaf grain** the tax was *measured* (not argued) at **0.020%** — a 156 KiB (159,740 B) leaf proof transfers in 1.28 ms @ 1 Gbps against a ~6.4 s leaf prove (c4a-highcpu-64, per the Discussion #97 spike) — which is why leaf proofs are now allowed to cross the network.
+
+### §D1 clarification (one-block-one-cell wording)
+
+> **Superseded (clarified, not deleted):** "A **cell** = one host, one Rust process: an orchestrator thread plus M worker threads sharing resident proving keys ..."
+
+The measured rationale for persistent key-sharing still holds for the chunk-proving engine and is unchanged. The clarification: this sentence describes the per-cell **CHUNK-PROVING engine** — the **k=1 building block**. The **BLOCK-LEVEL prover** is the coordinator/folding node + N such cells. So "a cell = one host, one process" is the chunk-prover unit, not the whole-block prover.
+
+### §D2 corrections (one-block-one-cell wording + chunk-grain dispatch)
+
+> **Superseded:** "**No coordinator service exists**; pull-balancing is the scheduler." *(§D2 outer queue)*
+
+> **Superseded:** "the orchestrator chunks its block in memory (`ceil(tx_count/S)` chunks), feeds an in-process work queue drained by M workers, collects chunk proofs into the L2 fold. RAM-only; **nothing intra-cell crosses a network or GCS**." *(§D2 inner queue — specifically the clause "nothing intra-cell crosses a network or GCS")*
+
+**Replacement (split model):**
+
+- A single block's chunks **fan out across multiple cells**; chunk (leaf) proofs **cross the network** to a folding/coordinator node.
+- The dispatch carries **chunk work items + witness references**.
+- **MERGE steps stay co-located** on that coordinator/folding node — the original merge-grain transport-tax argument (see §D6, reaffirmed below) still holds, so **merges do NOT cross the network**.
+- Wire envelopes **MUST carry a circuit-shape/version fingerprint**: deserialization is shape-driven and not self-validating — a mismatched or tampered proof parses fine and only fails at verify, so the fingerprint is the only cheap line of defense ("deserialization is not validation").
+- The block→cell exclusive binding in §D2 becomes the **k=1 SPECIAL CASE** of a chunk-grain dispatch model, not the architecture itself. A coordinator/folding node now exists; it is a compute node (see deferred items), not merely a scheduler.
+
+### §D6 correction (witness partitioning) + reaffirmation of the merge-grain tax
+
+> **Superseded (qualified, not deleted):** "**Witnesses via mounted read-only corpus** (image layer or volume), resolved by `{height, witness_index}` lookup; ... Witnesses never travel through the trace or the message bus."
+
+A single block's witnesses must be **PARTITIONABLE across the cells** proving its chunks; today's whole-block mounted corpus is the **k=1 case**. Witness RESOLUTION is now per-chunk-partitionable, not whole-block-on-one-cell. Full design → issues **#75 / #61**. The two operative points are unchanged: the `witness_fetch_ms` BENCH_EVENT accounting field stays (witness acquisition remains separately accountable), and the data-hygiene rule that witnesses **never travel through the trace or the message bus** stays.
+
+> **Reaffirmed as STILL OPERATIVE (not superseded):** "GCS is showback-only ... Never in the per-proof critical path (a 100-300 ms GCS round-trip is a ~100% tax on a 0.5 s fold step)."
+
+This merge-grain transport-tax argument **remains valid** and is exactly **why merges remain co-located** even though leaf proofs now cross the network. It was derived at merge/fold grain (~0.5 s step) where a 100-300 ms round-trip is a ~100% tax. It does NOT apply at leaf grain, where the tax was measured at 0.020% (156 KiB / 1.28 ms @ 1 Gbps vs a ~6.4 s leaf prove, per the #97 spike) — which is why leaf crossing is permitted while merge crossing is not.
+
+### Deferred items (do not decide here)
+
+- **k policy** — **RESOLVED to always-split** (per the #99 author comment: at p50 ≤ 20 s even a 500-tx block needs k ≈ 13; the size-threshold hybrid dissolves). Stated here as decided.
+- **M-vs-k mix** (intra-cell threads vs cross-cell fan-out) — **deferred**, gated on **#90** (M-sweep) and **#87** (boundedness verdict).
+- **Coordinator protocol details** — **deferred** → **#75** design gate.
+- **Coordinator sizing/placement** — **deferred** (per the #99 author comment). With always-split and co-located merges, the coordinator proves log₂(N) merge levels + L4 per block (~8 s of *real proving*), so it is a **COMPUTE node, not a dispatcher**; its placement (dedicated shape? co-resident with a folder?) belongs to the **#75** design gate. Named here so it is not lost.
+
+### Revisit triggers / scope note
+
+Consistent with #99's "decided now / deferred later" structure: revisit the deferred items when their gating inputs land (#90/#87 for M-vs-k; #75 for coordinator protocol + sizing/placement). The k-policy is decided and only revisited if the Discussion #77 proof-lag SLO (p50 ≤ 20 s / p99 ≤ 40 s) is itself revised.
+
+**Capacity-model forward pointer (out of scope here):** the Consequences capacity arithmetic (~80 cells / ~18 s etc.) is computed on the single-cell wall; its cross-cell recomputation under always-split is a separate downstream item (#107 item #5) and is intentionally **not** changed by this amendment.
