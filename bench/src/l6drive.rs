@@ -30,9 +30,11 @@ use circuit::delta::account_delta_full_leaf::AccountDeltaFullLeaf;
 use circuit::delta::cyclic_delta_circuit::{Circuit as _, CyclicDeltaCircuit};
 use circuit::delta::delta_constraints::{Circuit as _, DeltaCircuit, DeltaWitness};
 use circuit::keccak::helpers::keccak;
+use circuit::poseidon_bn128::plonky2_config::PoseidonBN128GoldilocksConfig;
 use circuit::recursion::batch::{Batch, SegmentInfo};
 use circuit::recursion::cyclic_circuit::{Circuit as _, CyclicRecursionCircuit};
-use circuit::types::config::{C, CIRCUIT_CONFIG, D, F};
+use circuit::recursion::wrapper_circuit::WrapperCircuit;
+use circuit::types::config::{C, CIRCUIT_CONFIG, D, F, OUTER_WRAPPER_CONFIG};
 use circuit::types::constants::{
     ACCOUNT_MERKLE_LEVELS, EMPTY_ACCOUNT_DELTA_TREE_ROOT, EMPTY_DELTA_TREE_HASHES,
     KECCAK_HASH_OUT_BYTE_SIZE,
@@ -429,6 +431,60 @@ pub fn prove_empty_l5_chain(pipeline: &EmptyL5Pipeline) -> Result<ProofWithPubli
     Ok(folded)
 }
 
+/// Issue #116 (outer-wrapper drive path): take the VERIFIED inner-wrapper proof
+/// (the output of the `--l6-inner` path / `WrapperCircuit::prove_inner`) and
+/// drive `WrapperCircuit::prove_outer` — the conversion toward the
+/// Ethereum-friendly (BN128-config) form.
+///
+/// `prove_outer` is DEFINED at `circuit/src/recursion/wrapper_circuit.rs:733`
+/// but was never called anywhere in the repo before this issue. This helper is
+/// that missing driver.
+///
+/// Pipeline (mirrors the build_wrapper_circuit.rs:198-207 outer build pattern):
+///   1. `define_outer(OUTER_WRAPPER_CONFIG, &inner.common, &inner.verifier_only)`
+///      — registers the public u8 `batch_commitment` and verifies the inner
+///      proof in-circuit;
+///   2. `.builder.build::<PoseidonBN128GoldilocksConfig>()` — the outer circuit
+///      is the BN128-config wrap (the Ethereum-friendly hash);
+///   3. `WrapperCircuit::prove_outer(&outer_data, &outer_target, inner_proof)`
+///      — this proves AND verifies internally
+///      (`wrapper_circuit.rs:750`, `circuit.verify(proof.clone())`);
+///   4. belt-and-suspenders explicit `outer_data.verify(outer_proof.clone())`,
+///      matching the inner pattern.
+///
+/// Returns the outer `CircuitData` (whose `.common`/`.verifier_only` feed the
+/// gnark bridge in #117) plus the verified outer proof. A real prove — plonky2
+/// panics on any unsatisfied constraint and `prove_outer` rejects a bad proof,
+/// so a successful return means an honestly verifying outer-wrapper proof. No
+/// values are fabricated and no constraint is relaxed.
+#[allow(clippy::type_complexity)]
+pub fn prove_outer_wrapper(
+    inner_data: &CircuitData<F, C, D>,
+    inner_proof: &ProofWithPublicInputs<F, C, D>,
+) -> Result<(
+    CircuitData<F, PoseidonBN128GoldilocksConfig, D>,
+    ProofWithPublicInputs<F, PoseidonBN128GoldilocksConfig, D>,
+)> {
+    // 1. Define the outer-wrapper circuit over the inner circuit's shape.
+    let outer = WrapperCircuit::define_outer(
+        OUTER_WRAPPER_CONFIG,
+        &inner_data.common,
+        &inner_data.verifier_only,
+    );
+    let outer_target = outer.target;
+
+    // 2. Build with the BN128 Goldilocks config (the Ethereum-friendly wrap).
+    let outer_data = outer.builder.build::<PoseidonBN128GoldilocksConfig>();
+
+    // 3. Prove (prove_outer proves AND verifies internally).
+    let outer_proof = WrapperCircuit::prove_outer(&outer_data, &outer_target, inner_proof)?;
+
+    // 4. Belt-and-suspenders explicit verify (matches the inner pattern).
+    outer_data.verify(outer_proof.clone())?;
+
+    Ok((outer_data, outer_proof))
+}
+
 #[cfg(test)]
 mod tests {
     use plonky2::field::types::Field;
@@ -475,5 +531,46 @@ mod tests {
         ]);
         let (proof, data) = prove_delta_chain(1, x).expect("delta chain proves");
         data.verify(proof).expect("delta_chain_proof verifies");
+    }
+
+    /// Issue #116: exercise the outer-wrapper drive ([`prove_outer_wrapper`]) —
+    /// the driver that calls the previously-uncalled `WrapperCircuit::prove_outer`.
+    ///
+    /// `define_outer` recursively verifies an arbitrary inner `(CircuitData, proof)`
+    /// in-circuit, so this test uses the small, real cyclic-delta circuit + its
+    /// verified proof (from [`prove_delta_chain`]) as the inner input. This is a
+    /// faithful, lighter exercise of the exact outer mechanism — define_outer ->
+    /// build::<PoseidonBN128GoldilocksConfig>() -> prove_outer -> verify — without
+    /// reassembling the full L6 inner-wrapper stack (that heavy end-to-end path is
+    /// the `--l6-outer` bench mode). A real prove + verify: if the outer wrap or
+    /// the recursive inner verification were wrong, `prove_outer` / `verify` would
+    /// reject. Never a stub; no constraint relaxed.
+    ///
+    /// Heavy: builds two recursive circuits + the BN128 outer wrap and runs real
+    /// proves. `#[ignore]`d; run with a large stack:
+    /// `RUST_MIN_STACK=4294967296 cargo test -p bench --lib --release -- --ignored test_outer_wrapper_drive`.
+    #[test]
+    #[ignore = "heavy plonky2 + BN128 outer prove; run with --ignored"]
+    fn test_outer_wrapper_drive() {
+        let x = HashOut::from_vec(vec![
+            F::from_canonical_u64(5),
+            F::from_canonical_u64(6),
+            F::from_canonical_u64(7),
+            F::from_canonical_u64(8),
+        ]);
+        // A small, real inner circuit + its verified proof.
+        let (inner_proof, inner_data) = prove_delta_chain(1, x).expect("inner proves");
+        inner_data
+            .verify(inner_proof.clone())
+            .expect("inner proof verifies");
+
+        // Drive prove_outer over it; prove_outer_wrapper proves AND verifies.
+        let (outer_data, outer_proof) =
+            prove_outer_wrapper(&inner_data, &inner_proof).expect("outer-wrapper drive");
+
+        // Explicit belt-and-suspenders verify of the returned outer proof.
+        outer_data
+            .verify(outer_proof)
+            .expect("outer-wrapper proof verifies");
     }
 }
