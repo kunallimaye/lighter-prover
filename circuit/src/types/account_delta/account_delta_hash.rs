@@ -53,7 +53,12 @@ impl AccountDeltaTarget {
     }
 
     // Hash of fields that wouldn't change for the fee account
-    fn partial_hash(&self, builder: &mut Builder) -> HashOutTarget {
+    //
+    // Made `pub` (issue #129) so off-circuit witness builders can derive the
+    // `partial_hash` the fee-account-delta hash path (`fee_account_hash`)
+    // consumes from the witness — e.g. for an empty genesis fee account delta.
+    // This exposes an existing in-circuit computation; it relaxes no constraint.
+    pub fn partial_hash(&self, builder: &mut Builder) -> HashOutTarget {
         let mut elements = vec![];
         let mut is_empty_flags = vec![];
 

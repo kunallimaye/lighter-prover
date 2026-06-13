@@ -60,7 +60,13 @@ impl AccountTarget {
     }
 
     // Hash of fields that wouldn't change for the fee account
-    fn partial_hash(
+    //
+    // Made `pub` (issue #129) so off-circuit witness builders can derive the
+    // `partial_hash`/`partial_hash_for_pub_data` that the fee-account hash path
+    // (`fee_account_hash`) consumes from the witness — e.g. for an empty
+    // genesis fee account. This exposes an existing in-circuit computation; it
+    // does not change or relax any constraint.
+    pub fn partial_hash(
         &self,
         builder: &mut Builder,
         position_bucket_hashes: &[[HashOutTarget; POSITION_HASH_BUCKET_COUNT]; 2],
