@@ -140,16 +140,16 @@ UNMODELED — see §6.
 | **Pool** (primary) | **PROVEN** — independent per-block work scales horizontally | ~30 coordinators serial at ≥5 blocks/s and zero concurrency (≈0.17 blocks/s/coordinator at ~5.7 s/block; #113) |
 | **Per-coordinator concurrency** (secondary) | **PROMISING, NOT PROVEN** | fewer coordinators if concurrency reaches ~3–5× |
 
-The concurrency lever rests on a **utilization measurement** (dedicated
-`c4a-highcpu-64`, tip `1211ffc`,
-`calibration/coordinator-utilization-c4a-highcpu-64.json`; ADR-0004 §6.1):
-the fold leaves the box **~⅔ idle** (no core pinned) and L4 is **mostly
-single-threaded** with only a **~1 s all-core burst**. Running several
-blocks per coordinator at once could slot each block's all-core L4 burst
-into another block's single-core phases — but it is **NOT PROVEN**: it
-depends on L4 bursts **interleaving** rather than **colliding**, and prior
-concurrency scaling was poor at the L2/L5 layers. **Validate at build, do
-not assume** (§7b).
+The concurrency lever is a **build-time hypothesis, not a current
+measurement** — no per-coordinator utilization profile has been captured
+yet. The intuition: if a single block's fold leaves cores idle outside its
+all-core L4 burst, running several blocks per coordinator at once could
+slot each block's burst into another block's quieter phases. But it is
+**NOT PROVEN**: it depends on L4 bursts **interleaving** rather than
+**colliding**, and prior concurrency scaling was poor at the L2/L5 layers.
+The utilization profile that would confirm or refute this is itself the
+build-time measurement called for in §7b. **Validate at build, do not
+assume.**
 
 **Sizing is a function, not a number.** Pool size is handed to **#95** as
 **`f(block rate, per-coordinator concurrency)`** — never a fixed count, and
@@ -315,11 +315,11 @@ ADR** (and #75's re-scoped design). Nothing is provisioned until then.
 
 **b. Per-coordinator-concurrency validation (#113 secondary lever).**
 PROMISING-NOT-PROVEN; **gated to the coordinator build** (not now).
-**Unblocked by:** the several-blocks-at-once measurement on one
-`c4a-highcpu-64` (does throughput climb, where is the burst-collision knee),
-compared against the stored single-unit baseline
-(`calibration/coordinator-utilization-c4a-highcpu-64.json`). The result
-tunes the pool-size-vs-concurrency mix and feeds #95.
+**Unblocked by:** two build-time measurements on one `c4a-highcpu-64` —
+(1) a single-unit utilization profile (the per-coordinator baseline, not
+yet captured), and (2) a several-blocks-at-once run (does throughput climb,
+where is the burst-collision knee). The result tunes the
+pool-size-vs-concurrency mix and feeds #95.
 
 **c. Witness SOURCE (local corpus vs Lighter service).** The seam (§3) holds
 either way. **Unblocked / reshaped by:** the **#83** spike mapping the
