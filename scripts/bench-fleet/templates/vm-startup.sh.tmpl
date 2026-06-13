@@ -39,6 +39,8 @@ SVALUES="__SVALUES__"          # e.g. "1 2 4 6"
 HOST_LABEL="__HOST_LABEL__"    # e.g. c4a-highcpu-32
 TX_LIMIT="__TX_LIMIT__"        # e.g. 480 (LIGHTER_TX_LIMIT in the container)
 CAL_MODE="__CAL_MODE__"        # issue #85: "1" = per-S tx_limit=4*S; "0" = fixed TX_LIMIT
+CAL_L4="__CAL_L4__"            # issue #102 Phase C: "1" = run one --l2-fold tree --l4-check
+                               # probe so MERGE_S/L4_WALL are MEASURED for this shape
 
 # entrypoint.sh expects BENCH_BUCKET WITHOUT the gs:// scheme (it
 # constructs dest="gs://${BENCH_BUCKET}/${BENCH_PREFIX}/").
@@ -82,7 +84,7 @@ upload_and_signal_done() {
   echo "${STATUS}" > "${FLEET_DIR}/status.txt"
 
   local f
-  for f in machine-info.txt svalues-summary.txt status.txt; do
+  for f in machine-info.txt svalues-summary.txt status.txt skipped.tsv; do
     [[ -f "${FLEET_DIR}/${f}" ]] || continue
     fleet_cp "/fleet/${f}" "${BUCKET}/${RUN_PREFIX}${f}"
     rc=$?
@@ -169,6 +171,51 @@ IMAGE_DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}" 2>
 } > "${FLEET_DIR}/machine-info.txt"
 echo "FLEET_MACHINE_INFO_DONE $(date -Is) digest=${IMAGE_DIGEST}"
 
+# ---------- 3b. RAM gate (issue #102 Phase C) ----------
+# The fleet originally assumed >=128 GiB calibrate shapes; the c4a-highcpu
+# ladder goes down to 8 GiB (2 GiB/vCPU). Mirror scripts/s-calibrate.sh's
+# gate, but with MEASURED bracket membership from the Phase A/B registry
+# (4 shapes agree: S<=10 -> 2^17 ~5 GB, 11..20 -> 2^18 ~10 GB,
+# 21..40 -> 2^19 ~17 GB, >40 -> 2^20 ~32 GB projected) instead of the
+# local script's conservative pre-Phase-A edge-probe assumption. Skipped
+# candidates are recorded in skipped.tsv (uploaded with the fleet-level
+# files) so s-calibrate-report.py labels them feasible=no honestly.
+# Gate: projected_rss * 1.5 headroom <= MemTotal (float GB).
+projected_rss_gb() {
+  local s="$1"
+  if   (( s <= 10 )); then echo 5     # 2^17 (measured, incl. S=9/10 edge)
+  elif (( s <= 20 )); then echo 10    # 2^18 (measured)
+  elif (( s <= 40 )); then echo 17    # 2^19 (measured through S=40)
+  else                     echo 32    # 2^20 (unmeasured projection)
+  fi
+}
+MEM_GB="$(awk '/^MemTotal:/ {printf "%.2f", $2 / 1048576}' /proc/meminfo)"
+echo "FLEET_RAM_GATE MemTotal=${MEM_GB}GB headroom=x1.5 (CAL_MODE=${CAL_MODE})"
+if [[ "${CAL_MODE}" == "1" ]]; then
+  : > "${FLEET_DIR}/skipped.tsv"
+  SURVIVORS=""
+  for S in ${SVALUES}; do
+    PROJ="$(projected_rss_gb "${S}")"
+    if awk -v m="${MEM_GB}" -v p="${PROJ}" 'BEGIN { exit !(m >= p * 1.5) }'; then
+      SURVIVORS="${SURVIVORS} ${S}"
+    else
+      echo "FLEET_RAM_GATE_SKIP S=${S} projected=${PROJ}GB x1.5 > MemTotal=${MEM_GB}GB"
+      printf '%s\tprojected ~%s GB RSS x1.5 headroom exceeds %s GB MemTotal\n' \
+        "${S}" "${PROJ}" "${MEM_GB}" >> "${FLEET_DIR}/skipped.tsv"
+    fi
+  done
+  SURVIVORS="${SURVIVORS# }"
+  if [[ -z "${SURVIVORS}" ]]; then
+    # Headroom is a heuristic; a VM that gates out everything would be
+    # pure waste. Fall back to the smallest candidate (smallest bracket,
+    # measured ~5 GB peak fits any >=8 GiB shape) and say so loudly.
+    SURVIVORS="$(echo "${SVALUES}" | tr ' ' '\n' | sort -n | head -1)"
+    echo "FLEET_RAM_GATE_FALLBACK all candidates gated; keeping smallest S=${SURVIVORS}"
+  fi
+  echo "FLEET_RAM_GATE_SURVIVORS ${SURVIVORS}"
+  SVALUES="${SURVIVORS}"
+fi
+
 # ---------- 4. Per-S worker containers ----------
 # Each container runs the #25 contract: bench once with
 # LIGHTER_TX_PER_PROOF=S, then the entrypoint itself uploads bench.log +
@@ -203,6 +250,34 @@ for S in ${SVALUES}; do
     FAIL_COUNT=$((FAIL_COUNT + 1))
   fi
 done
+
+# ---------- 4b. Opt-in MERGE_S / L4 measurement (issue #102 Phase C) ----------
+# CAL_L4=1 mirrors scripts/s-calibrate.sh §3b on the fleet: ONE
+# --l2-fold tree --l4-check probe (S=4, tx-limit 32: 8 leaves -> 7
+# pairwise merges + a full L4 prove+verify). The entrypoint uploads its
+# bench.jsonl to <run-prefix>L4CHECK/; collect maps it to
+# cal-l4check.jsonl so s-calibrate-report.py labels this shape's
+# objective-4 constants MEASURED. Best-effort by design (the local
+# suite warns + falls back to extrapolated labels on failure), so the
+# probe's rc is recorded in svalues-summary.txt but does NOT flip the
+# fleet status -- the measured/extrapolated label carries the honesty.
+if [[ "${CAL_L4}" == "1" && "${CAL_MODE}" == "1" ]]; then
+  echo "FLEET_L4CHECK_START $(date -Is)"
+  L4_START=$(date +%s)
+  timeout 4h docker run --rm --name "bench-l4check" \
+    -e BENCH_BUCKET="${BUCKET_NAME}" \
+    -e BENCH_PREFIX="${RUN_PREFIX}L4CHECK" \
+    -e RUST_LOG=info \
+    "${IMAGE}" --tx-per-proof 4 --tx-limit 32 --l2-fold tree --l4-check 2>&1 | tail -20
+  L4_RC=${PIPESTATUS[0]}
+  docker rm -f "bench-l4check" >/dev/null 2>&1
+  L4_WALL=$(( $(date +%s) - L4_START ))
+  echo "FLEET_L4CHECK_DONE $(date -Is) rc=${L4_RC} wall=${L4_WALL}s"
+  echo "L4CHECK rc=${L4_RC} wall_seconds=${L4_WALL}" >> "${FLEET_DIR}/svalues-summary.txt"
+  if [[ ${L4_RC} -ne 0 ]]; then
+    echo "FLEET_L4CHECK_WARN probe failed -- constants stay extrapolated for ${HOST_LABEL}"
+  fi
+fi
 
 # ---------- 5. Fleet-level upload + sentinel ----------
 # Honest status (issue #23): only "ok" when every S exited 0 AND the
