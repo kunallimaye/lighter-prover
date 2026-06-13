@@ -29,6 +29,14 @@ serde_json = { version = "1.0" }
 static_assertions = { version = "1.1.0", default-features = false }
 hex = { version = "0.4.3" }
 sha2 = { version = "0.10.6" }
+# EIP-4844 reference KZG (BLS12-381 / blst-backed). Used only off-circuit by the
+# bench L6 driver to derive `WrapperInput.kzg_versioned_hash` from a blob
+# commitment. The in-circuit PCE evaluation point (x) and opening (y) are NOT
+# produced by c-kzg's EIP-4844 challenge; they are recomputed off-circuit to
+# match the circuit's custom Poseidon2 Fiat-Shamir (see bench/src/kzg.rs and
+# docs/decisions/ADR-0005). Requires a C toolchain at build time; if CI lacks
+# one, swap to the pure-Rust `kzg-rs` behind the same `bench::kzg` module.
+c-kzg = { version = "2.1", default-features = false, features = ["std"] }
 unroll = { version = "0.1.5", default-features = false }
 rayon = "1.5.1"
 plonky2 = { git = "https://github.com/elliottech/plonky2", rev = "e1c2d35450948b88fca6a7e69e2643c3ecad3caa", package = "plonky2"} # dev branch

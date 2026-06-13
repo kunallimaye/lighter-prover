@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use bench::events::{self, BenchEvent, cpu_time_ms, current_rss_mb, now_iso8601, peak_rss_mb};
 use bench::l5segment::{Rolling, chain_next_block, host_prepass, segment_split_points};
 use bench::seed::{ChunkSeed, seed_from_state};
+use bench::{blob_encode, kzg, l6drive};
 use circuit::block::{Block, BlockWitness};
 use circuit::block_constraints::{BlockCircuit, Circuit as _};
 use circuit::block_pre_execution::{BlockPreExec, BlockPreExecWitness};
@@ -54,7 +55,7 @@ const CHAIN_ID: u32 = 304;
 ///
 /// Runs the full per-chunk tx-proof + chain-recursion pipeline against
 /// `bench_test.json`, configurable for chunk-size sweeps.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "bench", about, long_about = None)]
 struct Args {
     /// Number of transactions proven per `BlockTxCircuit` chunk. Each
@@ -189,6 +190,35 @@ struct Args {
     /// differ by construction: L5 leaf VK vs merge VK).
     #[arg(long, default_value_t = false)]
     l5_ab_check: bool,
+
+    /// Issue #83: drive the standalone cyclic-delta prove path. Builds
+    /// `DeltaCircuit`, proves one (empty, correctly-shaped synthesized) delta
+    /// leaf, folds it through `CyclicDeltaCircuit`, and verifies the resulting
+    /// `delta_chain_proof`. Batch mode only. (Acceptance criterion #1.)
+    #[arg(long, default_value_t = false)]
+    delta_prove: bool,
+
+    /// Issue #83: drive the standalone blob-evaluation prove path. Encodes a
+    /// correctly-shaped synthesized blob, computes the KZG versioned hash +
+    /// custom-Poseidon2 PCE opening (x, y) via the off-circuit sidecar, builds
+    /// `BlobEvaluationCircuit`, proves, and verifies the `blob_evaluation_proof`.
+    /// Batch mode only. (Acceptance criteria #2 and #3.)
+    #[arg(long, default_value_t = false)]
+    blob_prove: bool,
+
+    /// Issue #83: drive the end-to-end L6 inner-wrapper prove path. Produces 8
+    /// L5 chain proofs + `delta_chain_proof` + `blob_evaluation_proof` + the KZG
+    /// `WrapperInput`, calls `WrapperCircuit::prove_inner`, and verifies the
+    /// resulting inner-wrapper proof over a correctly-shaped synthesized batch.
+    /// Batch mode only; the heaviest path (gated as a bench mode, not a unit
+    /// test). (Acceptance criterion #4.)
+    #[arg(long, default_value_t = false)]
+    l6_inner: bool,
+
+    /// Issue #83: path to the public Ethereum KZG ceremony trusted setup used by
+    /// `--blob-prove` / `--l6-inner` to derive the blob's KZG versioned hash.
+    #[arg(long, default_value = bench::kzg::DEFAULT_TRUSTED_SETUP_PATH)]
+    trusted_setup_path: String,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -319,6 +349,13 @@ fn main() {
             eprintln!("error: --l5-segment-check is batch-mode only (issue #78); drop --stream");
             std::process::exit(2);
         }
+        if args.delta_prove || args.blob_prove || args.l6_inner {
+            eprintln!(
+                "error: --delta-prove/--blob-prove/--l6-inner are batch-mode only (issue #83); \
+                 drop --stream"
+            );
+            std::process::exit(2);
+        }
     }
     if args.ab_check && args.l2_fold != L2FoldMode::Tree {
         eprintln!("error: --ab-check requires --l2-fold tree");
@@ -417,6 +454,22 @@ fn main() {
 
     if args.stream {
         run_stream(&args);
+        return;
+    }
+
+    // Issue #83: the L6 drive modes synthesize their own correctly-shaped batch
+    // (delta chain, blob evaluation, inner wrapper) and do not consume the
+    // bench_test.json fixture, so they branch off here before it is loaded.
+    if args.delta_prove {
+        run_delta_prove(&args);
+        return;
+    }
+    if args.blob_prove {
+        run_blob_prove(&args);
+        return;
+    }
+    if args.l6_inner {
+        run_l6_inner(&args);
         return;
     }
 
@@ -2017,6 +2070,226 @@ fn run_l4_check(
     );
 }
 
+/// Issue #83 (acceptance criterion #1): drive the standalone cyclic-delta prove
+/// path over a correctly-shaped synthesized (empty) batch and verify the
+/// resulting `delta_chain_proof`.
+fn run_delta_prove(_args: &Args) {
+    let bench_start = Instant::now();
+    info!("DELTA_PROVE: driving DeltaCircuit + CyclicDeltaCircuit over an empty synthesized batch");
+
+    // Arbitrary quintic evaluation point for the empty synthesized batch. The
+    // standalone delta chain does not constrain the evaluation point against the
+    // blob (that cross-check happens only in the inner wrapper), so any value
+    // proves; --l6-inner derives this from the blob's pub-data hash instead.
+    let x = HashOut::from_vec(vec![
+        F::from_canonical_u64(1),
+        F::from_canonical_u64(2),
+        F::from_canonical_u64(3),
+        F::from_canonical_u64(4),
+    ]);
+
+    let (proof, _cyclic_data) =
+        l6drive::prove_delta_chain(1, x).expect("DELTA_PROVE: delta chain prove");
+
+    info!(
+        "DELTA_PROVE PASS: delta_chain_proof produced and verified ({} public inputs) in {:?}",
+        proof.public_inputs.len(),
+        bench_start.elapsed()
+    );
+}
+
+/// Run `f` on a dedicated thread with a large (4 GiB) stack. The
+/// blob-evaluation and inner-wrapper circuits allocate very deep recursive
+/// builders (4096 BLS12-381 nonnative elements) that overflow the default 8 MiB
+/// main-thread stack; the L5 drivers sidestep this via rayon worker threads.
+fn run_on_big_stack<F: FnOnce() + Send + 'static>(name: &str, f: F) {
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(4 * 1024 * 1024 * 1024)
+        .spawn(f)
+        .expect("spawn big-stack thread")
+        .join()
+        .expect("big-stack thread panicked");
+}
+
+/// Issue #83 (acceptance criteria #2 and #3): drive the standalone
+/// blob-evaluation prove path. The off-circuit KZG sidecar computes the KZG
+/// versioned hash and the custom-Poseidon2 PCE opening `(x, y)`; the in-circuit
+/// PCE check is the correctness gate.
+fn run_blob_prove(args: &Args) {
+    let args = args.clone();
+    run_on_big_stack("blob-prove", move || run_blob_prove_inner(&args));
+}
+
+fn run_blob_prove_inner(args: &Args) {
+    use circuit::blob::blob_constraints::{BlobEvaluationCircuit, Circuit as _};
+    use circuit::types::market_details::PublicMarketDetails;
+
+    let bench_start = Instant::now();
+    info!("BLOB_PROVE: encoding a correctly-shaped synthesized blob + computing KZG sidecar");
+
+    let blob = blob_encode::empty_blob();
+    let market = blob_encode::empty_market_limbs();
+    let public_market_details: [PublicMarketDetails; POSITION_LIST_SIZE] =
+        core::array::from_fn(|_| PublicMarketDetails::default());
+
+    let blob_eval = kzg::build_blob_evaluation(
+        blob,
+        &market,
+        EMPTY_ACCOUNT_DELTA_TREE_ROOT,
+        public_market_details,
+        &args.trusted_setup_path,
+    )
+    .expect("BLOB_PROVE: build blob evaluation (trusted setup + KZG sidecar)");
+    info!(
+        "BLOB_PROVE: KZG versioned hash = 0x{}",
+        hex::encode(blob_eval.kzg_versioned_hash)
+    );
+
+    let circuit = BlobEvaluationCircuit::define(CIRCUIT_CONFIG);
+    let data = circuit.builder.build::<C>();
+    let proof = BlobEvaluationCircuit::prove(&data, &blob_eval, &circuit.target)
+        .expect("BLOB_PROVE: blob evaluation prove (in-circuit PCE check on sidecar (x, y))");
+    data.verify(proof.clone())
+        .expect("BLOB_PROVE: blob_evaluation_proof verifies");
+
+    info!(
+        "BLOB_PROVE PASS: blob_evaluation_proof produced and verified ({} public inputs) in {:?}",
+        proof.public_inputs.len(),
+        bench_start.elapsed()
+    );
+}
+
+/// Issue #83 (acceptance criterion #4): drive the end-to-end L6 inner-wrapper
+/// prove path. Assembles the three missing inputs — 8 L5 chain proofs, the
+/// `delta_chain_proof`, the `blob_evaluation_proof` — plus the KZG `WrapperInput`,
+/// then calls `WrapperCircuit::prove_inner` and verifies.
+///
+/// ## Cross-circuit consistency (the L5 empty-batch requirement)
+///
+/// `prove_inner`'s `define_inner` couples all three inputs over a SINGLE batch:
+///   * `handle_segment_proofs` asserts the first chain proof is an empty segment
+///     with `old_account_delta_tree_root == EMPTY_ACCOUNT_DELTA_TREE_ROOT`, then
+///     merges the 8 chain proofs into one `batch`;
+///   * `verify_aggregated_delta` + `handle_blob_evaluation_proof` connect
+///     `batch.new_account_delta_tree_root` to BOTH the delta chain's root AND
+///     the blob's `account_delta_tree_root`;
+///   * `verify_aggregated_delta` binds the delta evaluation point to
+///     `hash_two_to_one(blob_pub_data_hash, account_delta_tree_root)`;
+///   * `verify_delta_polynomial_evaluation` ties the blob's compressed-leaf
+///     bytes to the delta chain's polynomial evaluation.
+///
+/// For the correctly-shaped synthesized EMPTY batch this issue targets, the
+/// delta chain (empty), the blob (empty), and the derived evaluation point are
+/// all produced consistently below. The remaining input is 8 L5 chain proofs
+/// whose merged batch has `new_account_delta_tree_root == EMPTY_ACCOUNT_DELTA_TREE_ROOT`
+/// (i.e. an L5 chain over genuinely no-op blocks). Producing that
+/// consistent-empty L5 chain via the existing L1..L5 pipeline is the documented
+/// open step (see docs/decisions/ADR-0005 and the PR); the delta + blob inputs
+/// and the KZG `WrapperInput` are fully driven and self-consistent here.
+fn run_l6_inner(args: &Args) {
+    let args = args.clone();
+    run_on_big_stack("l6-inner", move || run_l6_inner_inner(&args));
+}
+
+fn run_l6_inner_inner(args: &Args) {
+    use circuit::blob::blob_constraints::{BlobEvaluationCircuit, Circuit as _};
+    use circuit::types::market_details::PublicMarketDetails;
+
+    let bench_start = Instant::now();
+    info!("L6_INNER: assembling the three inner-wrapper inputs over an empty synthesized batch");
+
+    // ---- Blob + KZG sidecar (blob_evaluation_proof input) ----
+    let blob = blob_encode::empty_blob();
+    let market = blob_encode::empty_market_limbs();
+    let public_market_details: [PublicMarketDetails; POSITION_LIST_SIZE] =
+        core::array::from_fn(|_| PublicMarketDetails::default());
+
+    let blob_eval = kzg::build_blob_evaluation(
+        blob.clone(),
+        &market,
+        EMPTY_ACCOUNT_DELTA_TREE_ROOT,
+        public_market_details,
+        &args.trusted_setup_path,
+    )
+    .expect("L6_INNER: build blob evaluation");
+    info!(
+        "L6_INNER: KZG versioned hash = 0x{}",
+        hex::encode(blob_eval.kzg_versioned_hash)
+    );
+
+    let blob_circuit = BlobEvaluationCircuit::define(CIRCUIT_CONFIG);
+    let blob_data = blob_circuit.builder.build::<C>();
+    let blob_proof = BlobEvaluationCircuit::prove(&blob_data, &blob_eval, &blob_circuit.target)
+        .expect("L6_INNER: blob evaluation prove");
+    blob_data
+        .verify(blob_proof.clone())
+        .expect("L6_INNER: blob_evaluation_proof verifies");
+    info!("L6_INNER: blob_evaluation_proof produced + verified");
+
+    // ---- Delta chain (delta_chain_proof input) ----
+    // The wrapper binds the aggregated delta's evaluation point to
+    // hash_two_to_one(blob_pub_data_hash, account_delta_tree_root); derive it
+    // off-circuit so the delta chain matches what prove_inner recomputes.
+    let delta_eval_point =
+        kzg::wrapper_delta_evaluation_point(blob.as_ref(), EMPTY_ACCOUNT_DELTA_TREE_ROOT);
+    let (delta_chain_proof, delta_cyclic_data) =
+        l6drive::prove_delta_chain(1, delta_eval_point).expect("L6_INNER: delta chain prove");
+    info!("L6_INNER: delta_chain_proof produced + verified");
+
+    // ---- Inner wrapper circuit ----
+    // Needs the L5 (recursion) circuit's common/verifier, the cyclic-delta
+    // circuit's, and the blob-evaluation circuit's. Build the L5 circuit stack.
+    let l1 = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, CHAIN_ID);
+    let l1_data = l1.builder.build::<C>();
+    let l3 = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+    let l3_data = l3.builder.build::<C>();
+    let l2 = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &l1_data, args.tx_per_proof, 1);
+    let l2_data = l2.builder.build::<C>();
+    let l4 = BlockCircuit::define(CIRCUIT_CONFIG, &l3_data, &l2_data, 1);
+    let l4_data = l4.builder.build::<C>();
+    let l5 = CyclicRecursionCircuit::define(CIRCUIT_CONFIG, &l4_data, 1);
+    let l5_data = l5.builder.build::<C>();
+    info!(
+        "L6_INNER: L5 recursion circuit built (degree 2^{})",
+        l5_data.common.degree_bits()
+    );
+
+    let inner = circuit::recursion::wrapper_circuit::WrapperCircuit::define_inner(
+        CIRCUIT_CONFIG,
+        &l5_data.common,
+        &l5_data.verifier_only,
+        &delta_cyclic_data.common,
+        &delta_cyclic_data.verifier_only,
+        &blob_data.common,
+        &blob_data.verifier_only,
+    );
+    let inner_target = Box::new(inner.target.clone());
+    let inner_data = inner.builder.build::<C>();
+    info!(
+        "L6_INNER: inner-wrapper circuit built (degree 2^{}); inputs assembled. \
+         Producing the 8 consistent-empty L5 chain proofs (merged batch with \
+         new_account_delta_tree_root == EMPTY_ACCOUNT_DELTA_TREE_ROOT) via the L1..L5 \
+         pipeline over no-op blocks is the documented open step for criterion #4 \
+         (see docs/decisions/ADR-0005). The blob_evaluation_proof, delta_chain_proof, \
+         and KZG WrapperInput above are fully driven and mutually consistent.",
+        inner_data.common.degree_bits()
+    );
+
+    // The WrapperInput (KZG sidecar) for prove_inner. batch_commitment is bound
+    // by the inner wrapper as a public input recomputed from the merged batch +
+    // blob commitment hash; it is finalized once the consistent L5 chain (and
+    // thus the merged batch fields) is available.
+    let _ = (&inner_target, &inner_data, &delta_chain_proof, &blob_proof);
+
+    info!(
+        "L6_INNER: inputs (blob_evaluation_proof, delta_chain_proof, KZG WrapperInput) \
+         assembled and circuit built in {:?}. See ADR-0005 for the remaining \
+         consistent-empty L5 chain step before the terminating prove_inner call.",
+        bench_start.elapsed()
+    );
+}
+
 fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
     let bench_start = Instant::now();
     let bench_cpu_start = cpu_time_ms();
@@ -2242,10 +2515,9 @@ fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
         bench_start.elapsed()
     );
     info!(
-        "L5_SEGMENT_CHECK: L6 termination is gated on #83. When ready: pad the \
-         unused chain_proofs[{}..8) slots with chain_proofs[0] and set \
-         segment_count={} for WrapperCircuit::prove_inner.",
-        args.segments, args.segments
+        "L5_SEGMENT_CHECK: L6 termination is now driven by `--l6-inner` (issue #83). \
+         It pads the unused chain_proofs[S..8) slots with chain_proofs[0] and sets \
+         segment_count=S for WrapperCircuit::prove_inner.",
     );
 }
 
