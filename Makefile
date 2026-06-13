@@ -258,8 +258,8 @@ s-calibrate: ## Per-machine chunk-size calibration (CAL_SVALUES=, BLOCK_TX=, MER
 calibration-check: ## Staleness guard: WARN when calibration/ predates circuit/src changes (never fails)
 	@bash scripts/calibration-check.sh
 
-s-calibrate-fleet: ## Cloud calibration on machines-calibrate.tsv shapes (interactive cost gate; SHAPES=, REF=)
-	@$(FLEET) calibrate $(if $(SHAPES),--machines "$(SHAPES)",) $(if $(REF),--ref $(REF),)
+s-calibrate-fleet: ## Cloud calibration on machines-calibrate.tsv shapes (interactive cost gate; SHAPES=, REF=, CAL_L4=1)
+	@$(FLEET) calibrate $(if $(SHAPES),--machines "$(SHAPES)",) $(if $(REF),--ref $(REF),) $(if $(filter 1,$(CAL_L4)),--cal-l4,)
 
 # ─── Operator notes ──────────────────────────────────────────────────
 # - ORCH_FORCE_RESTART=1 on any admin-cloud-* / cloud-* target invalidates

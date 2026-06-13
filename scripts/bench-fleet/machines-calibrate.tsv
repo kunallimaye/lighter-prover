@@ -1,5 +1,13 @@
 machine_type	vcpus	arch	image_family	image_project	quota_family	preferred_zones	disk_type	image_tag
-c4a-highcpu-64	64	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced	neoverse-v2
-c4a-highmem-64	64	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced	neoverse-v2
+# Phase C ladder (issue #102): c4a-highcpu 4..72 = fixed-microarch (Axion / neoverse-v2)
+# core-scaling ladder at 2 GiB/vCPU. Cross-region zone fallbacks per the #85 lesson
+# (c4a stocked out across all of us-central1; us-east4-a succeeded on retry).
+c4a-highcpu-4	4	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east4-a,us-east4-b,us-east4-c,us-east1-b,us-east1-c,us-east1-d,us-west1-a,us-west1-c	hyperdisk-balanced	neoverse-v2
+c4a-highcpu-8	8	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east4-a,us-east4-b,us-east4-c,us-east1-b,us-east1-c,us-east1-d,us-west1-a,us-west1-c	hyperdisk-balanced	neoverse-v2
+c4a-highcpu-16	16	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east4-a,us-east4-b,us-east4-c,us-east1-b,us-east1-c,us-east1-d,us-west1-a,us-west1-c	hyperdisk-balanced	neoverse-v2
+c4a-highcpu-32	32	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east4-a,us-east4-b,us-east4-c,us-east1-b,us-east1-c,us-east1-d,us-west1-a,us-west1-c	hyperdisk-balanced	neoverse-v2
+c4a-highcpu-64	64	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east4-a,us-east4-b,us-east4-c,us-east1-b,us-east1-c,us-east1-d,us-west1-a,us-west1-c	hyperdisk-balanced	neoverse-v2
+c4a-highcpu-72	72	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c,us-central1-f,us-east4-a,us-east4-b,us-east4-c,us-east1-b,us-east1-c,us-east1-d,us-west1-a,us-west1-c	hyperdisk-balanced	neoverse-v2
+c4a-highmem-64	64	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c,us-east4-a,us-east4-b,us-east4-c	hyperdisk-balanced	neoverse-v2
 # metal fallback: COS availability on bare metal is unvalidated (issue #85 Phase 2 pre-check). If cos-arm64-stable does not boot on c4a-highmem-96-metal, switch image_family/image_project below to a supported arm64 image (e.g. ubuntu-2404-lts-arm64 / ubuntu-os-cloud) and adapt the startup script's docker bootstrap.
 c4a-highmem-96-metal	96	arm64	cos-arm64-stable	cos-cloud	C4A_CPUS	us-central1-a,us-central1-b,us-central1-c	hyperdisk-balanced	neoverse-v2

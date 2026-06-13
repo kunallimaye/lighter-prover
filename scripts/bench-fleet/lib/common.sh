@@ -204,6 +204,12 @@ declare -A _PRICE_PER_HR=(
   # same 2026-06-10 pricing pull -- verify before relying on for budgeting.
   [c4a-highmem-64]=3.70
   [c4a-highmem-96-metal]=7.40
+  # c4a-highcpu ladder (issue #102 Phase C): flat ~$0.044/core-hr scaling
+  # of the c4a-highcpu-64 entry from the same 2026-06-10 pull.
+  [c4a-highcpu-4]=0.18
+  [c4a-highcpu-8]=0.35
+  [c4a-highcpu-16]=0.70
+  [c4a-highcpu-72]=3.15
 )
 
 # Per-shape realistic full-sweep wall-time estimates (hours), calibrated

@@ -34,8 +34,10 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_SVALUES="${FLEET_SVALUES:-1 2 4 6}"
 
 # Calibration mode (issue #85): bracket tops + edge probes from #60.
-# RAM-gating does not bind on the calibrate shapes (>=128 GiB), so the
-# 2^20 probe (S=40) is included by default. Override with --svalues.
+# The full candidate set incl. the 2^20 probe (S=40) is sent to every
+# shape; the VM-side RAM gate (vm-startup.sh.tmpl §3b, issue #102
+# Phase C) drops candidates the shape's MemTotal cannot hold and
+# records them in skipped.tsv. Override with --svalues.
 DEFAULT_CAL_SVALUES="8 9 10 11 20 21 32 40"
 
 # CAL_MODE=1 switches the per-S worker container to tx_limit=4*S (the
@@ -62,6 +64,9 @@ Subcommands:
   calibrate [opts]                   Chunk-size calibration run (issue #85)
     Same flags as run, plus:
     --machines-file F  Machine matrix TSV (default: machines-calibrate.tsv)
+    --cal-l4           Measure MERGE_S/L4_WALL per shape (one --l2-fold
+                       tree --l4-check probe; issue #102 Phase C). Also
+                       honors CAL_L4=1 in the environment.
     Defaults: machines-calibrate.tsv shapes, S="8 9 10 11 20 21 32 40",
     per-S tx_limit=4*S. The comparison fleet (S in {1,2,4,6}) is untouched.
 
@@ -397,12 +402,16 @@ cmd_calibrate() {
   local machines_file="${FLEET_ROOT}/machines-calibrate.tsv"
   local -a pass_args=()
   local have_svalues=0
+  # CAL_L4 (issue #102 Phase C): opt-in measured MERGE_S/L4_WALL per
+  # shape. Flag or env (CAL_L4=1), same contract as scripts/s-calibrate.sh.
+  local cal_l4="${CAL_L4:-0}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --machines-file) machines_file="$2"; shift 2 ;;
       --svalues)       have_svalues=1; pass_args+=("$1" "$2"); shift 2 ;;
       --machines|--ref) pass_args+=("$1" "$2"); shift 2 ;;
       --yes|--dry-run)  pass_args+=("$1"); shift ;;
+      --cal-l4)         cal_l4=1; shift ;;
       *) log_err "unknown calibrate flag: $1"; usage; exit 2 ;;
     esac
   done
@@ -410,13 +419,15 @@ cmd_calibrate() {
 
   CAL_MODE=1
   export CAL_MODE
+  CAL_L4="${cal_l4}"
+  export CAL_L4
   FLEET_MACHINES_TSV="${machines_file}"
   export FLEET_MACHINES_TSV
   if (( ! have_svalues )); then
     pass_args+=(--svalues "${DEFAULT_CAL_SVALUES}")
   fi
 
-  log_info "calibration mode: machines=${machines_file} (CAL_MODE=1, per-S tx_limit=4*S)"
+  log_info "calibration mode: machines=${machines_file} (CAL_MODE=1, per-S tx_limit=4*S, CAL_L4=${CAL_L4})"
   cmd_run "${pass_args[@]}"
 }
 
@@ -531,6 +542,22 @@ cmd_collect() {
       if (( found == 0 )); then
         log_warn "[${mt}] no S*/bench.jsonl found -- skipping calibration report"
         continue
+      fi
+      # CAL_L4 probe (issue #102 Phase C): map L4CHECK/bench.jsonl to the
+      # cal-l4check.jsonl name s-calibrate-report.py auto-detects, but
+      # only when the probe's DONE sentinel shows bench_exit_code=0 --
+      # a failed probe must fall back to extrapolated labels (mirrors
+      # scripts/s-calibrate.sh, which deletes the jsonl on rc!=0).
+      if [[ -r "${mt_dir}L4CHECK/bench.jsonl" ]]; then
+        local l4_rc
+        l4_rc="$(grep -o 'bench_exit_code=[0-9]*' "${mt_dir}L4CHECK/DONE" 2>/dev/null \
+                  | cut -d= -f2 || echo 1)"
+        if [[ "${l4_rc}" == "0" ]]; then
+          cp "${mt_dir}L4CHECK/bench.jsonl" "${mt_dir}cal-l4check.jsonl"
+          log_info "[${mt}] CAL_L4 probe ok -- MERGE_S/L4_WALL will be labeled measured"
+        else
+          log_warn "[${mt}] CAL_L4 probe rc=${l4_rc:-unknown} -- keeping extrapolated constants"
+        fi
       fi
       log_info "[${mt}] computing calibration report (${found} probes)"
       if python3 "${_FLEET_REPO_ROOT}/scripts/s-calibrate-report.py" \
