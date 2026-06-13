@@ -130,6 +130,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bincode",
+ "c-kzg",
  "circuit",
  "clap 4.5.51",
  "clap_derive",
@@ -197,6 +198,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "blst"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcdb4c7013139a150f9fc55d123186dbfaba0d912817466282c73ac49e71fb45"
+dependencies = [
+ "cc",
+ "glob",
+ "threadpool",
+ "zeroize",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,6 +220,21 @@ name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
+name = "c-kzg"
+version = "2.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6648ed1e4ea8e8a1a4a2c78e1cda29a3fd500bc622899c340d8525ea9a76b24a"
+dependencies = [
+ "blst",
+ "cc",
+ "glob",
+ "hex",
+ "libc",
+ "once_cell",
+ "serde",
+]
 
 [[package]]
 name = "cast"
@@ -668,6 +696,12 @@ dependencies = [
  "wasi",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "half"
@@ -1677,6 +1711,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "threadpool"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d050e60b33d41c19108b32cea32164033a9013fe3b46cbd4457559bfbf77afaa"
+dependencies = [
+ "num_cpus",
+]
+
+[[package]]
 name = "tikv-jemalloc-sys"
 version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2099,6 +2142,26 @@ name = "zerocopy-derive"
 version = "0.8.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88d2b8d9c68ad2b9e4340d7832716a4d21a22a1154777ad56ea55c51a9cf3831"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.110",
+]
+
+[[package]]
+name = "zeroize"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
 dependencies = [
  "proc-macro2",
  "quote",

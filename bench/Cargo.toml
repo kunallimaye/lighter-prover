@@ -38,6 +38,7 @@ clap_derive = { workspace = true }
 tiny-keccak =  { workspace = true }
 paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
+c-kzg = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]

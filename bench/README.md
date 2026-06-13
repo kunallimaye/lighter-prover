@@ -247,15 +247,15 @@ full per-machine measurement session is tracked on
 [issue #90](https://github.com/kunallimaye/lighter-prover/issues/90) and is
 re-runnable on the new chained fixture.
 
-The **verifying L6 termination is gated on
-[issue #83](https://github.com/kunallimaye/lighter-prover/issues/83)**:
-`WrapperCircuit::prove_inner` additionally needs a `delta_chain_proof`, a
-`blob_evaluation_proof`, and a KZG `WrapperInput` that do not yet exist
-in-repo. When #83 lands, the L6 call pads the unused `chain_proofs[S..8)`
-slots with `chain_proofs[0]` and sets `segment_count = S`; the wrapper
-asserts segment 0's on-chain-operations hash is zero (which the host
-pre-pass guarantees). This driver documents that call shape but does not
-invoke the wrapper.
+The **L6 inner-wrapper drive path is implemented by
+[issue #83](https://github.com/kunallimaye/lighter-prover/issues/83)** — see the
+[L6 inner-wrapper drive modes](#l6-inner-wrapper-drive-modes-bench---delta-prove----blob-prove----l6-inner)
+section below. `WrapperCircuit::prove_inner` needs a `delta_chain_proof`, a
+`blob_evaluation_proof`, and a KZG `WrapperInput`; #83 adds the `--delta-prove`,
+`--blob-prove`, and `--l6-inner` modes that produce them. The L6 call pads the
+unused `chain_proofs[S..8)` slots with `chain_proofs[0]` and sets
+`segment_count = S`; the wrapper asserts segment 0's on-chain-operations hash is
+zero (which the host pre-pass guarantees).
 
 Within-segment multi-block folds exercise the L5 fold's
 `batch.new_state_root == current_block.old_state_root` continuity assert
@@ -302,6 +302,72 @@ serial` is unchanged.
 
 ```bash
 ./bench --l5-fold tree --blocks 4
+```
+
+## L6 inner-wrapper drive modes (bench --delta-prove / --blob-prove / --l6-inner)
+
+Issue #83 drives `WrapperCircuit::prove_inner` by producing its three previously
+missing inputs over a **correctly-shaped synthesized** (empty) batch. Real
+mainnet witness generation is closed-source and deferred to #119. See
+[ADR-0005](../docs/decisions/ADR-0005-l6-inner-wrapper-kzg-sidecar.md) for the
+full design, including the BLS12-381-vs-BN254 distinction and the **custom
+Poseidon2 PCE evaluation point** (not the EIP-4844 standard challenge).
+
+| Flag | Produces | Acceptance criterion |
+|------|----------|----------------------|
+| `--delta-prove` | `delta_chain_proof` — drives `DeltaCircuit` then `CyclicDeltaCircuit` and verifies | #1 |
+| `--blob-prove` | `blob_evaluation_proof` + the KZG `WrapperInput` (versioned hash + PCE opening `x`/`y`) | #2, #3 |
+| `--l6-inner` | assembles all three inputs + builds the L5 (2^15) and inner-wrapper (2^18) circuits | #4 (partial — see below) |
+| `--trusted-setup-path PATH` | KZG ceremony setup for `--blob-prove`/`--l6-inner` (default `bench/assets/trusted_setup.txt`) | — |
+
+```bash
+./bench --delta-prove
+./bench --blob-prove
+./bench --l6-inner
+```
+
+All three are **batch mode only** (incompatible with `--stream`). The
+blob-evaluation and inner-wrapper circuits are deep enough to overflow the
+default 8 MiB main-thread stack, so the modes run them on a dedicated 4 GiB-stack
+thread automatically.
+
+### KZG sidecar (bench/src/kzg.rs)
+
+`WrapperInput.kzg_versioned_hash` is the EIP-4844 versioned hash of the
+BLS12-381 KZG commitment to the blob, computed via `c-kzg`
+(`0x01 || SHA-256(commitment)[1..]`) against the **public Ethereum KZG ceremony**
+trusted setup. The opening `(x, y)` is **not** the EIP-4844 challenge: the
+sidecar replicates the in-circuit custom Poseidon2 PCE transcript
+(`BlobEvaluationCircuit::verify_pce_evaluation`) off-circuit, using the existing
+plain-Rust `BLS12381Scalar` arithmetic and `Poseidon2Hash`. Correctness is
+enforced by the in-circuit `connect_nonnative` check: if `x` or `y` is wrong,
+`--blob-prove` fails. `c-kzg` needs a C toolchain at build time (pure-Rust
+`kzg-rs` is the documented swap-in fallback).
+
+### Status of criterion #4 (`--l6-inner`)
+
+`--l6-inner` produces and verifies the `delta_chain_proof` and
+`blob_evaluation_proof`, derives the wrapper-consistent delta evaluation point
+off-circuit, computes the KZG `WrapperInput`, and builds the inner-wrapper
+circuit. The remaining step is producing **8 L5 chain proofs whose merged batch
+has `new_account_delta_tree_root == EMPTY_ACCOUNT_DELTA_TREE_ROOT`** (an L5 chain
+over no-op blocks), mutually consistent with the empty delta chain and empty blob
+across `verify_aggregated_delta` and `verify_delta_polynomial_evaluation`. The
+existing `--l5-segment-check` driver synthesizes blocks with real txs (non-empty
+delta-tree root), so it cannot directly feed `prove_inner` without a
+consistent-empty (or fully mutually-consistent) batch. No KZG values were
+fabricated and no constraint was relaxed to force a terminating prove; the
+consistent-empty L5 chain is the closing step for #83 (in-repo work, no Lighter
+dependency).
+
+### Smoke tests
+
+```bash
+# heavy plonky2 proves; #[ignore]d by default, run explicitly with a large stack
+RUST_MIN_STACK=4294967296 cargo test -p bench --lib -- --ignored \
+  test_delta_chain_prove test_blob_evaluation_prove
+# fast (always-on): KZG versioned-hash shape check
+cargo test -p bench --lib test_kzg_versioned_hash_is_versioned
 ```
 
 ## Streaming mode (bench --stream)
