@@ -80,6 +80,8 @@ The measured 0.94 s serial L5 fold (#10 Stage-A) cannot meet the 226 ms peak cad
 ### D7 — Platform: MIG with a quarantined platform seam
 The load fleet runs as a Managed Instance Group of identical cells (one instance template per run; `--size N`; autoscaling on Pub/Sub backlog via Cloud Monitoring metrics covers the elasticity experiment; autohealing + redelivery covers the chaos experiment). GKE (Autopilot custom compute classes) was evaluated and deferred: whole-node billing neutralizes its economics for 32-64 vCPU CPU-saturating pods; kubelet reservations and runtime deltas pollute cross-fleet benchmark comparability; the ops surface contradicts the repo's shell+gcloud idiom (ADR-0001 §D6). All platform-specific logic is quarantined in one lifecycle lib (`platform-mig.sh`-style) and the run manifest carries a `platform` field, so a future GKE backend is a new lib, not a redesign. **Revisit triggers**: (a) the production prover commits to Kubernetes; (b) the rig becomes always-on (continuous load regression); (c) concurrent multi-experiment demand.
 
+> Note: the platform choice in this section is superseded for the PRODUCTION prover by Amendment 2026-06-13 (platform decision — GKE Autopilot) — see "Amendment (platform decision — GKE Autopilot, 2026-06-13)" below. The original MIG choice remains the recorded decision for the BENCHMARKING-phase fleet; the production prover's platform is now GKE Autopilot › GKE Standard › MIG (ranked fallback).
+
 ### D8 — Sweep sets
 M (workers per cell) ∈ {1, 2, 4, 8, 16}; S per D4; cell count N sized from measured cell wall (see Consequences).
 
@@ -162,3 +164,54 @@ This merge-grain transport-tax argument **remains valid** and is exactly **why m
 Consistent with #99's "decided now / deferred later" structure: revisit the deferred items when their gating inputs land (#90/#87 for M-vs-k; #75 for coordinator protocol + sizing/placement). The k-policy is decided and only revisited if the Discussion #77 proof-lag SLO (p50 ≤ 20 s / p99 ≤ 40 s) is itself revised.
 
 **Capacity-model forward pointer (out of scope here):** the Consequences capacity arithmetic (~80 cells / ~18 s etc.) is computed on the single-cell wall; its cross-cell recomputation under always-split is a separate downstream item (#107 item #5) and is intentionally **not** changed by this amendment.
+
+## Amendment (platform decision — GKE Autopilot, 2026-06-13)
+
+This amendment records the maintainer's platform decision for the **production prover**, triggered by §D7's own revisit clause "(a) the production prover commits to Kubernetes / a platform." It rests on the full analysis in **issue #134** (MIG vs GKE Standard vs GKE Autopilot — the durable spike record). It supersedes §D7's "Platform: MIG" choice and §D7's "GKE ... was evaluated and deferred" wording **for the production prover only**; the original §D7 text remains the recorded decision for the BENCHMARKING-phase fleet that ADR-0001 governs.
+
+**Numbering rationale**: this is an *in-place* amendment to ADR-0003, **NOT a new ADR**. ADR-0002 is still reserved for #10's deliverable and the duplicate-ADR-0001 collision (#68) is unresolved; adding a new number before the numbering is healed compounds the mess. (Note also a live collision on the ADR-0005 number: the merged tree's ADR-0005 is the L6-inner-wrapper/KZG-sidecar doc, while the distributed-prover *conductor* design — which this amendment references — is still **PR #115, unmerged**, also labelled ADR-0005. That collision is not resolved here.) As with the 2026-06-13 cross-cell amendment above, the original §D1–§D8 / Consequences / Risks body stays in place; this block supersedes specific §D7 sentences by quoting them verbatim and marking them, so the change history stays legible.
+
+### 1. The decision
+
+The **production prover's** platform preference is, in order: **(1) GKE Autopilot, (2) GKE Standard, (3) MIG** — a ranked fallback chain. Use GKE Autopilot unless it proves unworkable in practice; if it does, fall back to GKE Standard; MIG is the last resort.
+
+> **Superseded (for the production prover; preserved as the benchmarking-fleet record):** "The load fleet runs as a Managed Instance Group of identical cells ..." *(§D7 — the MIG-as-platform choice)*
+
+> **Superseded (for the production prover):** "GKE (Autopilot custom compute classes) **was evaluated and deferred** ..." *(§D7 — GKE is no longer deferred; GKE Autopilot is now the primary production choice)*
+
+This decision **inverts issue #134's spike recommendation**, which ranked GKE Standard first and GKE Autopilot as runner-up. The maintainer accepted #134's analysis but chose the toil-minimizing option: Autopilot won decisively on toil-avoidance (14/15 in #134 §3.2) and on coordinator-tier and small-service-tier cost (#134 §3.3). #134 itself flagged Autopilot-first as "defensible if the team commits to coordinator-eviction-annotation discipline from day-1" (#134 §4) — that condition is recorded as a hard requirement in section 3 below.
+
+### 2. Why (brief; full analysis in #134)
+
+The production workload is **multi-service orchestration**, not one fleet: chunk-prover cells, coordinators, feeder, witness plane, and the aggregator/L5–L6 path are heterogeneous in machine shape, failure semantics, and scaling law (#134 §1). That shape is Kubernetes-native and MIG-toil-heavy — running it on MIG means "reimplementing a scheduler in shell" at scale (#134 §3.2). GKE wins on **operational rigour**: native health-checking and reschedule, rollout with circuit-shape/version-fingerprint consistency across the fleet, and native blast-radius primitives (PodDisruptionBudgets, namespaces, RBAC, surge controls). **GKE Autopilot** specifically wins on **toil-avoidance**: no node lifecycle, no node-pool, no kubelet-upgrade ceremony — which is the maintainer's stated priority.
+
+### 3. Mandatory Autopilot mitigation (HARD DAY-1 REQUIREMENT — do not drop)
+
+This is the named cost of choosing Autopilot over Standard (#134 §3.1, §4), and it must not be lost:
+
+**Autopilot evicts and reschedules pods to bin-pack nodes.** A coordinator is frequently **mid-fold, holding resident proving keys**, when that happens — and an eviction at that moment **loses a block of in-flight work**. Therefore, from **day 1**:
+
+- **Every coordinator pod MUST be annotated** `cluster-autoscaler.kubernetes.io/safe-to-evict=false`, **AND**
+- **PodDisruptionBudgets MUST be set** for the coordinator pool,
+
+so that Autopilot will not evict an in-flight, key-resident coordinator for bin-packing. **Choosing Autopilot WITHOUT this discipline is exactly the failure mode #134 warned about** — it is not optional and not a footnote. If this discipline proves unworkable in practice, the recorded fallback is **GKE Standard**, which does not bin-pack-evict pods by default.
+
+### 4. #134's tested re-scoping of the original §D7 arguments
+
+#134 §2 re-tested the three §D7 MIG-over-GKE arguments and found they were **correctly scoped to the benchmarking-phase fleet** (ADR-0001's regime), but change shape in production:
+
+- **Whole-node billing** (Argument A): in production this is **Autopilot-specific** and bites only the **CPU-saturating cell tier** (cells are whole-machine pods). It is **refuted for the coordinator tier**, which is measured at ~⅔-idle with a ~1 s all-core burst per block — not whole-machine — so Autopilot per-request billing is structurally cheaper there.
+- **Kubelet/runtime overhead** (Argument B): **moot in production** — production isn't a cross-shape benchmark, so the comparability concern disappears; it reduces to a bounded **~5–10% effective-CPU tax** on the cell wall, to be sized into #95's fleet model.
+- **Ops idiom** (Argument C): a **real one-time GKE learning cost**, which **partly cancels** against MIG's own-the-scheduler toil at production scale.
+
+### 5. The platform seam holds — this is a new lib, not a redesign
+
+The platform seam recorded in §D7 itself — "All platform-specific logic is quarantined in one lifecycle lib ... and the run manifest carries a `platform` field, so a future GKE backend is a new lib, not a redesign" — is exactly the construct that makes this MIG→GKE-Autopilot change a backend swap rather than an architecture change. (The distributed-prover conductor design, PR #115 / proposed ADR-0005 §5, reaffirms this same seam.) The conductor architecture is **unchanged**: the two-tier dispatch, the coordinator pool, the witness/straggler seams, and the lag function are all platform-agnostic. Only the lifecycle lib is swapped.
+
+### 6. Cost note (NON-GATING)
+
+Per Discussion #77's standing norm — "cost is final-validation-only, never a design constraint or gate" — cost is recorded here **only** as a non-gating affordability note and is reconciled at final validation, not now: Autopilot is **premium on the whole-box cell tier** but **cheapest on the coordinator and small-service tiers** (#134 §3.3). This does **not** gate the decision.
+
+### 7. Scope guard (this records a decision; it does not start a build)
+
+This amendment **RECORDS** the platform decision; it does **not** trigger any build or provisioning. **#75** (the conductor build) remains **design-gated** — and gated on sizing (#128/#121/#95) plus the design review. GKE implementation happens **later**, behind those gates, against this recorded decision.
