@@ -20,7 +20,12 @@ suite).
 
 | shape | date | sha | circuit hash | load | MERGE_S (s) | L4_WALL (s) | S* (SLO slack) | min slack (s) | S* serial | S* tree | S* s/tx |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| c4a-highcpu-64 | 2026-06-11 | 5be70d9 | `f634a649afd2` | clean | 0.238 (extrapolated) | 2.579 (extrapolated) | S=9 | 12.054 | S=20 | S=8 | S=10 |
+| c4a-highcpu-16 | 2026-06-13 | e87152ba5e995d5eda3cd323adb0fb016b77917e | `f634a649afd2` | unknown | 0.527 (measured) | 5.639 (measured) | S=9 | 3.094 | S=20 | S=8 | S=10 |
+| c4a-highcpu-32 | 2026-06-13 | e87152ba5e995d5eda3cd323adb0fb016b77917e | `f634a649afd2` | unknown | 0.364 (measured) | 3.911 (measured) | S=9 | 8.331 | S=20 | S=8 | S=10 |
+| c4a-highcpu-4 | 2026-06-13 | e87152ba5e995d5eda3cd323adb0fb016b77917e | `f634a649afd2` | unknown | 1.563 (measured) | 16.087 (measured) | S=9 | -29.184 | S=10 | S=8 | S=10 |
+| c4a-highcpu-64 | 2026-06-13 | e87152ba5e995d5eda3cd323adb0fb016b77917e | `f634a649afd2` | unknown | 0.275 (measured) | 2.928 (measured) | S=9 | 11.270 | S=20 | S=8 | S=10 |
+| c4a-highcpu-72 | 2026-06-13 | e87152ba5e995d5eda3cd323adb0fb016b77917e | `f634a649afd2` | unknown | 0.263 (measured) | 2.789 (measured) | S=9 | 11.672 | S=20 | S=8 | S=10 |
+| c4a-highcpu-8 | 2026-06-13 | e87152ba5e995d5eda3cd323adb0fb016b77917e | `f634a649afd2` | unknown | 0.869 (measured) | 9.033 (measured) | S=9 | -7.373 | S=20 | S=8 | S=10 |
 | c4a-highmem-64 | 2026-06-11 | 5be70d9 | `f634a649afd2` | clean | 0.240 (extrapolated) | 2.598 (extrapolated) | S=9 | 11.998 | S=20 | S=8 | S=10 |
 | c4a-highmem-96-metal | 2026-06-11 | 5be70d9 | `f634a649afd2` | clean | 0.225 (extrapolated) | 2.433 (extrapolated) | S=9 | 12.553 | S=20 | S=8 | S=10 |
 | epyc-7b13-ref | 2026-06-11 | 5be70d9 | `f634a649afd2` | loaded | 0.476 (measured) | 5.155 (measured) | S=9 | 4.630 | S=20 | S=9 | S=9 |

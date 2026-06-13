@@ -1,0 +1,225 @@
+{
+  "schema": 1,
+  "shape": "c4a-highcpu-4",
+  "date": "2026-06-13",
+  "measured_at_sha": "e87152ba5e995d5eda3cd323adb0fb016b77917e",
+  "circuit_hash": "f634a649afd2f1d03c8647f9720a1ee528b869b9",
+  "load_quality": "unknown",
+  "lag_p50_s": 20.0,
+  "lag_p99_s": 40.0,
+  "block_sizes": [
+    500,
+    4000,
+    9000
+  ],
+  "scale_r": 1.0,
+  "constants": {
+    "merge_s": {
+      "value": 1.563,
+      "label": "measured"
+    },
+    "l4_wall_s": {
+      "value": 16.087,
+      "label": "measured"
+    }
+  },
+  "brackets": {
+    "2^17": {
+      "s_measured": [
+        8
+      ],
+      "best_s_by_slo": 8,
+      "min_slack": -30.627
+    },
+    "2^17|2^18?": {
+      "s_measured": [
+        9,
+        10
+      ],
+      "best_s_by_slo": 9,
+      "min_slack": -29.184
+    }
+  },
+  "objectives": {
+    "serial": {
+      "s": 10,
+      "value": 79.383
+    },
+    "tree": {
+      "s": 8,
+      "value": 20.206
+    },
+    "s_per_tx": {
+      "s": 10,
+      "value": 1.768
+    },
+    "slo_slack": {
+      "s": 9,
+      "min_slack": -29.184,
+      "verdict": "INFEASIBLE",
+      "lag_p50": 20.0
+    }
+  },
+  "per_s_table": [
+    {
+      "S": 8,
+      "bracket": "2^17",
+      "l1_wall_ms": 17347,
+      "l2_wall_ms": 1590,
+      "peak_rss_mb": 4770,
+      "s_per_tx": "2.168",
+      "serial_block_s": "99.375",
+      "tree_block_s": "20.206",
+      "feasible": "yes",
+      "label": "measured",
+      "l1_n": 3,
+      "l1_stdev_ms": "82.3",
+      "l1_quality": "ok",
+      "full_split_wall_500": "42.812",
+      "full_split_wall_4000": "47.501",
+      "full_split_wall_9000": "50.627",
+      "slo_slack_min": "-30.627",
+      "slo_verdict": "INFEASIBLE"
+    },
+    {
+      "S": 9,
+      "bracket": "2^17|2^18?",
+      "l1_wall_ms": 17467,
+      "l2_wall_ms": 1588,
+      "peak_rss_mb": 4813,
+      "s_per_tx": "1.941",
+      "serial_block_s": "88.204",
+      "tree_block_s": "20.325",
+      "feasible": "yes",
+      "label": "measured",
+      "l1_n": 3,
+      "l1_stdev_ms": "60.5",
+      "l1_quality": "ok",
+      "full_split_wall_500": "42.932",
+      "full_split_wall_4000": "47.621",
+      "full_split_wall_9000": "49.184",
+      "slo_slack_min": "-29.184",
+      "slo_verdict": "INFEASIBLE"
+    },
+    {
+      "S": 10,
+      "bracket": "2^17|2^18?",
+      "l1_wall_ms": 17682,
+      "l2_wall_ms": 1588,
+      "peak_rss_mb": 4858,
+      "s_per_tx": "1.768",
+      "serial_block_s": "79.383",
+      "tree_block_s": "20.540",
+      "feasible": "yes",
+      "label": "measured",
+      "l1_n": 3,
+      "l1_stdev_ms": "83.4",
+      "l1_quality": "ok",
+      "full_split_wall_500": "43.147",
+      "full_split_wall_4000": "47.836",
+      "full_split_wall_9000": "49.399",
+      "slo_slack_min": "-29.399",
+      "slo_verdict": "INFEASIBLE"
+    },
+    {
+      "S": 11,
+      "bracket": "2^17|2^18?",
+      "l1_wall_ms": "NA",
+      "l2_wall_ms": "NA",
+      "peak_rss_mb": "NA",
+      "s_per_tx": "NA",
+      "serial_block_s": "NA",
+      "tree_block_s": "NA",
+      "feasible": "no",
+      "label": "skipped",
+      "l1_n": "NA",
+      "l1_stdev_ms": "NA",
+      "l1_quality": "NA",
+      "full_split_wall_500": "NA",
+      "full_split_wall_4000": "NA",
+      "full_split_wall_9000": "NA",
+      "slo_slack_min": "NA",
+      "slo_verdict": "NA"
+    },
+    {
+      "S": 20,
+      "bracket": "2^18",
+      "l1_wall_ms": "NA",
+      "l2_wall_ms": "NA",
+      "peak_rss_mb": "NA",
+      "s_per_tx": "NA",
+      "serial_block_s": "NA",
+      "tree_block_s": "NA",
+      "feasible": "no",
+      "label": "skipped",
+      "l1_n": "NA",
+      "l1_stdev_ms": "NA",
+      "l1_quality": "NA",
+      "full_split_wall_500": "NA",
+      "full_split_wall_4000": "NA",
+      "full_split_wall_9000": "NA",
+      "slo_slack_min": "NA",
+      "slo_verdict": "NA"
+    },
+    {
+      "S": 21,
+      "bracket": "2^18|2^19?",
+      "l1_wall_ms": "NA",
+      "l2_wall_ms": "NA",
+      "peak_rss_mb": "NA",
+      "s_per_tx": "NA",
+      "serial_block_s": "NA",
+      "tree_block_s": "NA",
+      "feasible": "no",
+      "label": "skipped",
+      "l1_n": "NA",
+      "l1_stdev_ms": "NA",
+      "l1_quality": "NA",
+      "full_split_wall_500": "NA",
+      "full_split_wall_4000": "NA",
+      "full_split_wall_9000": "NA",
+      "slo_slack_min": "NA",
+      "slo_verdict": "NA"
+    },
+    {
+      "S": 32,
+      "bracket": "2^19",
+      "l1_wall_ms": "NA",
+      "l2_wall_ms": "NA",
+      "peak_rss_mb": "NA",
+      "s_per_tx": "NA",
+      "serial_block_s": "NA",
+      "tree_block_s": "NA",
+      "feasible": "no",
+      "label": "skipped",
+      "l1_n": "NA",
+      "l1_stdev_ms": "NA",
+      "l1_quality": "NA",
+      "full_split_wall_500": "NA",
+      "full_split_wall_4000": "NA",
+      "full_split_wall_9000": "NA",
+      "slo_slack_min": "NA",
+      "slo_verdict": "NA"
+    },
+    {
+      "S": 40,
+      "bracket": "2^19",
+      "l1_wall_ms": "NA",
+      "l2_wall_ms": "NA",
+      "peak_rss_mb": "NA",
+      "s_per_tx": "NA",
+      "serial_block_s": "NA",
+      "tree_block_s": "NA",
+      "feasible": "no",
+      "label": "skipped",
+      "l1_n": "NA",
+      "l1_stdev_ms": "NA",
+      "l1_quality": "NA",
+      "full_split_wall_500": "NA",
+      "full_split_wall_4000": "NA",
+      "full_split_wall_9000": "NA",
+      "slo_slack_min": "NA",
+      "slo_verdict": "NA"
+    }
+  ]
+}
