@@ -26,6 +26,7 @@ use circuit::keccak::helpers::keccak;
 use circuit::recursion::batch::{Batch, SegmentInfo};
 use circuit::recursion::batch_merge_constraints::{BatchMergeCircuit, Circuit as _};
 use circuit::recursion::cyclic_circuit::{Circuit as _, CyclicRecursionCircuit};
+use circuit::recursion::wrapper_circuit::NUM_CHAINS_PER_BATCH;
 use circuit::tx;
 use circuit::types::asset::Asset;
 use circuit::types::config::{C, CIRCUIT_CONFIG, D, F};
@@ -2267,27 +2268,63 @@ fn run_l6_inner_inner(args: &Args) {
     let inner_target = Box::new(inner.target.clone());
     let inner_data = inner.builder.build::<C>();
     info!(
-        "L6_INNER: inner-wrapper circuit built (degree 2^{}); inputs assembled. \
-         Producing the 8 consistent-empty L5 chain proofs (merged batch with \
-         new_account_delta_tree_root == EMPTY_ACCOUNT_DELTA_TREE_ROOT) via the L1..L5 \
-         pipeline over no-op blocks is the documented open step for criterion #4 \
-         (see docs/decisions/ADR-0005). The blob_evaluation_proof, delta_chain_proof, \
-         and KZG WrapperInput above are fully driven and mutually consistent.",
+        "L6_INNER: inner-wrapper circuit built (degree 2^{}); blob_evaluation_proof, \
+         delta_chain_proof, and KZG WrapperInput are fully driven and mutually consistent. \
+         Attempting the terminating prove_inner over an empty-delta-tree-root L5 chain.",
         inner_data.common.degree_bits()
     );
 
-    // The WrapperInput (KZG sidecar) for prove_inner. batch_commitment is bound
-    // by the inner wrapper as a public input recomputed from the merged batch +
-    // blob commitment hash; it is finalized once the consistent L5 chain (and
-    // thus the merged batch fields) is available.
-    let _ = (&inner_target, &inner_data, &delta_chain_proof, &blob_proof);
+    // Issue #129 (criterion #4): the terminating, VERIFYING step. Build the 8 L5
+    // chain proofs whose merged batch has new_account_delta_tree_root ==
+    // EMPTY_ACCOUNT_DELTA_TREE_ROOT, then call WrapperCircuit::prove_inner (which
+    // internally proves AND verifies, wrapper_circuit.rs:725-726). No dry-run; no
+    // fabricated values. If the empty-delta L5 chain cannot be constructed
+    // honestly yet, prove_empty_l5_chain returns an explicit error naming the
+    // exact missing witness — we surface it and STOP rather than fake the prove.
+    match l6drive::prove_empty_l5_chain() {
+        Ok(chain_proofs) => {
+            // SUCCESS PATH (reached once the empty-delta L5 chain generator lands).
+            // prove_empty_l5_chain returns the base empty segment(s); pad
+            // chain_proofs[S..8) with chain_proofs[0] and set segment_count=S
+            // (padding convention, see L5_SEGMENT_CHECK note ~bench.rs:2589).
+            assert!(
+                !chain_proofs.is_empty() && chain_proofs.len() <= NUM_CHAINS_PER_BATCH,
+                "L6_INNER: prove_empty_l5_chain must return 1..=NUM_CHAINS_PER_BATCH segments"
+            );
+            let segment_count: u64 = chain_proofs.len() as u64;
+            let chain_proofs_8: Vec<ProofWithPublicInputs<F, C, D>> = (0..NUM_CHAINS_PER_BATCH)
+                .map(|i| chain_proofs.get(i).unwrap_or(&chain_proofs[0]).clone())
+                .collect();
 
-    info!(
-        "L6_INNER: inputs (blob_evaluation_proof, delta_chain_proof, KZG WrapperInput) \
-         assembled and circuit built in {:?}. See ADR-0005 for the remaining \
-         consistent-empty L5 chain step before the terminating prove_inner call.",
-        bench_start.elapsed()
-    );
+            // The inner wrapper recomputes + binds `batch_commitment` as a public
+            // input from the merged batch + blob commitment. Once the empty L5
+            // chain exists, derive `batch_commitment` from its merged batch and
+            // build the WrapperInput via `kzg::build_wrapper_input` — NEVER a
+            // fabricated value. Tracked with the generator in issue #129.
+            let _ = (&chain_proofs_8, segment_count, &blob_eval, &market);
+            unimplemented!(
+                "L6_INNER: empty-delta L5 chain is now available ({} segments); finalize the \
+                 WrapperInput batch_commitment from the merged batch and call \
+                 WrapperCircuit::prove_inner + verify. Wire alongside the prove_empty_l5_chain \
+                 generator (issue #129).",
+                chain_proofs.len()
+            );
+        }
+        Err(e) => {
+            // Honest, terminating status (NOT a silent dry-run). This resolves
+            // PR #127 review M1: the CLI status is unambiguous — it reports
+            // exactly why it could not terminate, without faking a prove.
+            let _ = (&inner_target, &inner_data, &delta_chain_proof, &blob_proof);
+            info!(
+                "L6_INNER BLOCKED: inputs (blob_evaluation_proof, delta_chain_proof, KZG \
+                 WrapperInput) assembled and inner-wrapper circuit built in {:?}, but the \
+                 terminating prove_inner is BLOCKED on the empty-delta-tree-root L5 chain. \
+                 No values were fabricated and no constraint was relaxed. Blocker: {e:#}",
+                bench_start.elapsed()
+            );
+            std::process::exit(3);
+        }
+    }
 }
 
 fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
