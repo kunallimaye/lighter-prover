@@ -162,6 +162,26 @@ pub enum BenchEvent<'a> {
         rss_mb_after: Option<u64>,
         ts: String,
     },
+    /// L4 split timings (issue #102): circuit build, witness+prove, and
+    /// verify walls emitted as separate fields. ADDITIVE to the combined
+    /// L4 `layer_prove` event, whose `wall_ms` remains witness+prove+verify
+    /// exactly as before -- existing consumers (fleet parser, s-calibrate)
+    /// are unaffected; new consumers can split the block-proof budget into
+    /// the one-time resident build cost vs the per-block prove/verify wall.
+    L4Check {
+        name: &'a str,
+        /// `"serial"` | `"tree"` -- which L2 fold produced the chain proof.
+        label: &'a str,
+        tx_per_proof: usize,
+        /// `BlockCircuit::define` + `builder.build()` wall. One-time,
+        /// resident cost -- NOT part of the per-block proof wall.
+        l4_build_ms: u64,
+        /// Witness generation + prove wall.
+        l4_prove_ms: u64,
+        /// Verify wall.
+        l4_verify_ms: u64,
+        ts: String,
+    },
     /// Intra-cell parallel L2 tree-scheduler run summary (issue #73). Emitted
     /// once at the end of a `--l2-workers M` tree-fold. Reports the realized
     /// wall-clock latency alongside the reported `critical_path = depth × avg
@@ -411,6 +431,25 @@ mod tests {
         assert!(json.contains("\"block_count\":64"));
         assert!(json.contains("\"effective_ms_per_block\":950.0"));
         assert!(json.contains("\"name\":\"CyclicRecursionCircuit\""));
+    }
+
+    #[test]
+    fn l4_check_serialization() {
+        let ev = BenchEvent::L4Check {
+            name: "BlockCircuit",
+            label: "tree",
+            tx_per_proof: 4,
+            l4_build_ms: 10_900,
+            l4_prove_ms: 4_800,
+            l4_verify_ms: 355,
+            ts: "2026-06-13T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"event\":\"l4_check\""));
+        assert!(json.contains("\"label\":\"tree\""));
+        assert!(json.contains("\"l4_build_ms\":10900"));
+        assert!(json.contains("\"l4_prove_ms\":4800"));
+        assert!(json.contains("\"l4_verify_ms\":355"));
     }
 
     #[test]

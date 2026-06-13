@@ -1956,10 +1956,11 @@ fn run_l4_check(
     let l4 = BlockCircuit::define(CIRCUIT_CONFIG, l3_data, chain_like_data, 1);
     let l4_target = l4.target;
     let l4_data = l4.builder.build::<C>();
+    let l4_build_ms = define_t.elapsed().as_millis() as u64;
     events::emit(&BenchEvent::CircuitDefine {
         layer: 4,
         name: "BlockCircuit",
-        wall_ms: define_t.elapsed().as_millis() as u64,
+        wall_ms: l4_build_ms,
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
     });
@@ -1976,9 +1977,15 @@ fn run_l4_check(
     let l4_proof = l4_data
         .prove(pw)
         .unwrap_or_else(|err| panic!("L4_CHECK [{label}] prove failed: {err:?}"));
+    // Issue #102: split timings. `l4_prove_ms` covers witness+prove,
+    // `l4_verify_ms` covers verify; the combined `layer_prove` event below
+    // keeps its historical wall_ms = witness+prove+verify span unchanged.
+    let l4_prove_ms = prove_t.elapsed().as_millis() as u64;
+    let verify_t = Instant::now();
     l4_data
         .verify(l4_proof.clone())
         .unwrap_or_else(|err| panic!("L4_CHECK [{label}] verify failed: {err:?}"));
+    let l4_verify_ms = verify_t.elapsed().as_millis() as u64;
     let prove_dt = prove_t.elapsed();
     events::emit(&BenchEvent::LayerProve {
         layer: 4,
@@ -1992,8 +1999,20 @@ fn run_l4_check(
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
     });
+    // Issue #102 (additive): build / prove / verify split for the
+    // calibration suite's objective-4 constants (per-machine L4_WALL).
+    events::emit(&BenchEvent::L4Check {
+        name: "BlockCircuit",
+        label,
+        tx_per_proof,
+        l4_build_ms,
+        l4_prove_ms,
+        l4_verify_ms,
+        ts: now_iso8601(),
+    });
     info!(
-        "L4_CHECK [{label}] PASS: BlockCircuit proved+verified the final chain proof in {:?}",
+        "L4_CHECK [{label}] PASS: BlockCircuit proved+verified the final chain proof in {:?} \
+         (build {l4_build_ms} ms, prove {l4_prove_ms} ms, verify {l4_verify_ms} ms)",
         prove_dt
     );
 }
