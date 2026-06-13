@@ -104,7 +104,7 @@ TSV="${OUT_DIR}/calibration.tsv"
 # 1. Exact column order (golden schema -- consumed by Phase 2 tooling).
 # Issue #102 appended the v2 columns (l1_n.. onward) AFTER the frozen v1
 # ten -- additive only; the first ten never move.
-EXPECTED_HEADER=$'S\tbracket\tl1_wall_ms\tl2_wall_ms\tpeak_rss_mb\ts_per_tx\tserial_block_s\ttree_block_s\tfeasible\tlabel\tl1_n\tl1_stdev_ms\tl1_quality\tfull_split_wall_500\tfull_split_wall_4000\tfull_split_wall_9000\tslo_slack_min\tslo_verdict'
+EXPECTED_HEADER=$'S\tbracket\tl1_wall_ms\tl2_wall_ms\tpeak_rss_mb\ts_per_tx\tserial_block_s\ttree_block_s\tfeasible\tlabel\tl1_n\tl1_stdev_ms\tl1_quality\tsingle_machine_wall_500\tsingle_machine_wall_4000\tsingle_machine_wall_9000\tslo_slack_min\tslo_verdict'
 actual_header="$(head -n1 "${TSV}")"
 if [[ "${actual_header}" == "${EXPECTED_HEADER}" ]]; then
   report "calibration.tsv column order" 0

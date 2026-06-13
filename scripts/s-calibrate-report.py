@@ -7,7 +7,7 @@ computes per-S metrics and the four objectives, and writes:
 
   calibration.tsv   columns: S bracket l1_wall_ms l2_wall_ms peak_rss_mb
                     s_per_tx serial_block_s tree_block_s feasible label
-                    l1_n l1_stdev_ms l1_quality full_split_wall_<B>...
+                    l1_n l1_stdev_ms l1_quality single_machine_wall_<B>...
                     slo_slack_min slo_verdict
                     (v2 columns are ADDITIVE -- the first ten never move)
   report.md         human-readable summary + per-objective recommendations
@@ -25,10 +25,17 @@ Objectives (issue #60 / PR #69 methodology, BLOCK_TX-tx block):
 
 Objective 4 (issue #102; proof-lag SLO from Discussion #77, always-split
 policy, scoped to block-proof-ready L1->L4):
-  full_split_wall(S, B) = L1_chunk_wall(S) + merge_depth(B, S) * MERGE_S
+  single_machine_wall(S, B) = L1_chunk_wall(S) + merge_depth(B, S) * MERGE_S
                           + L4_WALL
   merge_depth(B, S)     = ceil(log2(ceil(B / S)))     (see merge_depth())
-  slack(S, B)           = LAG_P50 - full_split_wall(S, B)
+  slack(S, B)           = LAG_P50 - single_machine_wall(S, B)
+
+  CAVEAT: single_machine_wall is a SINGLE-MACHINE lower-bound wall -- the
+  time for ONE cell to prove the whole split block by itself (chunk L1 +
+  the full merge tree + L4, with NO network term). The cross-cell per-block
+  wall under the always-split POLICY (slowest cell + network fold) is a
+  separate quantity NOT modeled here; the always-split policy still wants
+  this single-machine bound as one input.
   verdict: FEASIBLE / MARGINAL (slack < 2 s) / INFEASIBLE (slack < 0)
   recommended S = argmax over S of min-over-B slack(S, B)
 
@@ -65,7 +72,7 @@ TSV_COLUMNS_V1 = [
     "s_per_tx", "serial_block_s", "tree_block_s", "feasible", "label",
 ]
 TSV_COLUMNS_V2 = ["l1_n", "l1_stdev_ms", "l1_quality"]
-# full_split_wall_<B> (one per --block-sizes entry), slo_slack_min, and
+# single_machine_wall_<B> (one per --block-sizes entry), slo_slack_min, and
 # slo_verdict are appended dynamically in main().
 
 # Verdict thresholds (issue #102): slack < 0 s -> INFEASIBLE,
@@ -108,7 +115,8 @@ def projected_bracket(s: int) -> str:
 
 def merge_depth(block_tx: int, s: int) -> int:
     """Number of pairwise merge levels needed to fold ceil(B/S) leaf
-    chain proofs into one root proof.
+    chain proofs into one root proof (the single-machine pairwise merge
+    depth feeding single_machine_wall).
 
     POLICY-DEPENDENT -- this is the SINGLE site encoding the always-split
     policy's merge arity (pairwise / 2-ary, today's
@@ -480,7 +488,7 @@ def main():
 
     block_sizes = [int(b) for b in args.block_sizes.split()]
     tsv_columns = (TSV_COLUMNS_V1 + TSV_COLUMNS_V2
-                   + [f"full_split_wall_{b}" for b in block_sizes]
+                   + [f"single_machine_wall_{b}" for b in block_sizes]
                    + ["slo_slack_min", "slo_verdict"])
 
     out = args.out_dir
@@ -568,7 +576,8 @@ def main():
         serial = max(l1_s, (args.block_tx / s) * l2_s) if l2_s is not None else None
         tree = l1_s + depth * merge_s
 
-        # Objective 4 (issue #102): always-split wall + SLO slack per B.
+        # Objective 4 (issue #102): single-machine wall (one cell proves the
+        # whole split block; no network term) + SLO slack per B.
         slo_walls = {b: l1_s + merge_depth(b, s) * merge_eff + l4_eff
                      for b in block_sizes}
         slo_slacks = {b: args.lag_p50 - w for b, w in slo_walls.items()}
@@ -587,7 +596,7 @@ def main():
         row["l1_stdev_ms"] = fmt(p["l1_stdev_ms"], 1)
         row["l1_quality"] = quality
         for b in block_sizes:
-            row[f"full_split_wall_{b}"] = fmt(slo_walls[b])
+            row[f"single_machine_wall_{b}"] = fmt(slo_walls[b])
         row["slo_slack_min"] = fmt(slack_min)
         row["slo_verdict"] = verdict
         rows.append(row)
@@ -714,12 +723,17 @@ def main():
     lines += [
         f"## Objective 4 -- SLO slack (proof-lag p50 <= {args.lag_p50:g} s)",
         "",
-        "- policy: always-split (Discussion #77); scoped to "
+        "- policy: always-split (Discussion #77); the wall below is the "
+        "single-machine lower bound this policy improves on, scoped to "
         "block-proof-ready L1->L4 -- the one-time resident L4 build cost "
         "is excluded from the per-block wall",
-        "- `full_split_wall(S, B) = L1_chunk_wall(S) + merge_depth(B, S) "
+        "- `single_machine_wall(S, B) = L1_chunk_wall(S) + merge_depth(B, S) "
         "* MERGE_S + L4_WALL`; `merge_depth(B, S) = ceil(log2(ceil(B/S)))` "
         "(pairwise merges -- policy-dependent, single site in this script)",
+        "- CAVEAT: this wall is a SINGLE-MACHINE lower bound -- one cell "
+        "proving the whole split block by itself, with NO network term. The "
+        "cross-cell per-block wall (slowest cell + network fold) is a "
+        "separate quantity NOT modeled here",
         f"- constants: MERGE_S = {merge_eff:.4f} s ({merge_label}), "
         f"L4_WALL = {l4_eff:.3f} s ({l4_label}), scale r = {r_scale:.3f} "
         f"(L1(S=20) here / reference {args.ref_l1_s20_ms:g} ms)",
