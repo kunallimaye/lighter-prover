@@ -42,9 +42,13 @@ Narrative + benchmark ledger: Discussion #77.
 ### D1 — The unit of scaling is the prover cell
 A **cell** = one host, one Rust process: an orchestrator thread plus M worker threads sharing resident proving keys (circuit construction takes minutes; workers must be persistent; sibling *processes* would multiply proving-key RSS by M). Worker panic isolation is provided by the outer layer (block-level redelivery), not process boundaries.
 
+> Note: superseded by Amendment 2026-06-13 — see "Amendment (cross-cell chunk distribution, 2026-06-13)" below.
+
 ### D2 — Two-queue topology; chunking is the orchestrator's job
 - **Outer queue (block dispatch)**: feeder publishes block events to a Pub/Sub topic; N cell orchestrators competing-pull one subscription with maxOutstandingMessages=1; ack **after** the block proof is emitted (at-least-once on whole blocks; a cell death costs one block of redelivered work). No coordinator service exists; pull-balancing is the scheduler.
+  > Note: superseded by Amendment 2026-06-13 — see "Amendment (cross-cell chunk distribution, 2026-06-13)" below.
 - **Inner queue (chunks)**: the orchestrator chunks its block in memory (`ceil(tx_count/S)` chunks), feeds an in-process work queue drained by M workers, collects chunk proofs into the L2 fold. RAM-only; nothing intra-cell crosses a network or GCS.
+  > Note: superseded by Amendment 2026-06-13 — see "Amendment (cross-cell chunk distribution, 2026-06-13)" below.
 
 ### D3 — L2 uses tree-fold (dedicated merge circuit, shape b2)
 Per #59 (feasibility GO) and #64 (gate budget GO): leaf circuit = today's `BlockTxChainCircuit`; a sibling chain-merge circuit verifies two chain proofs of adjacent ranges (fits the existing 2^14 self-shape, 28% headroom; requires one added 4-element PI — range-start `old_account_delta_tree_root` — and no plonky2-fork surgery). Serial L2 latency drops from N·0.5 s to ~log₂(N)·0.5 s. The unified leaf+merge variant (b1) is rejected (2^15 ⇒ ~2× step cost). Implementation tracked in the issue filed from #64.
@@ -71,6 +75,7 @@ The measured 0.94 s serial L5 fold (#10 Stage-A) cannot meet the 226 ms peak cad
 ### D6 — Data-plane rules
 - **GCS is showback-only**: run manifests, BENCH_EVENT JSONL, final proof artifacts. Never in the per-proof critical path (a 100-300 ms GCS round-trip is a ~100% tax on a 0.5 s fold step).
 - **Witnesses via mounted read-only corpus** (image layer or volume), resolved by `{height, witness_index}` lookup; `witness_fetch_ms` is a dedicated BENCH_EVENT field so witness acquisition is always separately accountable (#61). Witnesses never travel through the trace or the message bus.
+  > Note: superseded by Amendment 2026-06-13 — see "Amendment (cross-cell chunk distribution, 2026-06-13)" below.
 
 ### D7 — Platform: MIG with a quarantined platform seam
 The load fleet runs as a Managed Instance Group of identical cells (one instance template per run; `--size N`; autoscaling on Pub/Sub backlog via Cloud Monitoring metrics covers the elasticity experiment; autohealing + redelivery covers the chaos experiment). GKE (Autopilot custom compute classes) was evaluated and deferred: whole-node billing neutralizes its economics for 32-64 vCPU CPU-saturating pods; kubelet reservations and runtime deltas pollute cross-fleet benchmark comparability; the ops surface contradicts the repo's shell+gcloud idiom (ADR-0001 §D6). All platform-specific logic is quarantined in one lifecycle lib (`platform-mig.sh`-style) and the run manifest carries a `platform` field, so a future GKE backend is a new lib, not a redesign. **Revisit triggers**: (a) the production prover commits to Kubernetes; (b) the rig becomes always-on (continuous load regression); (c) concurrent multi-experiment demand.
