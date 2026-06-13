@@ -21,8 +21,11 @@
 #                  (scripts/tests/test-registry.sh).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Source common.sh with stdout silenced: it logs a config-loading INFO
+# line when config.toml exists, which would corrupt --print-hash's bare
+# output (and add noise to the warn-only local-test line).
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/common.sh"
+source "${SCRIPT_DIR}/common.sh" >/dev/null
 
 # --print-hash: bare output for scripting/tests; skip start_log noise.
 if [[ "${1:-}" == "--print-hash" ]]; then
