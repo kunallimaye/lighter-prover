@@ -171,14 +171,20 @@ make stream-sweep                                         # find max sustained t
 
 ## Quickstart — chunk-size calibration
 
-Per-machine calibration of the chunk size S (issue #85): probes only the
-degree-bracket tops from issue #60's step-function finding, RAM-gates
-infeasible brackets, and reports the optimal S per objective (serial
-fold / tree fold / s-per-tx) plus a BENCH-LEDGER entry for Discussion #77.
+Per-machine calibration of the chunk size S (issues #85, #102): probes
+only the degree-bracket tops from issue #60's step-function finding,
+RAM-gates infeasible brackets, and reports the optimal S per objective
+(serial fold / tree fold / s-per-tx / SLO slack under the 20 s proof-lag
+budget) plus a BENCH-LEDGER entry for Discussion #77. Results are
+committed to the [`calibration/`](calibration/README.md) registry;
+`make calibration-check` warns (never fails) when entries predate
+circuit changes.
 
 ```bash
 make s-calibrate                          # this machine (CAL_SVALUES=, BLOCK_TX=, OUT_DIR=)
+make s-calibrate OUT_REGISTRY=1 CAL_L4=1  # + measured MERGE_S/L4 constants + registry emit
 make s-calibrate-fleet                    # 3 c4a cloud shapes (~$10-25; interactive cost gate)
+make calibration-check                    # registry staleness guard (warn-only)
 ```
 
 The historical comparison fleet (`make fleet-run`, S ∈ {1,2,4,6}) is
@@ -218,9 +224,11 @@ for the rationale.
 │   ├── cloud.sh                    # gcloud + Cloud Build flows
 │   ├── stream.sh                   # Streaming bench flows (#47–#49 wiring)
 │   ├── stream-sweep.sh             # Rate-ladder sweep for bench --stream (#49)
-│   ├── s-calibrate.sh              # Per-machine chunk-size calibration suite (#85)
-│   ├── s-calibrate-report.py       # Calibration objective math + report/ledger rendering
+│   ├── s-calibrate.sh              # Per-machine chunk-size calibration suite (#85, #102)
+│   ├── s-calibrate-report.py       # Calibration objective math + report/ledger/registry rendering
+│   ├── calibration-check.sh        # Registry staleness guard — warn-only (#102)
 │   └── config.py                   # config.toml → shell exports + TF_VAR_*
+├── calibration/                    # Committed calibration registry (#102) — see its README
 ├── traces/                         # Downloaded/recorded traces (gitignored)
 ├── Makefile                        # Operator entry point — see `make help`
 ├── config.toml.example

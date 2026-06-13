@@ -144,6 +144,28 @@ print_topology() {
   fi
 }
 
+# Deterministic hash over the tracked circuit sources (circuit/src/**),
+# computed from WORKING-TREE contents so uncommitted edits are detected.
+# Calibration validity is tied to the circuit code it measured (issue
+# #102): scripts/s-calibrate.sh stamps this hash into every calibration
+# registry entry, and scripts/calibration-check.sh compares it against
+# the current tree (warn-only staleness guard). Stable and cheap: a few
+# `git hash-object` calls over a small file set.
+circuit_src_hash() {
+  if ! command -v git >/dev/null 2>&1 \
+     || ! git -C "${PROJECT_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "unknown"
+    return 0
+  fi
+  (
+    cd "${PROJECT_ROOT}" \
+      && git ls-files -- circuit/src | LC_ALL=C sort | while IFS= read -r f; do
+           printf '%s ' "${f}"
+           git hash-object -- "${f}"
+         done | git hash-object --stdin
+  ) 2>/dev/null || echo "unknown"
+}
+
 # Returns 0 (true) when role_a project equals role_b project.
 # Usage: same_project ORCH_PROJECT BUILD_PROJECT && echo collapsed
 #

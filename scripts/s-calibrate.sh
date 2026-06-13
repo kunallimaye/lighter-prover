@@ -1,31 +1,48 @@
 #!/usr/bin/env bash
-# s-calibrate.sh -- per-machine chunk-size calibration suite (issue #85).
+# s-calibrate.sh -- per-machine chunk-size calibration suite
+# (issue #85; SLO objective + calibration registry: issue #102).
 #
 # Probes only the degree-bracket TOPS (the candidate set from issue #60's
 # step-function finding: per-tx cost is minimized at the top of each
 # power-of-two degree bracket), RAM-gates infeasible brackets, runs the
 # 4-chunk methodology per surviving S (--tx-limit 4*S), parses the
 # BENCH_EVENT JSONL the bench emits, and computes the optimal S per
-# objective (serial fold / tree fold / s-per-tx) via
+# objective (serial fold / tree fold / s-per-tx / SLO slack) via
 # scripts/s-calibrate-report.py.
 #
 # Outputs (under $OUT_DIR):
-#   machine-info.txt   lscpu / free -h / uname -a / host label
+#   machine-info.txt   lscpu / free -h / uname -a / host label / loadavg
 #   cal-S<N>.log       full bench stdout+stderr per candidate S
 #   cal-S<N>.jsonl     extracted BENCH_EVENT lines per candidate S
+#   cal-l4check.*      opt-in CAL_L4=1 merge/L4 measurement probe
 #   skipped.tsv        RAM-gated candidates (S <TAB> reason)
 #   calibration.tsv    per-S metrics + objectives (machine-parseable)
 #   report.md          human-readable summary, per-objective recommendations
 #   ledger.md          BENCH-LEDGER entry (Discussion #77 template)
+# Plus, when OUT_REGISTRY=1 (issue #102):
+#   calibration/<shape>.json + README.md in the repo working tree --
+#   the committed calibration registry (recalibration = a PR that diffs it).
 #
 # Knobs (override at make-invoke time, e.g. `make s-calibrate CAL_SVALUES="20 21"`):
 #   CAL_SVALUES   Candidate S list (default: auto -- bracket tops + edge
 #                 probes "8 9 10 11 20 21 32", plus 40 when RAM clears the
 #                 2^20 gate)
-#   BLOCK_TX      Block size for the objective math (default: 500)
-#   MERGE_S       Tree-fold merge-step constant in seconds (default: 0.47,
-#                 measured on PR #69's reference machine; used only when a
-#                 run has no measured merge events)
+#   BLOCK_TX      Block size for the objective-1..3 math (default: 500)
+#   MERGE_S       Tree-merge step constant in seconds (default: 0.4764,
+#                 Phase A measured, S-independent -- issue #102; used when
+#                 a run has no measured merge events)
+#   L4_WALL       L4 prove+verify wall in seconds (default: 5.155, Phase A
+#                 measured on the EPYC reference; the one-time L4 build is
+#                 resident and NOT part of the per-block wall)
+#   LAG_P50       Proof-lag SLO p50 budget in s (default: 20, Discussion #77)
+#   LAG_P99       Proof-lag SLO p99 budget in s (default: 40, context only)
+#   BLOCK_SIZES   Block sizes B for objective 4 (default: "500 4000 9000")
+#   CAL_L4        Set 1 to run the opt-in per-machine MERGE_S/L4 measurement
+#                 (one --l2-fold tree --l4-check probe at S=4/tx-limit 32);
+#                 constants then carry label=measured (default: 0)
+#   OUT_REGISTRY  Set 1 to emit calibration/<shape>.json + README.md into
+#                 the repo working tree (default: 0)
+#   SHAPE_LABEL   Registry shape name (default: HOST_LABEL)
 #   CHUNKS        Chunks per probe run (default: 4 -- the #60 methodology)
 #   OUT_DIR       Output directory (default: /tmp/s-calibrate.<timestamp>)
 #   HEADROOM      RAM headroom multiplier for the gate (default: 1.5)
@@ -40,7 +57,13 @@ source "${SCRIPT_DIR}/common.sh"
 start_log "s-calibrate"
 
 BLOCK_TX="${BLOCK_TX:-500}"
-MERGE_S="${MERGE_S:-0.47}"
+MERGE_S="${MERGE_S:-0.4764}"
+L4_WALL="${L4_WALL:-5.155}"
+LAG_P50="${LAG_P50:-20}"
+LAG_P99="${LAG_P99:-40}"
+BLOCK_SIZES="${BLOCK_SIZES:-500 4000 9000}"
+CAL_L4="${CAL_L4:-0}"
+OUT_REGISTRY="${OUT_REGISTRY:-0}"
 CHUNKS="${CHUNKS:-4}"
 HEADROOM="${HEADROOM:-1.5}"
 OUT_DIR="${OUT_DIR:-/tmp/s-calibrate.$(date +%Y%m%d-%H%M%S)}"
@@ -97,6 +120,15 @@ mem_total_gb() {
 
 mkdir -p "${OUT_DIR}"
 HOST_LABEL="${HOST_LABEL:-$(hostname -s 2>/dev/null || echo unknown)}"
+
+# Load-quality flag (issue #102 encoding 5): capture the 1-min loadavg +
+# core count AT RUN START. Walls measured on an already-loaded machine
+# are inflated (~10-20% observed in Phase A), so near-zero-slack SLO
+# verdicts from a "loaded" run are flagged as unreliable downstream.
+LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
+CORES="$(nproc 2>/dev/null || echo 1)"
+LOAD_QUALITY="$(python3 -c "print('loaded' if ${LOAD1} / max(${CORES}, 1) > 0.2 else 'clean')" 2>/dev/null || echo unknown)"
+
 {
   echo "=== host_label ==="
   echo "${HOST_LABEL}"
@@ -109,8 +141,13 @@ HOST_LABEL="${HOST_LABEL:-$(hostname -s 2>/dev/null || echo unknown)}"
   echo
   echo "=== uname -a ==="
   uname -a
+  echo
+  echo "=== loadavg ==="
+  echo "loadavg_1min: ${LOAD1}"
+  echo "cores: ${CORES}"
+  echo "load_quality: ${LOAD_QUALITY}"
 } > "${OUT_DIR}/machine-info.txt"
-log_ok "machine info captured -> ${OUT_DIR}/machine-info.txt"
+log_ok "machine info captured -> ${OUT_DIR}/machine-info.txt (load_quality=${LOAD_QUALITY})"
 
 MEM_GB="$(mem_total_gb)"
 log_info "MemTotal: ${MEM_GB} GB (headroom x${HEADROOM})"
@@ -176,14 +213,60 @@ for s in ${SURVIVORS}; do
   fi
 done
 
+# ─── 3b. Opt-in per-machine MERGE_S / L4 measurement (issue #102) ────
+# CAL_L4=1 runs ONE --l2-fold tree --l4-check probe (S=4, tx-limit 32:
+# 8 leaves -> 7 pairwise merges + a full L4 prove+verify) so this
+# machine's objective-4 constants are MEASURED instead of extrapolated
+# from the Phase A reference. The report script auto-detects
+# cal-l4check.jsonl and labels the constants accordingly.
+
+if [[ "${CAL_L4}" == "1" ]]; then
+  CAL_L4_S="${CAL_L4_S:-4}"
+  cal_l4_limit=$((CAL_L4_S * 8))
+  log_info "CAL_L4: measuring MERGE_S/L4_WALL (--l2-fold tree --l4-check, S=${CAL_L4_S}, tx-limit ${cal_l4_limit})"
+  rc=0
+  (
+    cd "${PROJECT_ROOT}/bench" && \
+      RUST_LOG=info \
+      "${BENCH_BIN}" \
+        --tx-per-proof "${CAL_L4_S}" \
+        --tx-limit "${cal_l4_limit}" \
+        --l2-fold tree \
+        --l4-check
+  ) > "${OUT_DIR}/cal-l4check.log" 2>&1 || rc=$?
+  grep '^BENCH_EVENT ' "${OUT_DIR}/cal-l4check.log" \
+    | sed 's/^BENCH_EVENT //' > "${OUT_DIR}/cal-l4check.jsonl" || true
+  if (( rc != 0 )); then
+    log_warn "CAL_L4 probe exited rc=${rc} (see ${OUT_DIR}/cal-l4check.log) -- falling back to extrapolated constants"
+    rm -f "${OUT_DIR}/cal-l4check.jsonl"
+  else
+    log_ok "CAL_L4 probe done ($(wc -l < "${OUT_DIR}/cal-l4check.jsonl") events) -- constants will carry label=measured"
+  fi
+fi
+
 # ─── 4. Objectives + report ──────────────────────────────────────────
 
-log_info "computing objectives (BLOCK_TX=${BLOCK_TX}, MERGE_S=${MERGE_S})"
+CIRCUIT_HASH="$(circuit_src_hash)"
+SHAPE_LABEL="${SHAPE_LABEL:-${HOST_LABEL}}"
+registry_args=()
+if [[ "${OUT_REGISTRY}" == "1" ]]; then
+  registry_args+=(--out-registry "${PROJECT_ROOT}/calibration" --shape-label "${SHAPE_LABEL}")
+  log_info "registry emission enabled -> calibration/${SHAPE_LABEL}.json"
+fi
+
+log_info "computing objectives (BLOCK_TX=${BLOCK_TX}, MERGE_S=${MERGE_S}, L4_WALL=${L4_WALL}, LAG_P50=${LAG_P50}, B={${BLOCK_SIZES}})"
 python3 "${SCRIPT_DIR}/s-calibrate-report.py" \
   --out-dir "${OUT_DIR}" \
   --block-tx "${BLOCK_TX}" \
   --merge-s "${MERGE_S}" \
+  --l4-wall "${L4_WALL}" \
+  --lag-p50 "${LAG_P50}" \
+  --lag-p99 "${LAG_P99}" \
+  --block-sizes "${BLOCK_SIZES}" \
+  --load-quality "${LOAD_QUALITY}" \
+  --circuit-hash "${CIRCUIT_HASH}" \
   --machine-label "${HOST_LABEL}" \
+  "${registry_args[@]}" \
   || die "report generation failed"
 
 log_ok "calibration complete -> ${OUT_DIR}/calibration.tsv, report.md, ledger.md"

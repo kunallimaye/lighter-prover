@@ -34,7 +34,7 @@
   fleet-collect fleet-publish fleet-teardown \
   stream-fetch-trace stream-record stream-replay stream-bench \
   stream-test stream-smoke stream-sweep \
-  s-calibrate s-calibrate-fleet
+  s-calibrate s-calibrate-fleet calibration-check
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -54,6 +54,7 @@ local-build: ## cargo build --release -p bench --bin bench
 local-test: ## Smoke test: bench at tx_per_proof=1 tx_limit=4, assert TOTAL line
 	@bash scripts/local.sh test
 	@$(MAKE) -C bench feeder-test
+	-@bash scripts/calibration-check.sh
 
 local-bench: ## Full bench run (TX_PER_PROOF/TX_LIMIT overridable)
 	@bash scripts/local.sh bench
@@ -226,15 +227,23 @@ stream-smoke: ## Manual real-proving smoke (~minutes; not part of any test targe
 stream-sweep: ## Rate-ladder sweep for max sustained tx/s (long-running; real proving)
 	@bash scripts/stream.sh sweep
 
-# ─── Chunk-size calibration (issue #85) ──────────────────────────────
+# ─── Chunk-size calibration (issues #85, #102) ───────────────────────
 # Per-machine calibration suite: probes degree-bracket tops only (#60
 # step-function finding), RAM-gates infeasible brackets, and reports the
-# optimal S per objective (serial fold / tree fold / s-per-tx) plus a
-# BENCH-LEDGER entry for Discussion #77.
+# optimal S per objective (serial fold / tree fold / s-per-tx / SLO
+# slack under the 20 s proof-lag budget) plus a BENCH-LEDGER entry for
+# Discussion #77.
 #
 # Knobs (s-calibrate): CAL_SVALUES= (default auto: "8 9 10 11 20 21 32"
-# + 40 when RAM clears the 2^20 gate), BLOCK_TX=500, MERGE_S=0.47,
-# CHUNKS=4, OUT_DIR=, HEADROOM=1.5.
+# + 40 when RAM clears the 2^20 gate), BLOCK_TX=500, MERGE_S=0.4764,
+# L4_WALL=5.155, LAG_P50=20, LAG_P99=40, BLOCK_SIZES="500 4000 9000",
+# CAL_L4=0|1 (opt-in measured MERGE_S/L4), OUT_REGISTRY=0|1 (emit
+# calibration/<shape>.json + README.md), SHAPE_LABEL=, CHUNKS=4,
+# OUT_DIR=, HEADROOM=1.5.
+#
+# calibration-check (issue #102): warn-only staleness guard comparing
+# the circuit/src/** hash in calibration/*.json against the working
+# tree. Never fails; also runs as a warning line inside local-test.
 #
 # s-calibrate-fleet reuses the bench-fleet provisioning path but with
 # machines-calibrate.tsv and per-S tx_limit=4*S. It deliberately does
@@ -243,8 +252,11 @@ stream-sweep: ## Rate-ladder sweep for max sustained tx/s (long-running; real pr
 # The historical comparison fleet (S in {1,2,4,6}, ADR-0003 §D4) is
 # untouched -- calibration is a separate, additive mode.
 
-s-calibrate: ## Per-machine chunk-size calibration (CAL_SVALUES=, BLOCK_TX=, MERGE_S=, OUT_DIR=)
+s-calibrate: ## Per-machine chunk-size calibration (CAL_SVALUES=, BLOCK_TX=, MERGE_S=, L4_WALL=, LAG_P50=, CAL_L4=1, OUT_REGISTRY=1, OUT_DIR=)
 	@bash scripts/s-calibrate.sh
+
+calibration-check: ## Staleness guard: WARN when calibration/ predates circuit/src changes (never fails)
+	@bash scripts/calibration-check.sh
 
 s-calibrate-fleet: ## Cloud calibration on machines-calibrate.tsv shapes (interactive cost gate; SHAPES=, REF=)
 	@$(FLEET) calibrate $(if $(SHAPES),--machines "$(SHAPES)",) $(if $(REF),--ref $(REF),)
