@@ -5,6 +5,7 @@ package builder
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/constraint"
@@ -125,4 +126,47 @@ func BuildCircuit(commonCircuitDataPath, verifierCircuitDataPath, proofPath stri
 	}
 
 	return r1cs, verifierOnlyCircuitDataRaw.CircuitDigest, nil
+}
+
+// BuildVerifierAssignment (issue #117) deserializes the SAME inputs as
+// BuildCircuit (the outer-wrapper proof + its common/verifier circuit data) and
+// returns the populated VerifierCircuit assignment plus the circuit digest.
+//
+// The returned assignment is what the gnark witness for plonk.Prove is built
+// from. Unlike a frontend solve, frontend.NewWitness takes assignment values
+// literally, so we must set the public Commitment to the value the circuit
+// constrains it to in VerifierCircuit.Define (circuit.go): the 32 public-input
+// bytes interpreted as a big-endian 256-bit integer (the circuit accumulates
+// pubInput[i] << (8*(31-i)) in the BN254 field, which reduces mod the scalar
+// field). This is the exact value the on-chain verifier checks.
+//
+// No field is fabricated — the Commitment is derived deterministically from the
+// real proof's own public inputs (the keccak256 batch_commitment bytes).
+func BuildVerifierAssignment(commonCircuitDataPath, verifierCircuitDataPath, proofPath string) (*circuit.VerifierCircuit, string, error) {
+	commonCircuitData := types.ReadCommonCircuitData(commonCircuitDataPath)
+	verifierOnlyCircuitDataRaw := types.ReadVerifierOnlyCircuitData(verifierCircuitDataPath)
+	verifierOnlyCircuitData := variables.DeserializeVerifierOnlyCircuitData(verifierOnlyCircuitDataRaw)
+	proofRaw := types.ReadProofWithPublicInputs(proofPath)
+	proofWithPis := variables.DeserializeProofWithPublicInputs(proofRaw)
+
+	if len(proofRaw.PublicInputs) != 32 {
+		return nil, "", fmt.Errorf("expected 32 public inputs, got %d", len(proofRaw.PublicInputs))
+	}
+	// commitment = big-endian uint256 of the 32 public-input bytes (mirrors
+	// VerifierCircuit.Define's MulAcc loop; the BN254 field reduces it mod p).
+	commitment := new(big.Int)
+	for _, b := range proofRaw.PublicInputs {
+		commitment.Lsh(commitment, 8)
+		commitment.Or(commitment, new(big.Int).SetUint64(b))
+	}
+
+	assignment := &circuit.VerifierCircuit{
+		Commitment:              frontend.Variable(commitment),
+		PublicInputs:            proofWithPis.PublicInputs,
+		Proof:                   proofWithPis.Proof,
+		VerifierOnlyCircuitData: verifierOnlyCircuitData,
+		CommonCircuitData:       commonCircuitData,
+	}
+
+	return assignment, verifierOnlyCircuitDataRaw.CircuitDigest, nil
 }

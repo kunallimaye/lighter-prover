@@ -15,6 +15,7 @@ import (
 	"github.com/consensys/gnark-crypto/kzg"
 	"github.com/consensys/gnark/backend/plonk"
 	"github.com/consensys/gnark/constraint"
+	"github.com/consensys/gnark/frontend"
 	"github.com/elliottech/gnark-plonky2-verifier/trusted_setup"
 	"github.com/elliottech/lighter-prover/snark/builder"
 )
@@ -29,6 +30,10 @@ func main() {
 	srsPath := flag.String("srs", "", "path to the srs file")
 	proofWithPublicInputsPath := flag.String("pis", "", "path to the proof with public inputs")
 	placeHolder := flag.String("place-holder", "true", "use place holder pis")
+	// Issue #117: the final-proof prove path (distinct from setup).
+	prove := flag.Bool("prove", false, "issue #117: build the gnark witness from the real outer-wrapper proof (-pis), run plonk.Prove, serialize the BN254 proof, and run plonk.Verify locally")
+	pkPath := flag.String("pk", "", "path to the existing proving key (.pk) for -prove")
+	vkPath := flag.String("vk", "", "path to the existing verifying key (.vk) for -prove")
 	flag.Parse()
 
 	if *circuitDataPath == "" {
@@ -36,6 +41,16 @@ func main() {
 	}
 	if *verifierCircuitDataPath == "" {
 		panic("verifier circuit data path is required")
+	}
+
+	// Issue #117: the final-proof prove path. Loads the existing pk/vk + the real
+	// outer-wrapper proof witness, runs plonk.Prove, serializes the BN254 proof to
+	// final::<digest>.proof, and runs plonk.Verify locally as an in-process sanity
+	// check (DISTINCT from #118's on-chain eth_call). The setup path below is
+	// unchanged.
+	if *prove {
+		runProve(*circuitDataPath, *verifierCircuitDataPath, *proofWithPublicInputsPath, *pkPath, *vkPath, *outputPath, *name)
+		return
 	}
 
 	var r1CS constraint.ConstraintSystem
@@ -136,4 +151,106 @@ func main() {
 		panic(err)
 	}
 	defer fSolidity.Close()
+}
+
+// runProve (issue #117) is the final-proof prove path that the repo was missing:
+// snark/ previously only did plonk.Setup. This:
+//
+//  1. builds the R1CS via builder.BuildCircuit (place-holder=false, so it uses
+//     the REAL outer-wrapper proof from -pis — the output of #116),
+//  2. loads the existing proving key (.pk) and verifying key (.vk) produced by
+//     the setup path / build_circuits.sh,
+//  3. builds the gnark witness from the SAME VerifierCircuit assignment
+//     BuildCircuit compiles (PublicInputs/Proof/VerifierOnlyCircuitData/
+//     CommonCircuitData), where gnark solves + constrains the public Commitment
+//     from the 32 public-input bytes,
+//  4. runs plonk.Prove(r1cs, pk, fullWitness) and serializes the BN254 proof to
+//     final::<digest>.proof,
+//  5. runs plonk.Verify(proof, vk, publicWitness) as an in-process sanity check
+//     (DISTINCT from #118's on-chain eth_call).
+//
+// No field is fabricated — the witness is built from the deserialized real proof.
+func runProve(circuitDataPath, verifierCircuitDataPath, proofPath, pkPath, vkPath, outputPath, name string) {
+	if proofPath == "" {
+		panic("-pis (outer-wrapper proof_with_public_inputs.json) is required for -prove")
+	}
+	if pkPath == "" {
+		panic("-pk (proving key) is required for -prove")
+	}
+	if vkPath == "" {
+		panic("-vk (verifying key) is required for -prove")
+	}
+
+	// 1. Build the R1CS from the REAL outer-wrapper proof (place-holder=false).
+	log.Println("PROVE: building R1CS from the real outer-wrapper proof (-pis)")
+	r1CS, digest, err := builder.BuildCircuit(circuitDataPath, verifierCircuitDataPath, proofPath)
+	if err != nil {
+		panic(fmt.Errorf("failed to build circuit: %v", err))
+	}
+
+	// Build the matching VerifierCircuit assignment for the witness.
+	assignment, _, err := builder.BuildVerifierAssignment(circuitDataPath, verifierCircuitDataPath, proofPath)
+	if err != nil {
+		panic(fmt.Errorf("failed to build verifier assignment: %v", err))
+	}
+
+	// 2. Load the existing proving + verifying keys.
+	log.Printf("PROVE: loading proving key from %s", pkPath)
+	pk := plonk.NewProvingKey(ecc.BN254)
+	pkFile, err := os.Open(pkPath)
+	if err != nil {
+		panic(fmt.Errorf("failed to open proving key: %v", err))
+	}
+	defer pkFile.Close()
+	if _, err = pk.ReadFrom(pkFile); err != nil {
+		panic(fmt.Errorf("failed to read proving key: %v", err))
+	}
+
+	log.Printf("PROVE: loading verifying key from %s", vkPath)
+	vk := plonk.NewVerifyingKey(ecc.BN254)
+	vkFile, err := os.Open(vkPath)
+	if err != nil {
+		panic(fmt.Errorf("failed to open verifying key: %v", err))
+	}
+	defer vkFile.Close()
+	if _, err = vk.ReadFrom(vkFile); err != nil {
+		panic(fmt.Errorf("failed to read verifying key: %v", err))
+	}
+
+	// 3. Build the full witness (gnark solves for + constrains the Commitment).
+	log.Println("PROVE: building gnark witness from the real outer-wrapper proof")
+	fullWitness, err := frontend.NewWitness(assignment, ecc.BN254.ScalarField())
+	if err != nil {
+		panic(fmt.Errorf("failed to build full witness: %v", err))
+	}
+	publicWitness, err := fullWitness.Public()
+	if err != nil {
+		panic(fmt.Errorf("failed to extract public witness: %v", err))
+	}
+
+	// 4. Prove (the final wrap prove — the meaningful compute) + serialize.
+	log.Println("PROVE: running plonk.Prove (final wrap prove)")
+	proof, err := plonk.Prove(r1CS, pk, fullWitness)
+	if err != nil {
+		panic(fmt.Errorf("plonk.Prove failed: %v", err))
+	}
+
+	proofFileName := fmt.Sprintf("%s/%s::%s.proof", outputPath, name, digest)
+	proofFile, err := os.Create(proofFileName)
+	if err != nil {
+		panic(fmt.Errorf("failed to create proof file: %v", err))
+	}
+	defer proofFile.Close()
+	if _, err = proof.WriteTo(proofFile); err != nil {
+		panic(fmt.Errorf("failed to write proof: %v", err))
+	}
+	log.Printf("PROVE: serialized BN254 proof to %s", proofFileName)
+
+	// 5. Verify locally (in-process sanity check; NOT the #118 on-chain check).
+	log.Println("PROVE: running plonk.Verify (local in-process sanity check)")
+	if err = plonk.Verify(proof, vk, publicWitness); err != nil {
+		panic(fmt.Errorf("plonk.Verify FAILED: %v", err))
+	}
+
+	log.Printf("PROVE: SUCCESS — plonk.Prove produced and plonk.Verify ACCEPTED the BN254 proof %s (circuit digest %s). Issue #117 met: the final-proof prove path now exists. No field was fabricated.", proofFileName, digest)
 }

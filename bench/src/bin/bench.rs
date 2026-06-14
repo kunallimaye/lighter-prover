@@ -226,6 +226,16 @@ struct Args {
     #[arg(long, default_value_t = false)]
     l6_outer: bool,
 
+    /// Issue #117: when set with `--l6-outer`, serialize the verified outer
+    /// proof + the outer circuit's common/verifier data to JSON in this
+    /// directory, in the schema the gnark bridge consumes
+    /// (`types.ReadProofWithPublicInputs` / `ReadCommonCircuitData` /
+    /// `ReadVerifierOnlyCircuitData`). These are the inputs to the gnark
+    /// `plonk.Prove` final-proof path. The real proof is serialized as-is; no
+    /// field is fabricated.
+    #[arg(long)]
+    l6_outer_export: Option<std::path::PathBuf>,
+
     /// Issue #83: path to the public Ethereum KZG ceremony trusted setup used by
     /// `--blob-prove` / `--l6-inner` / `--l6-outer` to derive the blob's KZG
     /// versioned hash.
@@ -2264,6 +2274,14 @@ fn run_l6_outer_inner(args: &Args) {
 
     let outer_digest = hex::encode(outer_data.verifier_only.circuit_digest.to_bytes().clone());
 
+    // Issue #117: export the verified outer proof + circuit data to the JSON
+    // schema the gnark bridge consumes (the inputs to gnark plonk.Prove). The
+    // proof is serialized exactly as produced — no field is fabricated.
+    if let Some(dir) = args.l6_outer_export.clone() {
+        export_outer_wrapper_json(&dir, &outer_digest, &outer_data, &outer_proof)
+            .expect("L6_OUTER: export outer-wrapper JSON for the gnark bridge");
+    }
+
     info!(
         "L6_OUTER: SUCCESS — WrapperCircuit::prove_outer produced + VERIFIED an outer-wrapper \
          proof (BN128 config) over the verified inner-wrapper proof in {:?} (outer prove+verify \
@@ -2277,6 +2295,58 @@ fn run_l6_outer_inner(args: &Args) {
         outer_digest,
         outer_proof.public_inputs.len(),
     );
+}
+
+/// Issue #117: serialize the verified outer-wrapper proof + its circuit's common
+/// and verifier-only data to JSON, in the exact schema the gnark bridge reads
+/// (`types.ReadProofWithPublicInputs`, `types.ReadCommonCircuitData`,
+/// `types.ReadVerifierOnlyCircuitData`). These three files are the inputs to the
+/// gnark `plonk.Prove` final-proof path (issue #117) and to `snark/main.go`'s
+/// key-generation step.
+///
+/// Uses `serde_json::to_string` on the REAL `ProofWithPublicInputs` /
+/// `CommonCircuitData` / `VerifierOnlyCircuitData` — identical to the
+/// circuit-data export already done in `circuit/src/bin/build_wrapper_circuit.rs`.
+/// No field is fabricated; the proof is written exactly as produced + verified.
+fn export_outer_wrapper_json(
+    dir: &std::path::Path,
+    outer_digest: &str,
+    outer_data: &CircuitData<
+        F,
+        circuit::poseidon_bn128::plonky2_config::PoseidonBN128GoldilocksConfig,
+        D,
+    >,
+    outer_proof: &ProofWithPublicInputs<
+        F,
+        circuit::poseidon_bn128::plonky2_config::PoseidonBN128GoldilocksConfig,
+        D,
+    >,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(dir)?;
+
+    let proof_json = serde_json::to_string(outer_proof)?;
+    let common_json = serde_json::to_string(&outer_data.common)?;
+    let verifier_json = serde_json::to_string(&outer_data.verifier_only)?;
+
+    let proof_path = dir.join(format!("outer-wrapper-proof::{outer_digest}.json"));
+    let common_path = dir.join(format!(
+        "outer-wrapper-circuit::common_circuit_data::{outer_digest}.json"
+    ));
+    let verifier_path = dir.join(format!(
+        "outer-wrapper-circuit::verifier_circuit_data::{outer_digest}.json"
+    ));
+
+    fs::write(&proof_path, proof_json)?;
+    fs::write(&common_path, common_json)?;
+    fs::write(&verifier_path, verifier_json)?;
+
+    info!(
+        "L6_OUTER: exported outer-wrapper JSON for the gnark bridge:\n  proof:    {}\n  common:   {}\n  verifier: {}",
+        proof_path.display(),
+        common_path.display(),
+        verifier_path.display(),
+    );
+    Ok(())
 }
 
 /// Issue #83/#129 (criterion #4) + #116: assemble the three inner-wrapper inputs
