@@ -161,7 +161,7 @@ logs-clean: ## Remove all log files
 # per-microarch images (build them first: make cloud-bench-build).
 # See scripts/bench-fleet/README.md for prerequisites (gcloud auth,
 # kunal-scratch setup via make admin-cloud-init) and
-# docs/decisions/ADR-0001-gcp-fleet-bench-architecture.md for the
+#   docs/decisions/ADR-0007-gcp-fleet-bench-architecture.md for the
 # architecture rationale.
 #
 # Note: `fleet-run` passes --yes to skip the Make-level prompt; the

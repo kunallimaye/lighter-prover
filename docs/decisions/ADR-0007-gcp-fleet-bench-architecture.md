@@ -1,10 +1,17 @@
-# ADR-0001: GCP fleet bench architecture
+# ADR-0007: GCP fleet bench architecture
 
 - **Status**: Accepted
 - **Date**: 2026-06-10
 - **Issue**: #11
 - **Supersedes**: —
 - **Superseded by**: —
+
+> **Renumbering note (#68).** This ADR was originally filed as `ADR-0001`,
+> colliding with `ADR-0001-container-topology.md`. Per #68 the collision was
+> resolved by keeping container-topology at 0001 (it is the canonical
+> `ADR-0001` referenced from the README) and renumbering this file to the
+> next free number, **0007** (0002 is reserved for #10's
+> `ADR-0002-l4-l8-driver.md`; 0003–0006 are taken). Content is unchanged.
 
 ## Context
 

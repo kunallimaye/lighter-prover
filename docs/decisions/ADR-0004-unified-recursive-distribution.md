@@ -6,7 +6,7 @@
 **Issues**: design capstone for the parallel-proof-generation story (#75); recasts #61 #101 #83 #95 as parameters; generalizes the k=1 bound flagged by #107; supersedes the record amended by #99
 **Companion sessions (referenced, NOT duplicated)**: the #107 remediation (Tier-1 SLO-model relabel, items #19–22) and the #99 ADR-0003 amendment run in parallel; this ADR cites their outputs rather than restating them.
 
-> **Numbering note (collision, proceed anyway).** `docs/decisions/` still contains **two** files numbered `ADR-0001` (`ADR-0001-gcp-fleet-bench-architecture.md` and `ADR-0001-container-topology.md`); resolving that collision is **#68** and remains open (PR #106 explicitly does not close it). `ADR-0002` is **reserved** for #10's `ADR-0002-l4-l8-driver.md` and is deliberately left free. The next un-taken number is therefore **0004** (0003 = prover-cell streaming architecture). This ADR takes 0004 and notes the unresolved #68 collision rather than waiting on it.
+> **Numbering note.** This ADR takes **0004** (0003 = prover-cell streaming architecture). The historical `ADR-0001` collision (two files numbered `ADR-0001`) has since been resolved under **#68**: the GCP-fleet ADR was renumbered to `ADR-0007-gcp-fleet-bench-architecture.md`, leaving `ADR-0001-container-topology.md` as the sole 0001. `ADR-0002` remains **reserved** for #10's `ADR-0002-l4-l8-driver.md`.
 
 ---
 

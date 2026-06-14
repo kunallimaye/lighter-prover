@@ -10,7 +10,7 @@ OS and pull cross-compiled images from Artifact Registry — nothing is
 built on the VMs. All infrastructure lives in the `kunal-scratch` GCP
 project, configured through the repo-root `config.toml`.
 
-See [ADR-0001](../../docs/decisions/ADR-0001-gcp-fleet-bench-architecture.md)
+See [ADR-0007](../../docs/decisions/ADR-0007-gcp-fleet-bench-architecture.md)
 (including the #33 container-pivot addendum) for the architectural
 rationale.
 
