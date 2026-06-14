@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1.6
+#
+# tx-mix capture container — Cloud Run Job for the #128 tx-type gap.
+# ──────────────────────────────────────────────────────────────────────────
+#
+# DELIBERATELY SEPARATE from cicd/Containerfile (the heavy multi-stage Rust
+# `bench` image). This image packages ONLY the Python tx-mix capture tool
+# (bench/feeder/feeder.py + requests) so:
+#   * it builds in ~1 minute (no Rust toolchain, no cross-compile, no QEMU),
+#   * it cannot perturb the Rust bench build/image (issue #128 scope guard),
+#   * it stays tiny — a single-purpose capture worker.
+#
+# The tool (PR #152) is a well-behaved, rate-limited client: default
+# --max-rpm 80 under the 90/min per-IP cap, honors 429/Retry-After, and
+# 403-hard-fails (exit 2) rather than fabricating a mix from a geo-blocked
+# IP. This image is meant to run from asia-northeast1 (Tokyo), which is
+# normally NOT geo-blocked.
+#
+# Build args:
+#   LIGHTER_REF   Git SHA of the source baked in (provenance label).
+#
+# Runtime deps:
+#   python3        runs feeder.py
+#   requests       the tx-mix subcommand's only third-party dep (lazy import)
+#   google-cloud-cli  `gcloud storage cp` for the mandatory GCS upload
+#   tini           PID 1 with proper signal handling
+#   curl/ca-certs  egress-IP provenance probe (ipinfo.io) + TLS roots
+
+FROM python:3.12-slim-bookworm AS runtime
+
+ARG LIGHTER_REF=unknown
+
+LABEL org.opencontainers.image.revision="${LIGHTER_REF}"
+LABEL org.opencontainers.image.source="https://github.com/kunallimaye/lighter-prover"
+LABEL io.lighter.component="txmix-capture"
+
+# System deps: tini, curl/ca-certs, and google-cloud-cli (ships
+# `gcloud storage`, the modern gsutil replacement the entrypoint uses).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      tini \
+      ca-certificates \
+      curl \
+      gnupg \
+ && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+      | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+      > /etc/apt/sources.list.d/google-cloud-sdk.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends google-cloud-cli \
+ && apt-get purge -y --auto-remove gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
+# Python dep for the tx-mix network path (requests; lazy-imported by the
+# tool). Pin to the repo's requirements floor.
+RUN pip install --no-cache-dir "requests>=2.31"
+
+# Non-root user. Cloud Run picks its own UID, but a sane default helps
+# local podman/docker runs.
+RUN useradd --create-home --shell /bin/bash --uid 1000 txmix
+
+WORKDIR /app
+
+# The capture tool + its entrypoint. Only these two files — the tool is
+# self-contained (stdlib + requests). feeder.py's --sample-block fallback
+# reads bench/bench_test.json from the repo, but this Job never uses that
+# offline path (it does a real network capture), so we don't ship it.
+COPY bench/feeder/feeder.py /app/feeder.py
+COPY cicd/txmix-entrypoint.sh /app/txmix-entrypoint.sh
+RUN chmod +x /app/txmix-entrypoint.sh \
+ && chown -R txmix:txmix /app
+
+USER txmix
+
+ARG LIGHTER_REF
+ENV LIGHTER_REF=${LIGHTER_REF} \
+    TXMIX_MAX_RPM=80 \
+    TXMIX_BLOCKS=200 \
+    TXMIX_REGION=asia-northeast1 \
+    TXMIX_PAGE_LIMIT=100 \
+    TXMIX_LABEL=run \
+    PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/txmix-entrypoint.sh"]

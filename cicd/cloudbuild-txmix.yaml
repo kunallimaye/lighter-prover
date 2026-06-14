@@ -1,0 +1,48 @@
+# Cloud Build pipeline — tx-mix capture container (issue #128).
+#
+# Builds + pushes the SINGLE-PURPOSE, lightweight Python tx-mix capture
+# image (cicd/Containerfile.txmix). Deliberately separate from the heavy
+# Rust `bench` pipeline (cicd/cloudbuild.yaml): no Rust toolchain, no
+# cross-compile, no QEMU, no multi-arch matrix — just one amd64 image that
+# packages bench/feeder/feeder.py + requests. Builds in ~1 minute.
+#
+# This keeps the #128 capture-job infrastructure fully decoupled from the
+# bench build (scope guard) and avoids colliding with the bench image tag
+# space (this pushes `.../lighter-prover-txmix/txmix`, NOT `.../bench`).
+#
+# LIGHTER_REF: the git SHA baked into the image (provenance). Manual
+# `gcloud builds submit` must pass COMMIT_SHA via --substitutions
+# (built-ins only auto-populate on git triggers).
+
+steps:
+  - id: build-and-push-txmix
+    name: 'gcr.io/cloud-builders/docker'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euxo pipefail
+        docker build \
+          -f cicd/Containerfile.txmix \
+          --build-arg LIGHTER_REF=${COMMIT_SHA} \
+          -t ${_IMAGE_NAME}:${COMMIT_SHA} \
+          -t ${_IMAGE_NAME}:latest \
+          .
+        docker push ${_IMAGE_NAME}:${COMMIT_SHA}
+        docker push ${_IMAGE_NAME}:latest
+
+images:
+  - '${_IMAGE_NAME}:${COMMIT_SHA}'
+  - '${_IMAGE_NAME}:latest'
+
+substitutions:
+  # Artifact Registry image URI. asia-northeast1 (Tokyo) so the Cloud Run
+  # Job in the same region pulls locally. Override via --substitutions.
+  _IMAGE_NAME: 'asia-northeast1-docker.pkg.dev/${PROJECT_ID}/lighter-prover-txmix/txmix'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  dynamic_substitutions: true
+
+# Single tiny amd64 image — minutes, not the bench pipeline's hours.
+timeout: '1200s'
