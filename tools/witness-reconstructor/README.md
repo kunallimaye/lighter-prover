@@ -1,7 +1,8 @@
-# Go Witness Reconstructor — Phase 0 (replay harness) + Phase 1 (Cancel) + Phase 2 (Modify)
+# Go Witness Reconstructor — Phase 0 (replay) + Phase 1 (Cancel) + Phase 2 (Modify) + Phase 4 (empties + larger blocks)
 
-Issues: [#122](../../README.md) (Phase 0), #123 (Phase 1: Cancel), and #124
-(Phase 2: order-book aggregation tree + non-crossing Modify) of epic #121.
+Issues: [#122](../../README.md) (Phase 0), #123 (Phase 1: Cancel), #124
+(Phase 2: order-book aggregation tree + non-crossing Modify), and #126 (Phase 4:
+empties + larger-block generation) of epic #121.
 Design:
 [`docs/design/go-witness-reconstructor.md`](../../docs/design/go-witness-reconstructor.md).
 Feasibility: #120.
@@ -22,6 +23,11 @@ A Go harness that REPLAYS the bundled 500-tx block fixture
   depth-80 order-book aggregation tree (internal nodes carry 4 aggregated sums)
   and the NON-CROSSING Modify after `order_book_root`, validated bit-for-bit
   against ground truth.
+- **Phase 4 (empties tx_type 0 + larger-block generation)**: prove an empty tx is
+  a verified no-op (every root unchanged), then COMPOSE the no-engine tx types
+  (Cancel + Modify + empties) into a VARIED, larger multi-tx block with a
+  bit-for-bit-valid `order_book_root` state chain — the G2 "varied synthetic
+  data" payoff.
 
 This proves the hashing + Merkle-fold machinery and the Cancel state transition
 are faithful before later phases build on them. It is a separate Go program with
@@ -62,16 +68,19 @@ Verified Merkle rules (circuit `merkle_helpers.rs:84/134`, `hash_utils.rs:88`):
 ```sh
 cd tools/witness-reconstructor
 go build ./...
-go run . -json ../../bench/bench_test.json                 # Phase 0+1+2 summary
+go run . -json ../../bench/bench_test.json                 # Phase 0+1+2+4 summary
 go run . -json ../../bench/bench_test.json -evidence        # one worked Cancel example
 go run . -json ../../bench/bench_test.json -modify-evidence # one worked Modify example
+go run . -json ../../bench/bench_test.json -block-emit      # emit one generated varied block (per-tx)
 go test ./...                                               # locks in bit-for-bit invariants
 ```
 
 Flags: `-json <path>` (default `bench/bench_test.json`), `-limit N` (first N txs),
 `-v` (print Phase-0 evidence limbs for tx[0]), `-evidence` (print one worked
 Cancel expected-vs-got example and exit), `-modify-evidence` (print one worked
-Modify expected-vs-got example and exit).
+Modify expected-vs-got example and exit), `-block-emit` (emit one generated
+varied no-engine multi-tx block, per-tx, and exit), `-pad-every N` (insert an
+empty-tx pad after every N real txs in the generated block; default 2).
 
 ## Phase 1 — Cancel (tx_type 15) reconstruction (#123)
 
@@ -172,6 +181,57 @@ re-insert are Phase-3 matching-engine scope (#125).
 
 **Scope (strict):** Modify (17) NON-CROSSING order-book root only. No matching
 engine, no fills/trades (crossing path #125), no `bench/src/` Rust code touched.
+
+## Phase 4 — empties (tx_type 0) padding + larger-block generation (#126)
+
+**Empties (TX_TYPE_EMPTY = 0) — verified no-op, cheapest block inflation.** An
+empty tx (`constants.rs:115`) runs the FULL per-tx verification pipeline
+unconditionally (so valid before-leaves+proofs are still required and the prover
+does real work) but every per-type `apply()` is gated off and the api_key nonce
+is NOT incremented (`tx_constraints.rs:2601`, `nonce + is_layer2.target`, and
+`is_layer2` is false for tx_type 0). So EVERY root is unchanged: an empty tx can
+be inserted anywhere in a chained block without breaking the state chain — the
+cheapest way to inflate block size for benchmarking.
+
+The bundled sample has NO tx_type-0 txs (its mix is {14,15,17,21}), so the
+invariant is validated CONSTRUCTIVELY against REAL ground-truth leaves: synthesize
+an empty tx from each real tx's before-leaves+proofs and assert every
+reconstructed AFTER root equals the BEFORE (JSON-stored) root, bit-for-bit. The
+BEFORE fold is independently anchored to the stored roots, so this is the precise
+circuit invariant, not a tautology.
+
+| Empty-tx no-op (synthesized from all 500 real txs) | Coverage |
+|---|---|
+| `api_key_root` AFTER==BEFORE (vs `akr`) | **500/500 bit-for-bit** |
+| `account_orders_root` AFTER==BEFORE (vs `aor`) | **500/500 bit-for-bit** |
+| `order_book_root` AFTER==BEFORE (vs `mmb.r`) | **500/500 bit-for-bit** |
+| `market_leaf` AFTER==BEFORE (vs `mmb`) | **500/500 bit-for-bit** |
+
+**Larger-block generation (the G2 payoff).** The reconstructor composes the
+no-engine tx types — Cancel (15), non-crossing Modify (17), empties (0) — into a
+VARIED, larger multi-tx block over a single market and validates the entire
+`order_book_root` state chain bit-for-bit: each tx's after-root IS the next tx's
+before-root (`block_tx_constraints.rs:426-462`). Real-tx roots are anchored to
+JSON ground truth (each before-root == stored `mmb.r`, each after-root == the next
+same-market tx's stored before-root — exactly Phase 1/2's anchor); empty-tx pads
+inflate the block while preserving the running root.
+
+Emitted example (`go run . -block-emit`): a 7-tx block on market 45 —
+**4 cancels + 1 modify + 2 empty pads** — with a `chainValid = true` bit-for-bit
+`order_book_root` chain. This is a varied, larger, state-chain-valid block built
+ENTIRELY from no-matching-engine tx types — the synthetic-data payoff that
+unblocks G4 stress-testing, with no matching engine and no fabricated roots.
+
+**Honest scope boundary (recorded, not hidden).** This composes + validates the
+ORDER-BOOK `order_book_root` state chain — the root the no-engine tx types fully
+determine. A fully prover-serializable NOVEL block additionally needs signatures,
+public data, and the full account-tree leaf, which are gated on full initial
+state from the sequencer (#120/#126) and the matching engine (#125). What is
+delivered + validated here is the engine-free, bit-for-bit-correct varied multi-tx
+state chain.
+
+**Scope (strict):** empties (0) + composition of the no-engine types only. No
+matching engine, no crossing/fills (#125), no `bench/src/` Rust code touched.
 
 ## What it validates (and current coverage)
 
