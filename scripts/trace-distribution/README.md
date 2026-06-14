@@ -31,10 +31,51 @@ It answers the three load questions the trace format *can* answer:
 > **sample of size 1** (one block), not a real mix. Do not treat it as a
 > population distribution.
 >
-> **What would resolve the tx-mix question:** per-tx data from the explorer
-> (tx-type alongside each tx), or extending the feeder's `record` tooling to
-> capture tx-type counts alongside `tx_count`. Until then the mix — and thus
-> the Phase-3 scoping decision — is **UNRESOLVED on real data**.
+> **What would resolve the tx-mix question:** per-tx data from a source that
+> carries `tx_type`. The feeder now ships a `tx-mix` subcommand for exactly
+> this (see *“Capturing the tx-type mix”* below). The catch confirmed by
+> probing the live endpoints (2026-06-14): the **explorer does NOT serve
+> tx_type** (its block endpoints carry only `block_size` /
+> `total_transactions` / `markets`), and the **only HTTP source that exposes
+> per-tx `tx_type` — the zklighter mainnet `blockTxs` API — geo-blocks this
+> environment with HTTP 403** (the same block the main REST API applies). So
+> the tooling exists and runs, but a representative window is **not collectable
+> from a geo-blocked network**; the mix — and thus the Phase-3 scoping
+> decision — stays **UNRESOLVED on real data** until `tx-mix` is run from a
+> non-geo-blocked network.
+
+## Capturing the tx-type mix (issue #128 tx-mix gap)
+
+The tx-type mix is **not in the trace format** and **not served by the
+explorer**, so it is captured separately by the feeder's `tx-mix` subcommand,
+which aggregates per-block `tx_type` counts from the zklighter `blockTxs` API
+over a height window. Operator interface (always go through `make`):
+
+```bash
+# Capture the mix over the N most-recent blocks (network; needs a
+# non-geo-blocked source — see the caveat above).
+make -C bench stream-tx-mix BLOCKS=200
+
+# Capture an explicit inclusive height window.
+make -C bench stream-tx-mix HEIGHTS="262870000 262870199"
+
+# Offline: tabulate the in-repo single sample block. Honestly labeled
+# sample-size-1 — a SAMPLE, never "the distribution".
+make -C bench stream-tx-mix SAMPLE=1
+```
+
+Honesty guarantees baked into the tool:
+
+- A capture of fewer than 30 blocks is labeled `sample-size-N`, never “the
+  distribution.”
+- If `blockTxs` returns HTTP 403 (geo-block), the tool prints the precise
+  blocker and exits non-zero — it never fabricates a mix.
+- Unknown `tx_type` values are carried through as `type_<n>` rather than
+  silently dropped, so a schema drift surfaces.
+
+The four dominant Lighter trading types are `14 create`, `15 cancel`,
+`17 modify`, `21 claim` (`bench/feeder/feeder.py:TX_TYPE_NAMES`, from
+`circuit/src` naming).
 
 ## Usage
 

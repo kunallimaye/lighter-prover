@@ -11,10 +11,12 @@ Subcommands:
   replay     re-emit a recorded trace with scaled inter-arrival gaps
   synth-peak fabricate an idealized back-to-back-500-tx trace from a rate
   peak-hours report top-N hours by tx/s from the explorer stats API
+  tx-mix     capture per-block tx_type counts -> the mainnet tx-mix (#128)
 
-Only the network subcommands (record, peak-hours) need third-party deps
-(websockets, requests — see requirements.txt); they are imported lazily so
-replay/synth-peak/tests run on a bare Python 3 stdlib.
+Only the network subcommands (record, peak-hours, tx-mix) need third-party
+deps (websockets, requests — see requirements.txt); they are imported lazily
+so replay/synth-peak/tests (and `tx-mix --sample-block`) run on a bare
+Python 3 stdlib.
 
 Policies (see spec §6) applied by replay, IN THIS ORDER:
   P2 expand height jumps -> P1 fill nulls with mean-of-non-null -> P4 round.
@@ -34,6 +36,29 @@ WS_URL = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true"
 POLL_URL = "https://explorer.elliot.ai/api/blocks"
 STATS_URL = "https://explorer.elliot.ai/api/stats/tx?aggregation_period=1h"
 UA = "lighter-prover-feeder/48 (research; single conn; <=85 req/min)"
+
+# tx-MIX capture (issue #128 tx-type gap). The explorer's block endpoints
+# carry only block_size / total_transactions — NO per-tx tx_type field — so
+# the only HTTP source that exposes tx_type per transaction is the zklighter
+# mainnet API's blockTxs endpoint. (Confirmed by probing: explorer
+# /api/blocks/{h} returns {total_transactions, markets, logs} only.)
+# That API geo-blocks some IPs with HTTP 403 (same block the main REST API
+# applies, see cmd_peak_hours), which `tx-mix` reports honestly rather than
+# inventing numbers.
+TXMIX_BLOCK_URL = "https://mainnet.zklighter.elliot.ai/api/v1/blockTxs"
+TXMIX_POLL_PERIOD_S = 0.71  # ~84.5 req/min, under the 90/min per-IP limit
+
+# Lighter tx_type enum -> human name. The four dominant trading types are
+# {14,15,17,21}; others are carried through as "type_<n>" so an unexpected
+# type is never silently dropped. Names follow circuit/src naming
+# (tx_constraints.rs): L2_CREATE_ORDER=14, L2_CANCEL_ORDER=15,
+# L2_MODIFY_ORDER=17, INTERNAL_CLAIM_ORDER=21.
+TX_TYPE_NAMES = {
+    14: "create",   # L2_CREATE_ORDER
+    15: "cancel",   # L2_CANCEL_ORDER
+    17: "modify",   # L2_MODIFY_ORDER
+    21: "claim",    # INTERNAL_CLAIM_ORDER
+}
 
 BLOCK_TX_CAP = 500          # chain per-block tx cap (spec §6.2)
 POLL_PERIOD_S = 0.71        # ~84.5 req/min, under the 90/min per-IP limit
@@ -172,6 +197,78 @@ def aggregate_rate(expanded):
 def median_inter_block_gap_ms(expanded):
     gaps = [b["ts_ms"] - a["ts_ms"] for a, b in zip(expanded, expanded[1:])]
     return statistics.median(gaps) if gaps else 0.0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# tx-MIX helpers (issue #128 tx-type gap) — pure, stdlib-only, unit tested.
+# These aggregate per-tx tx_type values into counts; the network capture
+# (cmd_tx_mix) feeds them rows from the blockTxs API, and the sample-block
+# fallback feeds them the in-repo bench_test.json (labeled n=1 — a SAMPLE,
+# never "the distribution").
+# ──────────────────────────────────────────────────────────────────────
+
+def tx_type_name(tx_type):
+    """Human name for a Lighter tx_type, falling back to 'type_<n>'."""
+    return TX_TYPE_NAMES.get(tx_type, f"type_{tx_type}")
+
+
+def count_tx_types(txs):
+    """Count tx_type occurrences over an iterable of tx dicts.
+
+    Each item must carry a "tx_type" key (the field the blockTxs API and the
+    in-repo sample block both use). Items lacking it are skipped and counted
+    separately so a schema drift surfaces instead of silently shrinking the
+    mix. Returns (counts: {int: int}, skipped: int).
+    """
+    counts = {}
+    skipped = 0
+    for t in txs:
+        if isinstance(t, dict) and "tx_type" in t and t["tx_type"] is not None:
+            tt = int(t["tx_type"])
+            counts[tt] = counts.get(tt, 0) + 1
+        else:
+            skipped += 1
+    return counts, skipped
+
+
+def merge_tx_counts(into, more):
+    """Accumulate one count dict into another (in place); returns `into`."""
+    for k, v in more.items():
+        into[k] = into.get(k, 0) + v
+    return into
+
+
+def tx_mix_proportions(counts):
+    """{tx_type: count} -> sorted list of (tx_type, name, count, fraction).
+
+    Sorted by descending count then ascending tx_type for a stable order.
+    fraction is count/total (0.0 if total is 0).
+    """
+    total = sum(counts.values())
+    rows = []
+    for tt in sorted(counts, key=lambda k: (-counts[k], k)):
+        frac = counts[tt] / total if total else 0.0
+        rows.append((tt, tx_type_name(tt), counts[tt], frac))
+    return rows
+
+
+def render_tx_mix(counts, blocks, source, label):
+    """Render a tx-type mix table. `label` MUST honestly state sample size,
+    e.g. 'sample-size-1 (one block)' or 'window: heights A-B, N blocks'."""
+    total = sum(counts.values())
+    lines = []
+    lines.append("=" * 60)
+    lines.append("TX-TYPE MIX  (issue #128 — tx-mix gap)")
+    lines.append("=" * 60)
+    lines.append(f"source : {source}")
+    lines.append(f"label  : {label}")
+    lines.append(f"blocks : {blocks}   txs: {total:,}")
+    lines.append("-" * 60)
+    lines.append(f"{'tx_type':>7}  {'name':<10}  {'count':>10}  {'share':>8}")
+    for tt, name, cnt, frac in tx_mix_proportions(counts):
+        lines.append(f"{tt:>7}  {name:<10}  {cnt:>10,}  {frac * 100:>7.2f}%")
+    lines.append("=" * 60)
+    return "\n".join(lines)
 
 
 def replay_schedule(expanded, speed, base_ts_ms, loop_seam_ms=None,
@@ -384,6 +481,179 @@ def cmd_peak_hours(args, out=None):
             ts_s, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
         print(f"{i:>4}  {when:<20}  {rate:>10.1f}  {int(count):>12}",
               file=out)
+    return 0
+
+
+# ──────────────────────────────────────────────────────────────────────
+# tx-mix  (issue #128 tx-type gap — the instrumentation fallback)
+#
+# The tx-type MIX is NOT in the trace format ({ts_ms,height,tx_count} only)
+# and is NOT served by the explorer (its block endpoints carry block_size /
+# total_transactions / markets, no per-tx tx_type). This subcommand captures
+# per-block tx_type counts from the only HTTP source that exposes them — the
+# zklighter mainnet blockTxs API — over a height window, and aggregates the
+# real mix. If that API geo-blocks the caller (HTTP 403, as it does for the
+# main REST API), the subcommand says so honestly and exits non-zero rather
+# than fabricate a distribution. `--sample-block` reads the in-repo single
+# sample block offline (labeled sample-size-1 — a SAMPLE, never the mix).
+# ──────────────────────────────────────────────────────────────────────
+
+def _extract_block_txs(payload):
+    """Find the per-tx list inside a blockTxs API response (shape-tolerant).
+
+    Returns a list of tx dicts (each expected to carry "tx_type"). Mirrors
+    _extract_buckets's defensive style so a minor API shape change doesn't
+    silently yield an empty mix.
+    """
+    if isinstance(payload, list):
+        return [t for t in payload if isinstance(t, dict)]
+    if isinstance(payload, dict):
+        for key in ("txs", "transactions", "blockTxs", "data", "result",
+                    "results", "items"):
+            v = payload.get(key)
+            if isinstance(v, list):
+                return [t for t in v if isinstance(t, dict)]
+        # Single nested block object?
+        for key in ("block", "data", "result"):
+            v = payload.get(key)
+            if isinstance(v, dict):
+                for k2 in ("txs", "transactions"):
+                    if isinstance(v.get(k2), list):
+                        return [t for t in v[k2] if isinstance(t, dict)]
+    raise ValueError(
+        f"no tx list in blockTxs response "
+        f"(type {type(payload).__name__}"
+        f"{', keys ' + str(sorted(payload.keys())) if isinstance(payload, dict) else ''})")
+
+
+def _fetch_block_txs(requests, height, limit):
+    """Fetch all txs for one block from the blockTxs API (paginated by index)."""
+    txs = []
+    index = 0
+    while True:
+        r = requests.get(
+            TXMIX_BLOCK_URL,
+            params={"block_height": height, "index": index, "limit": limit},
+            headers={"User-Agent": UA}, timeout=15)
+        r.raise_for_status()
+        page = _extract_block_txs(r.json())
+        if not page:
+            break
+        txs.extend(page)
+        if len(page) < limit:
+            break
+        index += len(page)
+    return txs
+
+
+def _tx_mix_from_sample(args, out):
+    """Offline fallback: the in-repo single sample block (sample-size-1)."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(here, "..", ".."))
+    path = args.sample_block if isinstance(args.sample_block, str) \
+        else os.path.join(repo_root, "bench", "bench_test.json")
+    try:
+        with open(path) as f:
+            block = json.load(f)
+    except OSError as e:
+        print(f"error: cannot read sample block {path}: {e}", file=sys.stderr)
+        return 1
+    txs = block.get("txs") if isinstance(block, dict) else None
+    if not isinstance(txs, list):
+        print(f"error: {path} has no 'txs' array", file=sys.stderr)
+        return 1
+    counts, skipped = count_tx_types(txs)
+    if skipped:
+        print(f"note: {skipped} tx(s) lacked a tx_type field", file=sys.stderr)
+    label = (f"sample-size-1 (ONE block, n={sum(counts.values())} txs) — "
+             f"a SAMPLE, not the mainnet distribution")
+    print(render_tx_mix(counts, blocks=1, source=path, label=label), file=out)
+    return 0
+
+
+def cmd_tx_mix(args, out=None):
+    out = out or sys.stdout
+    if args.sample_block is not None:
+        return _tx_mix_from_sample(args, out)
+
+    import requests  # lazy: keep offline subcommands dependency-free
+    # Resolve the height window. With --heights A B we capture [A, B];
+    # otherwise --blocks N most-recent blocks ending at the chain tip.
+    if args.heights:
+        lo, hi = args.heights
+        if hi < lo:
+            lo, hi = hi, lo
+        heights = list(range(lo, hi + 1))
+    else:
+        try:
+            r = requests.get(POLL_URL, headers={"User-Agent": UA}, timeout=15)
+            r.raise_for_status()
+            body = r.json()
+            blocks = body if isinstance(body, list) else body.get("blocks", [])
+            tip = max(b.get("block_height") for b in blocks
+                      if b.get("block_height") is not None)
+        except requests.exceptions.RequestException as e:
+            print(f"error: could not resolve chain tip from {POLL_URL}: {e}",
+                  file=sys.stderr)
+            return 1
+        heights = list(range(tip - args.blocks + 1, tip + 1))
+
+    total = {}
+    captured_blocks = 0
+    captured_heights = []
+    for h in heights:
+        t0 = time.time()
+        try:
+            txs = _fetch_block_txs(requests, h, args.page_limit)
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code if e.response is not None else "?"
+            print(f"error: blockTxs API returned HTTP {code} for height {h}.",
+                  file=sys.stderr)
+            if code == 403:
+                print(
+                    "BLOCKER: the zklighter mainnet API (the only HTTP source "
+                    "exposing per-tx tx_type) geo-blocks this IP with 403 — "
+                    "the same block the main REST API applies (see peak-hours).\n"
+                    "The explorer API does NOT carry tx_type (block endpoints "
+                    "return block_size/total_transactions/markets only), so the "
+                    "tx-mix cannot be measured from here. Run this command from "
+                    "a non-geo-blocked network to capture the real mix, or use "
+                    "--sample-block for the in-repo sample-size-1 block.",
+                    file=sys.stderr)
+            return 2
+        except requests.exceptions.RequestException as e:
+            print(f"error: blockTxs request failed for height {h}: {e}",
+                  file=sys.stderr)
+            return 1
+        counts, skipped = count_tx_types(txs)
+        if skipped:
+            print(f"note: height {h}: {skipped} tx(s) lacked tx_type",
+                  file=sys.stderr)
+        merge_tx_counts(total, counts)
+        if txs:
+            captured_blocks += 1
+            captured_heights.append(h)
+        # polite pacing under the per-IP rate limit
+        sleep_for = max(0.0, TXMIX_POLL_PERIOD_S - (time.time() - t0))
+        if sleep_for and h != heights[-1]:
+            time.sleep(sleep_for)
+
+    if not total:
+        print("error: no transactions captured in the requested window.",
+              file=sys.stderr)
+        return 1
+
+    n = sum(total.values())
+    win = (f"heights {captured_heights[0]}-{captured_heights[-1]}"
+           if captured_heights else "none")
+    if captured_blocks < 30:
+        label = (f"sample-size-{captured_blocks} ({captured_blocks} blocks, "
+                 f"n={n} txs; {win}) — small sample, NOT the full distribution")
+    else:
+        label = (f"window: {win}, {captured_blocks} blocks, n={n} txs")
+    source = f"{TXMIX_BLOCK_URL} (block_height in {win})"
+    print(render_tx_mix(total, captured_blocks, source, label), file=out)
     return 0
 
 
@@ -637,6 +907,22 @@ def build_parser():
     ph.add_argument("--top", type=int, default=10,
                     help="number of top hours to report (default 10)")
     ph.set_defaults(func=cmd_peak_hours)
+
+    pm = sub.add_parser(
+        "tx-mix",
+        help="capture per-block tx_type counts -> the mainnet tx-mix (#128)")
+    pm.add_argument("--blocks", type=int, default=200,
+                    help="capture the N most-recent blocks (default 200)")
+    pm.add_argument("--heights", type=int, nargs=2, metavar=("LO", "HI"),
+                    default=None,
+                    help="capture an explicit inclusive height range LO HI")
+    pm.add_argument("--page-limit", type=int, default=100,
+                    help="blockTxs pagination page size (default 100)")
+    pm.add_argument("--sample-block", nargs="?", const=True, default=None,
+                    metavar="PATH",
+                    help="offline: count tx_type in the in-repo sample block "
+                         "(sample-size-1); optional PATH overrides the default")
+    pm.set_defaults(func=cmd_tx_mix)
     return p
 
 
