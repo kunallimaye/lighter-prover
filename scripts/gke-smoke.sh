@@ -50,7 +50,9 @@ GKE_TF_PREFIX="${GKE_TF_PREFIX:-lighter-prover/gke}"
 GKE_BUILD_SA="${GKE_BUILD_SA:-}"
 GKE_BACKLOG_MSGS="${GKE_BACKLOG_MSGS:-30}"
 GKE_PUBSUB_TOPIC="${GKE_PUBSUB_TOPIC:-lighter-prover-smoke-dispatch}"
-GKE_PUBSUB_SUB="${GKE_PUBSUB_SUB:-lighter-prover-smoke-dispatch-sub}"
+# Note: the subscription name the HPA watches lives in smoke.tfvars
+# (pubsub_subscription) — it is not passed via the pipeline, so it is
+# intentionally not a script knob here.
 
 _require_project() {
   [[ -n "${GKE_PROJECT}" ]] || die "GKE_PROJECT (or BUILD_PROJECT/GCP_PROJECT) must be set"
@@ -99,14 +101,12 @@ cmd_down() {
 }
 
 cmd_plan() {
-  _require_project
-  log_info "GKE smoke terraform plan (no mutation)"
-  # Plan locally is not possible without the GCS backend + provider auth;
-  # the up pipeline's apply is the gated mutation. This verb runs a
-  # build-side `terraform plan` by reusing the smoke pipeline's init+plan
-  # path is out of scope; instead we surface fmt/validate guidance.
-  log_info "Run 'make gke-smoke-up' to apply (apply is auto-approve in CI)."
-  log_info "For a dry check, run: (cd cicd/terraform/gke && terraform init -backend=false && terraform validate)"
+  # A local plan needs the GCS backend + provider auth, which only the
+  # GKE-capable build SA has. The gated mutation is the up pipeline's
+  # auto-approve apply; for a no-credentials dry check use fmt/validate.
+  log_info "GKE smoke: no local plan (backend + provider auth live in the build SA)."
+  log_info "Apply:     make gke-smoke-up"
+  log_info "Dry check: (cd cicd/terraform/gke && terraform init -backend=false && terraform validate)"
 }
 
 case "${1:-}" in
