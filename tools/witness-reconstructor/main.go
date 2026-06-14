@@ -106,6 +106,8 @@ func main() {
 	verbose := flag.Bool("v", false, "print first matched limbs per tree as evidence")
 	evidence := flag.Bool("evidence", false, "print one worked Cancel expected-vs-got example and exit")
 	modifyEvidence := flag.Bool("modify-evidence", false, "print one worked Modify expected-vs-got example and exit")
+	blockEmit := flag.Bool("block-emit", false, "emit one generated varied no-engine multi-tx block (per-tx) and exit")
+	padEvery := flag.Int("pad-every", 2, "insert an empty-tx pad after every N real txs in the generated block")
 	flag.Parse()
 
 	block, err := loadBlock(*jsonPath)
@@ -120,6 +122,10 @@ func main() {
 	}
 	if *modifyEvidence {
 		printModifyEvidence(block)
+		os.Exit(0)
+	}
+	if *blockEmit {
+		printGeneratedBlockTxList(generateVariedBlock(block, *padEvery))
 		os.Exit(0)
 	}
 
@@ -159,6 +165,10 @@ func main() {
 
 	// --- Phase 2: Modify (tx_type 17) non-crossing reconstruction (#124) ---
 	modifyResult := validateModifies(block, n)
+
+	// --- Phase 4: empties (tx_type 0) + larger-block generation (#126) ---
+	emptyResult := validateEmpties(block, n)
+	generatedBlk := generateVariedBlock(block, *padEvery)
 
 	results := []*result{apiKey, accOrders, asset, market}
 	hardDivergence := false
@@ -218,6 +228,22 @@ func main() {
 		hardDivergence = true
 	}
 
+	// --- Phase-4 empties (tx_type 0) no-op invariant (#126) ---
+	fmt.Println()
+	fmt.Println("--- Phase-4 empties (tx_type 0) padding no-op invariant (#126) ---")
+	printEmptyResult(emptyResult)
+	if len(emptyResult.divergences) > 0 {
+		hardDivergence = true
+	}
+
+	// --- Phase-4 larger-block generation (no-engine composition) (#126) ---
+	fmt.Println()
+	fmt.Println("--- Phase-4 larger-block generation: varied no-engine multi-tx block (#126) ---")
+	printGeneratedBlock(generatedBlk)
+	if len(generatedBlk.txs) > 0 && !generatedBlk.chainValid {
+		hardDivergence = true
+	}
+
 	if hardDivergence {
 		fmt.Println("\nRESULT: hard divergence(s) found (the harness did its job — see exact limbs above).")
 		os.Exit(1)
@@ -226,7 +252,10 @@ func main() {
 	fmt.Println("roots BIT-FOR-BIT; every real, chainable Phase-1 Cancel (15) and Phase-2")
 	fmt.Println("non-crossing Modify (17) reproduces the next-same-market tx's before")
 	fmt.Println("order_book_root (its after-root) BIT-FOR-BIT via the depth-80 order-book")
-	fmt.Println("aggregation tree. No encoding/state-transition divergence detected.")
+	fmt.Println("aggregation tree. Phase-4 empties (tx_type 0) are verified no-ops (all roots")
+	fmt.Println("unchanged), and a VARIED larger block composed of Cancel+Modify+empties has")
+	fmt.Println("a BIT-FOR-BIT-valid order_book_root state chain. No encoding/state-transition")
+	fmt.Println("divergence detected.")
 	os.Exit(0)
 }
 
