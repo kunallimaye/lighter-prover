@@ -1,5 +1,5 @@
 title: "lighter-prover Deployer"
-description: "Curated permissions for the lighter-prover agent SA (operator identity). Daily operation: Cloud Build submits, AR push/pull, GCS results/TF-state access, logs read, plus Cloud Run (Jobs) perms for the Phase 2 runtime. Bound with 30-day expiry by scripts/cloud.sh::admin-cloud-init step 6."
+description: "Curated permissions for the lighter-prover agent SA (operator identity). Daily operation: Cloud Build submits, AR push/pull, GCS results/TF-state access, logs read, plus Cloud Run (Jobs) perms for the Phase 2 runtime. Now also in scope: GKE Autopilot cluster + Pub/Sub dispatch plane lifecycle (apply+destroy) for the cicd/terraform/gke deploy automation (PR #154, #167). Bound with 30-day expiry by scripts/cloud.sh::admin-cloud-init."
 stage: GA
 includedPermissions:
   # Artifact Registry — push/pull bench images (cloud-bench-build matrix,
@@ -69,9 +69,104 @@ includedPermissions:
   # (cloud-preflight reads the runtime project IAM policy).
   - resourcemanager.projects.get
   - resourcemanager.projects.getIamPolicy
-# NOTE: no compute.* permissions — the bench-fleet toolkit runs as
-# FLEET_ORCHESTRATOR_SA (see scripts/cloud.sh steps 10-11), a separate
-# identity from the agent SA this role binds to.
+  # GKE (container.*) — stand up + tear down the GKE Autopilot cluster
+  # that runs the distributed prover (cicd/terraform/gke, PR #154). The
+  # terraform creates a single google_container_cluster with
+  # enable_autopilot=true, then applies workloads (Deployments, PDB, HPA)
+  # through the kubernetes provider against the cluster's kube-apiserver.
+  # Enumerated lifecycle: create/get/list/update/delete the cluster,
+  # fetch credentials for kubeconfig (clusters.getCredentials), and
+  # poll the long-running create/delete operations. Node pools are
+  # included for completeness even though Autopilot manages nodes itself
+  # (Google's Autopilot service agent provisions the underlying Compute —
+  # see the compute note below) — the verbs are harmless and future-proof
+  # a Standard-mode cluster.
+  #
+  # CAVEAT (honesty): this is a best-effort enumeration of the GKE
+  # control-plane surface for an Autopilot cluster + node-pool +
+  # workload + HPA apply/destroy. It is NOT guaranteed exhaustive for
+  # every terraform/kubernetes-provider code path. If `terraform apply`
+  # or `destroy` 403s on a container.* verb not listed here, the safe
+  # fallback is to grant the predefined roles/container.admin to the
+  # agent SA (bind it in scripts/cloud.sh alongside the custom role)
+  # rather than chasing individual permissions — roles/container.admin
+  # is the superset this block approximates.
+  - container.clusters.create
+  - container.clusters.get
+  - container.clusters.getCredentials
+  - container.clusters.list
+  - container.clusters.update
+  - container.clusters.delete
+  - container.operations.get
+  - container.operations.list
+  # In-cluster object access used by the kubernetes provider (Deployments,
+  # PDB, HPA, namespaces, the Workload-Identity KSA binding) once
+  # kubeconfig is in hand. GKE maps these container.* verbs to the
+  # apiserver RBAC for the caller identity.
+  - container.deployments.create
+  - container.deployments.get
+  - container.deployments.list
+  - container.deployments.update
+  - container.deployments.delete
+  - container.horizontalPodAutoscalers.create
+  - container.horizontalPodAutoscalers.get
+  - container.horizontalPodAutoscalers.list
+  - container.horizontalPodAutoscalers.update
+  - container.horizontalPodAutoscalers.delete
+  - container.podDisruptionBudgets.create
+  - container.podDisruptionBudgets.get
+  - container.podDisruptionBudgets.list
+  - container.podDisruptionBudgets.update
+  - container.podDisruptionBudgets.delete
+  - container.pods.get
+  - container.pods.list
+  - container.nodes.get
+  - container.nodes.list
+  - container.namespaces.get
+  - container.namespaces.list
+  - container.serviceAccounts.get
+  - container.serviceAccounts.list
+  # Pub/Sub (pubsub.*) — the block-dispatch backlog plane the autoscaler
+  # consumes (cicd/terraform/gke/main.tf §2: google_pubsub_topic.dispatch
+  # + google_pubsub_subscription.dispatch). The HPA scales on the
+  # subscription's num_undelivered_messages. Enumerated lifecycle:
+  # create/get/list/update/delete both topics and subscriptions, manage
+  # their IAM policy (terraform may read/set it), and publish — the smoke
+  # test hand-publishes messages to make the backlog climb on demand
+  # (main.tf §6 comment).
+  - pubsub.topics.create
+  - pubsub.topics.get
+  - pubsub.topics.list
+  - pubsub.topics.update
+  - pubsub.topics.delete
+  - pubsub.topics.publish
+  - pubsub.topics.getIamPolicy
+  - pubsub.topics.setIamPolicy
+  - pubsub.subscriptions.create
+  - pubsub.subscriptions.get
+  - pubsub.subscriptions.list
+  - pubsub.subscriptions.update
+  - pubsub.subscriptions.delete
+  - pubsub.subscriptions.consume
+  - pubsub.subscriptions.getIamPolicy
+  - pubsub.subscriptions.setIamPolicy
+# NOTE on compute.*: this role DELIBERATELY remains free of compute.*
+# permissions, preserving the original curated-minimal stance. The GKE
+# deployment uses Autopilot (cicd/terraform/gke/main.tf §1:
+# enable_autopilot=true), where Google's managed Autopilot service agent
+# — NOT the agent SA — provisions and networks the underlying Compute
+# nodes. The agent SA therefore needs only the container.* control-plane
+# verbs above, never compute.* directly. (The bench-fleet toolkit, which
+# DOES touch Compute VMs, still runs as the separate FLEET_ORCHESTRATOR_SA
+# — see scripts/cloud.sh fleet steps.)
+#
+# IF a future GKE Standard cluster with self-managed node pools is
+# introduced, the caller WOULD need compute networking permissions. In
+# that case do NOT inflate this curated role: bind the predefined
+# roles/compute.admin to the agent SA in scripts/cloud.sh (the
+# admin-cloud-init GKE/Pub-Sub step) so the curated-minimal discipline of
+# this file is preserved. As of #167 (Autopilot only) that binding is
+# unnecessary and is intentionally NOT added.
 #
 # Custom role ID used when this YAML is fed to gcloud iam roles
 # create/update (scripts/common.sh): lighterProverDeployer

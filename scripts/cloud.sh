@@ -8,7 +8,7 @@
 # Verbs (role-aware vocabulary, #141 lesson 6):
 #
 #   help                — print resolved three-role topology
-#   admin-cloud-init    — Owner-tier 8-step bootstrap (run as Owner once)
+#   admin-cloud-init    — Owner-tier 12-step bootstrap (run as Owner once)
 #   admin-cloud-destroy — symmetric teardown (preserves TF state + AR by default)
 #   cloud-preflight     — read-only audit (per-role-aware messaging)
 #   cloud-infra         — TF apply via Cloud Build (builder SA in build project)
@@ -118,7 +118,7 @@ help_cmd() {
 }
 
 # ─── admin-cloud-init ─────────────────────────────────────────────────
-# Owner-tier 8-step bootstrap. Runs in the orchestration project as Owner.
+# Owner-tier 12-step bootstrap. Runs in the orchestration project as Owner.
 # Cross-project-aware: each grant branches on local-vs-cross-project.
 # Stepwise checkpointed via run_detached_stepwise — re-run resumes; the
 # step-list hash invalidates stale checkpoints automatically (#141 lesson 3).
@@ -288,6 +288,57 @@ _step_grant_builder_roles() {
   fi
 }
 
+# ─── GKE + Pub/Sub deploy enablement (#167) ──────────────────────────
+# The agent SA's curated role (lighterProverDeployer) gained enumerated
+# container.* + pubsub.* permissions so it can stand up / tear down the
+# GKE Autopilot cluster and the Pub/Sub dispatch plane in
+# cicd/terraform/gke (PR #154). The custom role itself is (re-)applied by
+# _step_create_custom_role; this step does the two remaining things that
+# permission cannot do on its own:
+#
+#   1. Enable the container.googleapis.com + pubsub.googleapis.com APIs on
+#      the runtime project (where the cluster + topic/subscription live).
+#      Without the API enabled, even a perfectly-scoped role 403s/blocks.
+#   2. Be the explicit, idempotent home for any GKE/Pub-Sub access the
+#      curated role does NOT cover. As of #167 the GKE topology is
+#      Autopilot-only, so NO compute.* binding is needed (Google's
+#      Autopilot service agent provisions the nodes — see the compute
+#      note in cicd/iam/lighter-prover-deployer-role.yaml). If a future
+#      Standard cluster lands, bind roles/compute.admin to the agent SA
+#      here (the curated YAML deliberately stays free of compute.*).
+#
+# Idempotent: `gcloud services enable` is a no-op when already enabled.
+_step_enable_gke_pubsub_access() {
+  local apis=(
+    "container.googleapis.com"
+    "pubsub.googleapis.com"
+  )
+  log_info "  enabling GKE + Pub/Sub APIs on runtime project (${RUNTIME_PROJECT})"
+  for api in "${apis[@]}"; do
+    gcloud services enable "${api}" --project="${RUNTIME_PROJECT}" --quiet
+  done
+
+  # The agent SA's GKE + Pub/Sub permissions ride on the curated custom
+  # role, which _step_create_custom_role already (re-)applies from
+  # cicd/iam/lighter-prover-deployer-role.yaml. Re-affirm the binding here
+  # so this step is self-contained and idempotent even if run in
+  # isolation (the binding carries the same 30-day expiry condition set
+  # in _step_create_agent_sa_and_bind).
+  [[ -n "${AGENT_ROLE_EXPIRY_DAYS}" ]] || die "AGENT_ROLE_EXPIRY_DAYS is empty. Set it in config.toml ([gcp.orchestration].agent_role_expiry_days) or .env, or accept the 30-day default in common.sh."
+  local expiry_ts
+  expiry_ts="$(date -u -d "+${AGENT_ROLE_EXPIRY_DAYS} days" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -v+"${AGENT_ROLE_EXPIRY_DAYS}"d '+%Y-%m-%dT%H:%M:%SZ')"
+  local condition_title="agent-role-expiry-${AGENT_ROLE_EXPIRY_DAYS}d"
+  log_info "  re-affirming agent SA → custom role binding (GKE/Pub-Sub perms) with expiry ${expiry_ts}"
+  gcloud projects add-iam-policy-binding "${ORCH_PROJECT}" \
+    --member="serviceAccount:${AGENT_SA_EMAIL}" \
+    --role="projects/${ORCH_PROJECT}/roles/${DEPLOYER_ROLE_ID}" \
+    --condition="expression=request.time < timestamp(\"${expiry_ts}\"),title=${condition_title},description=Auto-expires; re-run admin-cloud-init to refresh." \
+    --quiet
+
+  log_ok "  GKE + Pub/Sub deploy access ready for agent SA (#167)"
+}
+
 # ─── Fleet bootstrap steps (bench-fleet toolkit, #33) ────────────────
 # Appended to the admin-cloud-init step list. All idempotent. Note: the
 # run_detached_stepwise checkpoint hash invalidates when the step list
@@ -371,7 +422,7 @@ admin_cloud_init() {
   if [[ -z "${TF_STATE_BUCKET}" ]]; then die "TF_STATE_BUCKET is not set."; fi
 
   if [[ "${CONFIRM:-}" != "yes" ]]; then
-    confirm "Proceed with 11-step bootstrap?" || { log_warn "Aborted."; exit 0; }
+    confirm "Proceed with 12-step bootstrap?" || { log_warn "Aborted."; exit 0; }
   fi
 
   run_detached_stepwise "admin-cloud-init" \
@@ -383,6 +434,7 @@ admin_cloud_init() {
     _step_create_agent_sa_and_bind \
     _step_grant_agent_actas_builder \
     _step_grant_builder_roles \
+    _step_enable_gke_pubsub_access \
     _step_fleet_create_results_bucket \
     _step_fleet_grant_orchestrator \
     _step_fleet_grant_compute_sa
