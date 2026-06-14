@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use bench::events::{self, BenchEvent, cpu_time_ms, current_rss_mb, now_iso8601, peak_rss_mb};
 use bench::l5segment::{Rolling, chain_next_block, host_prepass, segment_split_points};
+use bench::prestate::{ChunkPreState, PreStateSnapshots, sweep_per_tx_snapshots};
 use bench::seed::{ChunkSeed, seed_from_state};
 use bench::{blob_encode, kzg, l6drive};
 use circuit::block::{Block, BlockWitness};
@@ -1565,6 +1566,68 @@ fn run_cell(args: &Args) {
     let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
     let state_metadata = pre_exec_witness.new_state_metadata.clone();
     let created_at = block.created_at;
+
+    // ---- FINDING D fix (issue #177): per-TX POSITIONAL pre-state corpus ----
+    //
+    // The cell must seed each chunk from its POSITIONAL pre-state
+    // (`snapshot[S * witness_index]`), NOT from block-initial state. Pre-state
+    // is a property of a tx POSITION, not of a chunk, so a single per-tx
+    // snapshot array serves ANY chunk size S (the coordinator owns SPLIT;
+    // ADR-0006 §1.2). See `bench::prestate`.
+    //
+    // The snapshot array is generated OFFLINE in the production design (issue
+    // #178 host-side transition / #119 witness service). For THIS benchmark the
+    // cell materializes it once at startup via the sequential L1 sweep at S=1
+    // over its mounted block -- a one-time cost OFF the per-chunk prove loop, so
+    // the k-way parallel PROVE the benchmark measures is fully preserved. The
+    // pre-state DELIVERY cost is therefore a SEPARATE, currently-unmeasured
+    // production term (named loudly: this is a local-disk materialize, not a
+    // witness-service fetch).
+    //
+    // `LIGHTER_DISABLE_PRESTATE_FIX=1` reverts to the pre-#177 block-initial
+    // seeding (only chunk 0 proves) for A/B confirmation of the bug.
+    let prestate_fix_enabled = std::env::var("LIGHTER_DISABLE_PRESTATE_FIX")
+        .map(|v| v != "1")
+        .unwrap_or(true);
+    let positional_snapshots: Option<PreStateSnapshots> = if prestate_fix_enabled {
+        info!(
+            "cell: FINDING D fix ON -- materializing per-tx positional pre-state corpus \
+             via S=1 L1 sweep over {} txs (one-time, off the prove-loop critical path)...",
+            effective_limit
+        );
+        let initial = ChunkPreState {
+            register_stack: block.register_stack_before,
+            all_assets: block.all_assets.clone(),
+            all_market_details: pre_exec_witness.new_market_details.clone(),
+            system_config: block.old_system_config,
+            account_tree_root: block.old_account_tree_root,
+            account_pub_data_tree_root: block.old_account_pub_data_tree_root,
+            account_delta_tree_root: block.old_account_delta_tree_root,
+            market_tree_root: block.old_market_tree_root,
+        };
+        let sweep_t = Instant::now();
+        let snaps = sweep_per_tx_snapshots(
+            block.block_number,
+            created_at,
+            initial,
+            &block.txs[..effective_limit],
+            &data,
+            &bt,
+            |_pos, _wall_ms| {},
+        );
+        info!(
+            "cell: positional pre-state corpus ready: {} snapshots in {:?}",
+            snaps.len(),
+            sweep_t.elapsed()
+        );
+        Some(snaps)
+    } else {
+        log::warn!(
+            "cell: FINDING D fix DISABLED (LIGHTER_DISABLE_PRESTATE_FIX=1) -- seeding every \
+             chunk from block-initial state; only chunk 0 will prove (A/B mode)"
+        );
+        None
+    };
     info!("cell: circuits resident; entering chunk-prove loop");
 
     // ---- Pull → resolve → REAL prove → report loop ----
@@ -1599,21 +1662,42 @@ fn run_cell(args: &Args) {
             let witness_key = WitnessKey::new(corpus_height, pool_idx as u64);
             let witness_fetch_ms = witness_corpus.resolve(witness_key).map(|r| r.fetch_ms);
 
-            // Pre-state for an INDEPENDENT single-chunk prove: each cell proves
-            // its chunk in isolation (the coordinator owns the L2 chain fold),
-            // so we seed from the block's initial state for every chunk. This
-            // is the genuine per-chunk L1+L2 leaf prove (ADR-0006 §1.2 PROVE).
-            let block_tx = BlockTx {
-                created_at,
-                old_system_config: block.old_system_config,
-                register_stack_before: block.register_stack_before,
-                all_assets_before: block.all_assets.clone(),
-                all_market_details_before: pre_exec_witness.new_market_details.clone(),
-                old_account_tree_root: block.old_account_tree_root,
-                old_account_pub_data_tree_root: block.old_account_pub_data_tree_root,
-                old_account_delta_tree_root: block.old_account_delta_tree_root,
-                old_market_tree_root: block.old_market_tree_root,
-                txs: pool[pool_idx].clone(),
+            // FINDING D fix (issue #177): seed this chunk from its POSITIONAL
+            // pre-state `snapshot[S * witness_index]`, NOT from block-initial
+            // state. Chunk `pool_idx` covers txs `[S*pool_idx, S*(pool_idx+1))`,
+            // so its pre-state is the ledger having applied txs `0..S*pool_idx`.
+            // Only chunk 0's pre-state equals block-initial; the pre-#177 code
+            // used block-initial for EVERY chunk, which is why chunks 1..k-1
+            // failed the wire-consistency check (only chunk 0 proved).
+            let block_tx = match &positional_snapshots {
+                Some(snaps) => {
+                    let pre = snaps.at_chunk(args.tx_per_proof, pool_idx).unwrap_or_else(|| {
+                        panic!(
+                            "cell: positional snapshot[{}] (S={}, chunk={}) missing; \
+                             corpus has {} snapshots",
+                            args.tx_per_proof * pool_idx,
+                            args.tx_per_proof,
+                            pool_idx,
+                            snaps.len()
+                        )
+                    });
+                    pre.block_tx(created_at, pool[pool_idx].clone())
+                }
+                // A/B fallback (LIGHTER_DISABLE_PRESTATE_FIX=1): pre-#177
+                // block-initial seeding -- only chunk 0 proves (reproduces
+                // FINDING D for confirmation).
+                None => BlockTx {
+                    created_at,
+                    old_system_config: block.old_system_config,
+                    register_stack_before: block.register_stack_before,
+                    all_assets_before: block.all_assets.clone(),
+                    all_market_details_before: pre_exec_witness.new_market_details.clone(),
+                    old_account_tree_root: block.old_account_tree_root,
+                    old_account_pub_data_tree_root: block.old_account_pub_data_tree_root,
+                    old_account_delta_tree_root: block.old_account_delta_tree_root,
+                    old_market_tree_root: block.old_market_tree_root,
+                    txs: pool[pool_idx].clone(),
+                },
             };
 
             let prove_start = Instant::now();
@@ -1874,21 +1958,11 @@ fn run_coordinator(args: &Args) {
 }
 
 /// Issue #72: per-chunk witness snapshot captured BEFORE the chunk's
-/// L1 is proven. This is the only input the witness-native seed
-/// derivation in `bench::seed` needs -- it carries every "old" field
-/// the in-circuit `BlockTxChainCircuit::perform_sanity_checks` hashes
-/// to recover the chunk's pre-state state + validium roots.
-struct ChunkPreState {
-    register_stack: RegisterStack,
-    all_assets: [Asset; ASSET_LIST_SIZE],
-    all_market_details: [MarketDetails; POSITION_LIST_SIZE],
-    system_config: SystemConfig,
-    account_tree_root: HashOut<F>,
-    account_pub_data_tree_root: HashOut<F>,
-    account_delta_tree_root: HashOut<F>,
-    market_tree_root: HashOut<F>,
-}
-
+/// L1 is proven. Promoted to the library (`bench::prestate::ChunkPreState`,
+/// issue #177) so the distributed cell's FINDING D fix and the offline per-tx
+/// positional snapshot generator share ONE definition (imported at the top of
+/// this file).
+///
 /// Issue #67: tree-fold L2 driver (batch mode).
 ///
 /// Per chunk: prove the L1 chunk proof, then a LEAF chain proof (a 1-chunk

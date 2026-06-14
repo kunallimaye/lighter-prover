@@ -1,0 +1,136 @@
+# Per-transaction positional pre-state corpus — the FINDING D fix
+
+**Issue:** #177 · **Refs:** #75 #172 #174 #165 #61 #72 · **Future path:** #178 (G4)
+
+> **Status: honest-partial.** This delivers the LOCAL correctness fix for
+> FINDING D (the distributed cell proving only 1 of `k` chunks per block) plus
+> the library machinery for a per-transaction positional pre-state corpus. The
+> Layer-0 correctness gate is REAL (it proves every chunk of the real cap block
+> at two chunk sizes from positional snapshots and matches them against the
+> known-good rolling-state path). The cloud layers (corpus generation at scale,
+> distributed smoke, measured ladder) are gated behind this fix and are tracked
+> separately; what is and is not executed is stated explicitly below.
+
+## 1. The bug (FINDING D)
+
+`docs/live-benchmark-results.md` recorded that the merged distributed prover
+(#173) proves only `witness_index ≡ 0 (mod pool_total)` per block; every other
+chunk fails the L1 wire-consistency check
+(`Partition containing Wire(...) was set twice with different values`).
+
+Root cause (`bench/src/bin/bench.rs` `run_cell`): the cell built EVERY chunk's
+`BlockTx` from the block's INITIAL ledger state (`block.all_assets`,
+`block.register_stack_before`, the initial roots, etc.) while selecting a
+mid-block tx slice. Only chunk 0's pre-state equals block-initial; chunks
+`1..k-1` need the CHAINED intermediate state (the ledger after all PRIOR chunks
+applied), so the initial-state seed is inconsistent with the mid-block witness.
+
+## 2. The fix — pre-state is POSITIONAL, snapshotted per-transaction
+
+Pre-state is a property of a POSITION in the tx sequence, not of a chunk. Chunk
+boundaries are an overlay the coordinator chooses via `S = tx_per_proof` at
+dispatch time (`split_k(tx_count, S) = ceil(tx_count/S)`; ADR-0006 §1.2). So we
+snapshot the 8-field ledger pre-state at EVERY tx position `0..=tx_count`:
+
+```
+snapshot[i] = ledger pre-state having applied txs 0..i
+chunk k at chunk size S  ->  pre-state = snapshot[S * k]
+```
+
+The 8 fields (`bench::prestate::ChunkPreState`, promoted from the binary's
+`ChunkPreState`, issue #72): `register_stack, all_assets, all_market_details,
+system_config, account_tree_root, account_pub_data_tree_root,
+account_delta_tree_root, market_tree_root`.
+
+### Why PER-TX and not per-chunk
+
+Per-chunk snapshots would bake `S` into the corpus, forcing regeneration to
+benchmark a different `S`. Per-tx snapshots are **S-independent**: the SAME
+array serves S=9, S=4, or any S, because chunk `k`'s pre-state is always
+`snapshot[S*k]`. The expensive work (the sequential L1 sweep) is IDENTICAL
+whether you snapshot per-tx or per-chunk — snapshots are a byproduct of the
+sweep; per-tx only costs more STORAGE (highly compressible — consecutive
+snapshots differ in only the few accounts one tx touches).
+
+## 3. How snapshots are produced — offline, off the critical path
+
+There is **no** prove-free host-side L1 transition function in the workspace
+today (no `apply_block_tx`, no `host_tx_transition`). The ONLY way to advance
+ledger state across a tx is to PROVE that step's L1 and read `*_after` from its
+public inputs (`BlockTxWitness::from_public_inputs`). So
+`bench::prestate::sweep_per_tx_snapshots` runs the sequential L1 sweep at S=1
+(one tx per L1 prove), capturing the pre-state before each tx and rolling
+forward from each proof's outputs.
+
+This sweep is intrinsically SERIAL but is done OFFLINE — entirely off the
+benchmark critical path. The k-way parallel PROVE the distributed prover
+measures is fully preserved.
+
+### Production-delivery gap (named loudly — do NOT let it calcify)
+
+- **(a)** Pre-state chaining is intrinsically serial but intrinsically CHEAP;
+  doing it offline keeps the parallel prove intact.
+- **(b)** The STEADY-STATE production design is the coordinator computing
+  pre-states LIVE in microseconds via a host-side prove-free transition
+  function (future work, **#178**, mapped G4), OR consuming them from a live
+  witness service (#119, Lighter dependency, parked).
+- **(c)** Therefore this benchmark measures the PROVING-TIER cost airtight, but
+  **pre-state DELIVERY cost is a SEPARATE, currently-unmeasured production
+  term**. In the benchmark the corpus is local-disk / cell-materialized, so
+  `witness_fetch_ms` is a mounted-resolve / local-materialize floor, NOT a
+  production witness-service fetch. "We baked them in" is NOT "that's how
+  production works".
+
+## 4. The architectural seam
+
+`bench::prestate::ChunkPreState::block_tx(created_at, txs)` builds the L1
+`BlockTx` from a positional pre-state. The distributed cell now calls
+`snapshots.at_chunk(S, witness_index).block_tx(...)` instead of using
+block-initial state. This seam is identical regardless of WHO fills the
+pre-state in: an offline generator for this benchmark; a live coordinator
+(#178) or witness service (#119) in production.
+
+For this benchmark the cell materializes the snapshot array once at startup via
+the S=1 sweep over its mounted block (a one-time cost off the prove loop).
+`LIGHTER_DISABLE_PRESTATE_FIX=1` reverts to pre-#177 block-initial seeding for
+A/B confirmation of the bug.
+
+## 5. Layer-0 correctness gate (`bench/tests/prestate_finding_d.rs`)
+
+On the real `bench/bench_test.json` cap block (500 txs), gated behind
+`LAYER0_FINDING_D=1`:
+
+1. Generate the per-tx snapshot array via the REAL S=1 sweep.
+2. For S=9 AND S=4, prove EVERY full chunk from its positional snapshot
+   `snapshot[S*k]`.
+
+Assertions (all REAL, no stubbing):
+- All chunks prove; ZERO "set twice" panics (FINDING D fixed).
+- S-INDEPENDENCE: the SAME snapshot array serves both S values.
+- MATCH-KNOWN-GOOD: each positional-snapshot proof's public inputs MATCH the
+  single-process rolling-state path's proof for the same chunk (catches any
+  hidden chunk-level vs positional coupling).
+
+Run:
+```sh
+LAYER0_FINDING_D=1 cargo test -p bench --release --test prestate_finding_d \
+  -- --nocapture --test-threads=1
+```
+
+### Chunk-count note (honest)
+
+With 500 txs at S=9 there are `floor(500/9) = 55` FULL 9-tx chunks (495 txs);
+the 56th chunk in the live `ceil(500/9)=56` SPLIT is a 5-tx partial. The gate
+proves the 55 full chunks (the partial is a different L1 circuit shape). At S=4
+there are `floor(500/4) = 125` full chunks. The fix is chunk-size-agnostic; the
+partial-tail chunk is handled by the coordinator's SPLIT exactly as before.
+
+## 6. Corpus schema (Layer 1 — design; generation gated on Layer 0)
+
+The 100-block synthetic corpus (Decision 3) reuses PR #166's 100-height
+`{height, witness_index}` layout and adds a per-tx pre-state snapshot store per
+height. Source blocks are SYNTHETIC, shaped to #128's distribution via the G2
+generators (`tools/witness-reconstructor/`). KNOWN LIMIT: Cancel(15) +
+non-crossing Modify(17) + empties(0) + compositions; NO Claim(21)/Create(14)
+(matching engine #125 closed; spike #157: per-tx prove cost is tx-type-flat to
+<6%). Cost-projection use supported; correctness-coverage use is not.
