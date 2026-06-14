@@ -45,6 +45,28 @@ feeder-test: ## Run the offline feeder test suite (no network, <1 min)
 	python3 -m unittest discover -s feeder/tests -v
 # --- end feeder (producer, #48) ---
 
+# --- synthetic block corpus (#165; Refs #128 #121 #144) ---
+# Regenerate the {height, witness_index} MountedCorpus layout + manifest from
+# the REAL mainnet load distribution. Band weights are recomputed by running
+# scripts/trace-distribution/analyze.py on TRACE (no invented weights).
+# Generation only — no proving, no cloud, no matching engine.
+.PHONY: corpus-gen corpus-test
+
+corpus-gen: ## Regenerate corpus: TRACE=/path/trace.jsonl [N=100 S=100] (or DOC=1 for #163 fallback)
+	@test -n "$(TRACE)$(DOC)" || { echo "error: TRACE=<trace.jsonl> required (or DOC=1)"; \
+	  echo "  fetch the real trace first, e.g.:"; \
+	  echo "  gcloud storage cat gs://kunal-scratch-bench-fleet-runs/traces/2026-06-11T0204Z-15m-offpeak/trace_15m.jsonl > /tmp/trace_15m.jsonl"; \
+	  exit 1; }
+	python3 ../tools/corpus-gen/gen_corpus.py \
+	  $(if $(TRACE),--trace $(TRACE),) \
+	  $(if $(DOC),--from-doc,) \
+	  $(if $(N),--n-blocks $(N),) \
+	  $(if $(S),--chunk-size $(S),)
+
+corpus-test: ## Verify the committed corpus loads via the MountedCorpus resolver
+	cargo test --manifest-path Cargo.toml --test corpus_mount
+# --- end synthetic block corpus (#165) ---
+
 # --- streaming consumer (#49) ---
 # stream-smoke: MANUAL real-proving smoke test for `bench --stream`.
 # NOT part of any automated test target: circuit define alone takes

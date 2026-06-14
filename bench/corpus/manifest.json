@@ -1,0 +1,1784 @@
+{
+  "schema": "lighter-prover/corpus-manifest/v1",
+  "issue": 165,
+  "refs": [
+    128,
+    121,
+    144
+  ],
+  "generated_at": "2026-06-14T09:59:01.973663+00:00",
+  "contract": {
+    "spec": "ADR-0008 \u00a71.1 {height, witness_index}; \u00a71.4 k=1 bench_test.json precedent",
+    "resolver": "bench::conductor::MountedCorpus (in-memory, mount_block(height, slices))",
+    "loader_precedent": "bench/src/bin/bench.rs slices bench_test.json into S-tx chunks indexed 0..k-1"
+  },
+  "distribution": {
+    "source": "REAL analyzer on REAL trace (/tmp/trace_15m.jsonl), non_null=5910",
+    "analyzer_command": "/usr/bin/python3 /tmp/agent-issue-165-synthetic-corpus-d0576175/scripts/trace-distribution/analyze.py /tmp/trace_15m.jsonl --json",
+    "real_bands_non_null": {
+      "100_249": 301,
+      "250_399": 219,
+      "2_49": 122,
+      "400_499": 136,
+      "50_99": 124,
+      "eq_1": 660,
+      "eq_500": 4348
+    },
+    "scaled_bands": {
+      "100_249": 5,
+      "250_399": 4,
+      "2_49": 2,
+      "400_499": 2,
+      "50_99": 2,
+      "eq_1": 11,
+      "eq_500": 74
+    },
+    "n_blocks": 100,
+    "chunk_size_S": 100,
+    "cap_fraction_scaled": 0.74
+  },
+  "seed": {
+    "path": "bench/bench_test.json",
+    "sha256": "d014c969a88bcb0f1673acc410c9e75d1cac53d575463514855050226759c23f",
+    "height": 186974592,
+    "tx_count": 500,
+    "tx_type_dist": {
+      "15": 118,
+      "17": 168,
+      "21": 169,
+      "14": 45
+    },
+    "note": "sample-size-1 real chain-VALID cap block; the ONLY fully prover-serializable block in-repo; validated bit-for-bit by tools/witness-reconstructor"
+  },
+  "honest_scope": {
+    "synthesized_witness_bytes": false,
+    "explanation": "Cap-band blocks reference the real validated seed; lower-band blocks are {height, witness_index} layout placeholders. No witness bytes / Merkle roots are fabricated. Fully-serializable sub-cap synthesis is gated on #120/#126/#125."
+  },
+  "totals": {
+    "blocks": 100,
+    "index_entries": 421
+  },
+  "blocks": [
+    {
+      "height": 186974592,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974593,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974594,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974595,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974596,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974597,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974598,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974599,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974600,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974601,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974602,
+      "band": "eq_1",
+      "tx_count": 1,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974603,
+      "band": "2_49",
+      "tx_count": 25,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974604,
+      "band": "2_49",
+      "tx_count": 25,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974605,
+      "band": "50_99",
+      "tx_count": 75,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974606,
+      "band": "50_99",
+      "tx_count": 75,
+      "k": 1,
+      "chunk_size": 100,
+      "witness_indices": [
+        0
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974607,
+      "band": "100_249",
+      "tx_count": 175,
+      "k": 2,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974608,
+      "band": "100_249",
+      "tx_count": 175,
+      "k": 2,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974609,
+      "band": "100_249",
+      "tx_count": 175,
+      "k": 2,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974610,
+      "band": "100_249",
+      "tx_count": 175,
+      "k": 2,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974611,
+      "band": "100_249",
+      "tx_count": 175,
+      "k": 2,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974612,
+      "band": "250_399",
+      "tx_count": 325,
+      "k": 4,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974613,
+      "band": "250_399",
+      "tx_count": 325,
+      "k": 4,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974614,
+      "band": "250_399",
+      "tx_count": 325,
+      "k": 4,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974615,
+      "band": "250_399",
+      "tx_count": 325,
+      "k": 4,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974616,
+      "band": "400_499",
+      "tx_count": 450,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974617,
+      "band": "400_499",
+      "tx_count": 450,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974618,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": true,
+      "seed_ref": "bench/bench_test.json",
+      "note": "real chain-VALID 500-tx seed block (bench_test.json), validated bit-for-bit by tools/witness-reconstructor"
+    },
+    {
+      "height": 186974619,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974620,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974621,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974622,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974623,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974624,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974625,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974626,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974627,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974628,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974629,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974630,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974631,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974632,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974633,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974634,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974635,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974636,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974637,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974638,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974639,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974640,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974641,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974642,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974643,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974644,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974645,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974646,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974647,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974648,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974649,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974650,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974651,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974652,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974653,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974654,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974655,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974656,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974657,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974658,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974659,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974660,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974661,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974662,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974663,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974664,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974665,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974666,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974667,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974668,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974669,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974670,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974671,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974672,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974673,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974674,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974675,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974676,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974677,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974678,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974679,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974680,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974681,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974682,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974683,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974684,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974685,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974686,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974687,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974688,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974689,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974690,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    },
+    {
+      "height": 186974691,
+      "band": "eq_500",
+      "tx_count": 500,
+      "k": 5,
+      "chunk_size": 100,
+      "witness_indices": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "synthesized": false,
+      "is_real_seed": false,
+      "seed_ref": "bench/bench_test.json",
+      "note": "layout/manifest placeholder: {height, witness_index} addressing only; witness bytes NOT materialized \u2014 references the real seed (no fabricated roots)"
+    }
+  ]
+}
