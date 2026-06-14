@@ -146,6 +146,47 @@ make -C bench stream-tx-mix BLOCKS=200      # or HEIGHTS="LO HI"
 gcloud compute instances delete txmix-capture --zone=asia-northeast1-b
 ```
 
+**Tokyo run recipe — reusable Cloud Run JOB** (issue #128, the repeatable
+path). Instead of a hand-provisioned VM, the capture is packaged as a
+parametrised Cloud Run **Job** in `asia-northeast1` (Tokyo) that writes its
+results **durably to GCS**. A Job (not a Service) runs to completion and
+exits; the task timeout is generous (default 24h) because a rate-limited
+representative window can take hours. The SAME job runs a tiny smoke window
+and a big representative window purely by config — no redefinition.
+
+```bash
+# One-time: build the image + deploy the job (public Tokyo egress).
+make cloud-txmix-build      # Cloud Build -> asia-northeast1 Artifact Registry
+make cloud-txmix-deploy     # gcloud run jobs create/update (asia-northeast1)
+
+# Validate the machinery with a tiny window (small-N — NOT the answer to G1).
+make cloud-txmix-smoke
+make cloud-txmix-results    # prints the GCS artifact: meta + mix table + DONE
+
+# OPERATOR representative capture — ONE command. Choose a peak/off-peak
+# window large enough to be representative (a human judgment):
+TXMIX_HEIGHTS="<LO> <HI>" TXMIX_LABEL=peak make cloud-txmix-capture
+#   or by recent-block count:
+TXMIX_BLOCKS=5000 TXMIX_LABEL=offpeak make cloud-txmix-capture
+
+make cloud-txmix-results    # the captured mix + its provenance
+make cloud-txmix-post       # post the cited summary to issue #128
+```
+
+Output (durable — a Job's filesystem evaporates on exit) lands at
+`gs://<project>-lighter-txmix/txmix/<ts>-<label>-<id>/`:
+`tx-mix.txt` (the rendered mix table), `tx-mix.meta.json` (machine-readable
+provenance: egress region/IP, endpoint, window, N, `--max-rpm`),
+`tx-mix.stderr.txt` (tool stderr, incl. any 403 guidance), and a `DONE`
+sentinel. Every knob (window, `--max-rpm`, GCS bucket/path, `--base-url`/
+`--proxy`, task timeout) is an env var — see `scripts/cloud-txmix.sh`.
+
+Egress fallback: the job uses **public** Cloud Run egress (a GCP-assigned
+Tokyo IP) — no Cloud NAT / static egress by default. If a smoke run 403s
+(the Tokyo GCP range is geo-blocked), the tool hard-fails honestly and the
+finding lands in GCS. Recover by either attaching a Cloud NAT static egress
+IP to the job's VPC connector, or fall back to the VM recipe above.
+
 Config knobs (no code edits needed; all optional, conservative defaults):
 
 | Flag | Env | Purpose |

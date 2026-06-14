@@ -28,6 +28,8 @@
   cloud-help admin-cloud-init admin-cloud-destroy \
   cloud-preflight cloud-infra cloud-bench-build cloud-app-deploy \
   cloud-app-promote cloud-app-undeploy cloud-clean \
+  cloud-txmix-build cloud-txmix-deploy cloud-txmix-smoke \
+  cloud-txmix-capture cloud-txmix-results cloud-txmix-post \
   cloud-status cloud-recover \
   logs-list logs-last logs-clean \
   fleet-quota-check fleet-run fleet-run-dry fleet-status \
@@ -136,6 +138,28 @@ cloud-app-undeploy: ## Revert Cloud Run to placeholder image
 
 cloud-clean: ## TF destroy (runtime infrastructure)
 	@bash scripts/cloud.sh cloud-clean
+
+# ─── tx-mix Capture Job (Tokyo Cloud Run Job, issue #128) ────────────
+# Reusable, parametrised capture of the mainnet tx-type mix. The SAME job
+# runs a tiny SMOKE window and a big REPRESENTATIVE window by config alone.
+
+cloud-txmix-build: ## Build + push the tx-mix capture image via Cloud Build (#128)
+	@bash scripts/cloud-txmix.sh build
+
+cloud-txmix-deploy: ## Create/update the Tokyo tx-mix Cloud Run JOB (#128)
+	@bash scripts/cloud-txmix.sh deploy
+
+cloud-txmix-smoke: ## SMOKE-run the job: tiny window (small-N validation, NOT the answer) (#128)
+	@bash scripts/cloud-txmix.sh smoke
+
+cloud-txmix-capture: ## OPERATOR representative capture: set TXMIX_HEIGHTS="LO HI" or TXMIX_BLOCKS=N (#128)
+	@bash scripts/cloud-txmix.sh capture
+
+cloud-txmix-results: ## Print the latest tx-mix GCS artifact (meta + mix + DONE) (#128)
+	@bash scripts/cloud-txmix.sh results
+
+cloud-txmix-post: ## Post the cited tx-mix summary (from GCS) to issue #128
+	@bash scripts/cloud-txmix.sh post
 
 # ─── Detached Orchestration ──────────────────────────────────────────
 
