@@ -1,4 +1,4 @@
-# ADR-0005: The distributed-prover conductor — operational distribution design
+# ADR-0006: The distributed-prover conductor — operational distribution design
 
 **Status**: Proposed
 **Date**: 2026-06-13
@@ -11,15 +11,19 @@
 > written, no container is built, nothing is provisioned, no benchmark is
 > run by this ADR.
 
-> **Numbering note (collision, proceed anyway).** This ADR takes **0005** —
-> the next un-taken number. `docs/decisions/` still contains **two** files
-> numbered `ADR-0001` (`ADR-0001-gcp-fleet-bench-architecture.md` and
+> **Numbering note.** This ADR takes **0006** — the next free number.
+> `ADR-0005` was claimed by the **L6-inner-wrapper/KZG-sidecar** doc
+> (`ADR-0005-l6-inner-wrapper-kzg-sidecar.md`) while this conductor design sat
+> open as PR #115; to avoid a duplicate `ADR-0005`, the conductor was
+> renumbered to **0006** at merge. `docs/decisions/` still contains **two**
+> files numbered `ADR-0001` (`ADR-0001-gcp-fleet-bench-architecture.md` and
 > `ADR-0001-container-topology.md`); resolving that collision is **#68** and
 > remains **open** (PR #106 explicitly does not close it). This ADR is **not
 > blocked on** #68. `ADR-0002` is **reserved** for #10's
 > `ADR-0002-l4-l8-driver.md` and is deliberately left free — **not taken
 > here**. (Existing: 0003 = prover-cell streaming architecture; 0004 =
-> unified recursive distribution primitive + governing equation.)
+> unified recursive distribution primitive + governing equation; 0005 =
+> L6 inner-wrapper KZG sidecar.)
 
 ---
 
