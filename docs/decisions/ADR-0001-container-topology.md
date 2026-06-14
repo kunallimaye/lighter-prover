@@ -225,3 +225,48 @@ Any operator who was pinning to `:ref-5bbb307` should now pin to a
 specific `:sha-<short>` instead. The `:ref-*` tag still exists but now
 equals `:sha-*` for any single build (we keep both for backward-compat
 with anyone scripting against `:ref-*`).
+
+## Revision 2 (2026-06-14): host-only orchestration + JSONL parser
+
+- **Tracking issue**: [#21](https://github.com/kunallimaye/lighter-prover/issues/21)
+
+### What changed
+
+Two cleanups that reconcile the image with the three-role topology this
+ADR established:
+
+1. **The in-container `orchestrator` role was removed.** Sections above
+   describe a two-role image (`worker` | `orchestrator`) with the
+   orchestrator dispatched at container start. That `LIGHTER_ROLE=orchestrator`
+   path was never wired up: fan-out has always been invoked from the
+   host (`scripts/container.sh fanout` → `cicd/orchestrator.py`), never
+   via `podman run -e LIGHTER_ROLE=orchestrator`. Keeping it in the
+   runtime image contradicted the very decision recorded here — that
+   orchestration is a host/build-role concern, not a runtime-role
+   concern. The runtime image now ships **only the worker role**.
+   - `cicd/entrypoint.sh`: dropped `run_orchestrator()` and the
+     `orchestrator)` dispatch case.
+   - `cicd/Containerfile`: dropped `COPY cicd/orchestrator.py` and the
+     explicit `python3` / `python3-pip` apt installs (they existed
+     solely for the in-container orchestrator). `cicd/orchestrator.py`
+     itself stays in the repo — it is the host fan-out + aggregation
+     tool, also imported by `scripts/local.sh`.
+
+2. **The orchestrator parser is now a `BENCH_EVENT` JSONL consumer.**
+   The host `orchestrator.py` previously regex-parsed the bench binary's
+   `TOTAL`/`AVERAGE` INFO lines. Since #9 (structured instrumentation)
+   and #18 landed, the bench emits structured `BENCH_EVENT ` JSON Lines
+   (`bench/src/events.rs`). The parser was migrated to consume those
+   directly — a hard cut, no regex fallback — yielding per-chunk × per-
+   layer measurements, peak RSS, and multicore CPU efficiency instead of
+   per-worker means-of-means. The legacy INFO lines are still emitted by
+   the worker for human readers; they are simply no longer the
+   aggregation contract.
+
+### Why a hard cut (no regex fallback)
+
+Per #15, the `:ref-<sha>` tag now truthfully encodes provenance, so no
+operator legitimately needs to run a pre-#9 image *through the new
+orchestrator*. Pre-#9 images can still be run directly via `podman run`;
+they just aren't aggregable. Carrying two parser paths would bloat the
+orchestrator and create a test matrix nobody benefits from.

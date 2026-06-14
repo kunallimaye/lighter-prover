@@ -2,31 +2,43 @@
 """Fan-out orchestrator for the Lighter bench container (Phase 1).
 
 Spawns ``LIGHTER_WORKERS`` sibling worker containers, collects their
-stdout, parses the bench binary's ``TOTAL`` / ``AVERAGE`` timing lines,
-and prints aggregated statistics (count, mean, p50, p95, stdev).
+stdout, parses the bench binary's structured ``BENCH_EVENT`` JSONL
+output, and prints aggregated statistics (count, mean, p50, p95, stdev,
+peak RSS, CPU efficiency).
 
-Two backends:
+This script runs from the **host** (or the build/orchestration role),
+never inside the runtime container — fan-out is an orchestration concern,
+not a runtime concern, per the three-role topology (see
+``docs/decisions/ADR-0001-container-topology.md``). The Cloud Run Jobs
+target is implemented in ``scripts/cloud.sh``; this script intentionally
+does NOT embed a Cloud Run code path because the container shouldn't know
+how to spawn its own siblings on GCP.
 
-* ``podman`` (default for local fan-out)
-* ``noop`` (orchestrator runs each worker in-process via the bench
-  binary directly; useful inside one container for smoke testing)
+Spawn backend: ``podman`` (the only supported backend; Cloud Run Jobs is
+invoked from ``scripts/cloud.sh``).
 
-The Cloud Run Jobs target lives outside the container (the orchestrator
-runs on the operator's workstation or inside Cloud Build) and is
-implemented in ``scripts/cloud.sh``; this script intentionally does NOT
-embed a Cloud Run code path because the container shouldn't know how to
-spawn its own siblings on GCP — that's the build/orchestration role's
-job per the three-role topology.
+The bench binary emits one structured event per line, prefixed with
+``BENCH_EVENT `` (trailing space), as JSON Lines (see
+``bench/src/events.rs`` for the authoritative schema). The three event
+types this orchestrator consumes:
 
-The bench binary's timing-line format (copied verbatim from
-``bench/src/bin/bench.rs``):
+* ``layer_prove`` — per-chunk (L1/L2) or one-shot (L3) prove timing.
+  Fields: ``layer``, ``name``, ``chunk_idx`` (null for one-shot),
+  ``chunk_total``, ``tx_per_proof``, ``wall_ms``, ``cpu_ms`` (nullable),
+  ``rss_mb_peak`` (nullable), ``rss_mb_after`` (nullable), ``ts``.
+* ``circuit_define`` — define + build time per circuit. Fields:
+  ``layer``, ``name``, ``wall_ms``, ``rss_mb_after``, ``ts``.
+* ``summary`` — end-of-run aggregate. Fields: ``tx_per_proof``,
+  ``tx_limit``, ``chunks``, ``total_wall_ms``, ``total_cpu_ms``
+  (nullable), ``peak_rss_mb`` (nullable), ``ts``.
 
-    TOTAL <Circuit>::prove time: <seconds>
-    AVERAGE <Circuit>::prove time: <seconds>
-
-We extract every ``TOTAL`` / ``AVERAGE`` field, group by exact label,
-and report stats. Any non-matching line is ignored — robust against
-log_level changes, banner injection, etc.
+Only lines starting with the ``BENCH_EVENT `` prefix are parsed; the
+worker's interleaved ``info!()`` lines, banners, and any other stdout
+are ignored — robust against log-level changes and banner injection.
+This is a hard cut: there is no fallback to the legacy
+``TOTAL``/``AVERAGE`` regex parser (removed in #21). Pre-#9 images that
+only emit the legacy lines can still be run directly via ``podman run``;
+they just won't be aggregable through this orchestrator.
 """
 
 from __future__ import annotations
@@ -34,71 +46,166 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shlex
 import statistics
 import subprocess
 import sys
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional
 
-# Capture both TOTAL and AVERAGE lines. The bench binary emits e.g.
-#   TOTAL BlockPreExecutionCircuit::prove time: 12.345s
-#   AVERAGE BlockTxCircuit::prove time: 1.234s
-# Time is plonky2-style (Rust's Duration Display: "12.345s", "1.234ms",
-# "987ns"). We normalise to seconds.
-_TIMING_LINE_RE = re.compile(
-    r"^(?P<kind>TOTAL|AVERAGE)\s+"
-    r"(?P<label>\S+)::prove\s+time:\s+"
-    r"(?P<value>[0-9]+(?:\.[0-9]+)?)(?P<unit>s|ms|us|µs|ns)?\b",
-    re.MULTILINE,
-)
-
-
-def _to_seconds(value: str, unit: str | None) -> float:
-    """Convert a Rust-Duration-style number+unit pair into seconds.
-
-    The bench binary uses the default ``Duration`` ``Display`` impl,
-    which picks the unit that gives a readable value. We invert that.
-    """
-    v = float(value)
-    if unit is None or unit == "s":
-        return v
-    if unit == "ms":
-        return v / 1_000.0
-    if unit in ("us", "µs"):
-        return v / 1_000_000.0
-    if unit == "ns":
-        return v / 1_000_000_000.0
-    raise ValueError(f"unknown duration unit: {unit!r}")
+# The bench binary emits one structured event per line, prefixed with
+# this exact string (note the trailing space). Everything after the
+# prefix is a single-line JSON object. See bench/src/events.rs.
+_BENCH_EVENT_PREFIX = "BENCH_EVENT "
 
 
 @dataclass
 class WorkerResult:
-    """One worker's parsed output."""
+    """One worker's parsed output.
+
+    ``timings`` keeps the legacy ``Dict[label, List[seconds]]`` shape so
+    ``_aggregate`` and host consumers (``scripts/local.sh``) work
+    unchanged. It is populated from ``layer_prove`` events grouped by
+    ``"L<layer> <name>"``. The JSONL parser additionally captures the
+    richer per-worker data below.
+    """
 
     worker_id: int
     exit_code: int
     timings: Dict[str, List[float]] = field(default_factory=dict)
     stdout_lines: int = 0
+    # Richer BENCH_EVENT-derived fields (populated by _parse_events).
+    events: List[Dict[str, Any]] = field(default_factory=list)
+    events_parsed: int = 0
+    # Per-label peak RSS (MiB) across this worker's layer_prove events,
+    # plus the run-level summary peak. Keyed by the same label as timings.
+    peak_rss_mb_by_label: Dict[str, int] = field(default_factory=dict)
+    peak_rss_mb: Optional[int] = None
+    cpu_ms_total: Optional[int] = None
+    # Per-label (wall_ms_sum, cpu_ms_sum) so _aggregate can derive
+    # CPU efficiency = cpu / wall. None for a label means CPU data was
+    # absent (non-Linux worker) for at least one of its events.
+    cpu_ms_by_label: Dict[str, Optional[int]] = field(default_factory=dict)
+    wall_ms_by_label: Dict[str, int] = field(default_factory=dict)
+
+
+def _layer_label(event: Dict[str, Any]) -> str:
+    """Stable label for a layer_prove event: ``"L<layer> <name>"``."""
+    return f"L{event.get('layer')} {event.get('name')}"
+
+
+def _parse_events(stdout: str) -> List[Dict[str, Any]]:
+    """Extract and decode every ``BENCH_EVENT `` JSONL line from stdout.
+
+    Only lines starting with the ``BENCH_EVENT `` prefix are considered;
+    interleaved ``info!()`` output, banners, and ``### W…`` markers are
+    ignored. Malformed JSON on an otherwise-prefixed line is skipped
+    (defensive — a truncated line shouldn't abort the whole aggregate).
+    """
+    events: List[Dict[str, Any]] = []
+    for line in stdout.splitlines():
+        if not line.startswith(_BENCH_EVENT_PREFIX):
+            continue
+        payload = line[len(_BENCH_EVENT_PREFIX):]
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict):
+            events.append(obj)
+    return events
 
 
 def _parse_stdout(stdout: str) -> Dict[str, List[float]]:
-    """Group ``TOTAL`` / ``AVERAGE`` timings by ``"<kind> <label>"``.
+    """Group ``layer_prove`` wall times (seconds) by ``"L<layer> <name>"``.
 
-    A single worker may emit a label multiple times if ``LIGHTER_BENCH_REPEAT``
-    > 1; we keep all values so the aggregate stats include intra-worker
-    variance.
+    Back-compat shim: returns the same ``Dict[label, List[seconds]]``
+    shape the legacy regex parser produced, so ``_aggregate`` and host
+    consumers keep working. ``layer_prove`` is the structured replacement
+    for the old per-``prove`` ``TOTAL``/``AVERAGE`` lines; a single worker
+    may emit a label many times (per chunk, and per repeat), so all values
+    are retained for honest intra-worker variance.
     """
     out: Dict[str, List[float]] = {}
-    for m in _TIMING_LINE_RE.finditer(stdout):
-        key = f"{m.group('kind')} {m.group('label')}"
-        out.setdefault(key, []).append(
-            _to_seconds(m.group("value"), m.group("unit"))
-        )
+    for event in _parse_events(stdout):
+        if event.get("event") != "layer_prove":
+            continue
+        wall_ms = event.get("wall_ms")
+        if wall_ms is None:
+            continue
+        out.setdefault(_layer_label(event), []).append(float(wall_ms) / 1000.0)
     return out
+
+
+def _parse_worker(stdout: str) -> Dict[str, Any]:
+    """Parse a worker's full stdout into the richer WorkerResult fields.
+
+    Returns a dict (not a WorkerResult) so callers in both the podman
+    spawn path and the host import path can splat it. Keys mirror the
+    WorkerResult fields populated from BENCH_EVENT data.
+    """
+    events = _parse_events(stdout)
+    timings: Dict[str, List[float]] = {}
+    peak_rss_by_label: Dict[str, int] = {}
+    wall_ms_by_label: Dict[str, int] = {}
+    cpu_ms_by_label: Dict[str, Optional[int]] = {}
+    run_peak_rss: Optional[int] = None
+    run_cpu_total: Optional[int] = None
+
+    for event in events:
+        etype = event.get("event")
+        if etype == "layer_prove":
+            wall_ms = event.get("wall_ms")
+            if wall_ms is None:
+                continue
+            label = _layer_label(event)
+            timings.setdefault(label, []).append(float(wall_ms) / 1000.0)
+            wall_ms_by_label[label] = wall_ms_by_label.get(label, 0) + int(wall_ms)
+            # CPU: keep a running sum, but only if every event for this
+            # label reported CPU. A single None poisons the label's eff.
+            cpu_ms = event.get("cpu_ms")
+            if label not in cpu_ms_by_label:
+                cpu_ms_by_label[label] = 0
+            if cpu_ms is None:
+                cpu_ms_by_label[label] = None
+            elif cpu_ms_by_label[label] is not None:
+                cpu_ms_by_label[label] += int(cpu_ms)
+            # Per-label peak RSS = max of layer_prove rss_mb_peak values.
+            rss_peak = event.get("rss_mb_peak")
+            if rss_peak is not None:
+                prev = peak_rss_by_label.get(label)
+                peak_rss_by_label[label] = (
+                    int(rss_peak) if prev is None else max(prev, int(rss_peak))
+                )
+        elif etype == "summary":
+            srss = event.get("peak_rss_mb")
+            if srss is not None:
+                run_peak_rss = int(srss) if run_peak_rss is None else max(
+                    run_peak_rss, int(srss)
+                )
+            scpu = event.get("total_cpu_ms")
+            if scpu is not None:
+                run_cpu_total = (
+                    int(scpu) if run_cpu_total is None else run_cpu_total + int(scpu)
+                )
+        # circuit_define events are captured in the raw event list for
+        # downstream consumers but not folded into the layer timings.
+
+    # If no summary peak was present, fall back to the max per-label peak.
+    if run_peak_rss is None and peak_rss_by_label:
+        run_peak_rss = max(peak_rss_by_label.values())
+
+    return {
+        "timings": timings,
+        "events": events,
+        "events_parsed": len(events),
+        "peak_rss_mb_by_label": peak_rss_by_label,
+        "peak_rss_mb": run_peak_rss,
+        "cpu_ms_total": run_cpu_total,
+        "cpu_ms_by_label": cpu_ms_by_label,
+        "wall_ms_by_label": wall_ms_by_label,
+    }
 
 
 def _spawn_podman_worker(
@@ -134,15 +241,15 @@ def _spawn_podman_worker(
     if proc.stderr:
         for line in proc.stderr.splitlines():
             print(f"### W{worker_id} STDERR {line}", flush=True)
-    timings = _parse_stdout(proc.stdout)
+    parsed = _parse_worker(proc.stdout)
     # Also dump raw stdout, marked, so the operator can grep by worker.
     for line in proc.stdout.splitlines():
         print(f"### W{worker_id} {line}", flush=True)
     return WorkerResult(
         worker_id=worker_id,
         exit_code=proc.returncode,
-        timings=timings,
         stdout_lines=len(proc.stdout.splitlines()),
+        **parsed,
     )
 
 
@@ -150,7 +257,16 @@ def _aggregate(results: List[WorkerResult]) -> Dict[str, Dict[str, float]]:
     """Aggregate per-label timings across all workers.
 
     For each label, computes: ``n``, ``mean``, ``p50``, ``p95``,
-    ``stdev`` (population stdev when n < 2, else sample stdev).
+    ``stdev`` (population stdev when n < 2, else sample stdev), ``min``,
+    ``max`` — all in seconds. When BENCH_EVENT data carries it, also:
+
+    * ``peak_rss_mb`` — max-of-maxes across workers for this label.
+    * ``cpu_eff_pct`` — ``cpu_ms / wall_ms * 100`` summed across workers
+      for this label (omitted when any contributing event lacked CPU
+      data, e.g. a non-Linux worker). This is *multicore* utilization:
+      ``cpu_ms`` is total CPU time across all cores, so a value of e.g.
+      1600% means ~16 cores were busy for this layer — it is expected to
+      exceed 100% on parallel proving, not a bug.
     """
     all_labels = sorted({k for r in results for k in r.timings})
     agg: Dict[str, Dict[str, float]] = {}
@@ -166,7 +282,7 @@ def _aggregate(results: List[WorkerResult]) -> Dict[str, Dict[str, float]]:
         # use.
         p95_idx = max(0, min(n - 1, int(round(0.95 * n)) - 1))
         p95 = values_sorted[p95_idx]
-        agg[label] = {
+        entry: Dict[str, float] = {
             "n": n,
             "mean": statistics.mean(values),
             "p50": p50,
@@ -175,6 +291,34 @@ def _aggregate(results: List[WorkerResult]) -> Dict[str, Dict[str, float]]:
             "min": values_sorted[0],
             "max": values_sorted[-1],
         }
+
+        # Peak RSS for this label: max across all workers' per-label peaks.
+        rss_peaks = [
+            r.peak_rss_mb_by_label[label]
+            for r in results
+            if label in r.peak_rss_mb_by_label
+        ]
+        if rss_peaks:
+            entry["peak_rss_mb"] = max(rss_peaks)
+
+        # CPU efficiency: sum cpu and wall across workers for this label.
+        # Omit if any worker's label CPU sum is None (incomplete data).
+        wall_ms_sum = 0
+        cpu_ms_sum = 0
+        cpu_complete = True
+        for r in results:
+            if label not in r.wall_ms_by_label:
+                continue
+            wall_ms_sum += r.wall_ms_by_label[label]
+            label_cpu = r.cpu_ms_by_label.get(label)
+            if label_cpu is None:
+                cpu_complete = False
+            else:
+                cpu_ms_sum += label_cpu
+        if cpu_complete and wall_ms_sum > 0 and cpu_ms_sum > 0:
+            entry["cpu_eff_pct"] = cpu_ms_sum / wall_ms_sum * 100.0
+
+        agg[label] = entry
     return agg
 
 
@@ -200,21 +344,40 @@ def _print_summary(
             print(f"  worker {r.worker_id}: exit={r.exit_code}")
     if not agg:
         print(
-            "WARNING: no TOTAL/AVERAGE timing lines were parsed. "
-            "Either the bench failed to run or the log format changed."
+            "WARNING: no BENCH_EVENT layer_prove events were parsed. "
+            "Either the bench failed to run, the image predates the "
+            "BENCH_EVENT instrumentation (#9), or the log format changed."
         )
+        events_seen = sum(r.events_parsed for r in results)
+        print(f"  (total BENCH_EVENT lines parsed across workers: {events_seen})")
         return
+    # Only show the RSS / CPU-efficiency columns when at least one label
+    # carries that data — keeps the table narrow on non-Linux / pre-#9
+    # output while surfacing the richer metrics whenever they exist.
+    show_rss = any("peak_rss_mb" in s for s in agg.values())
+    show_cpu = any("cpu_eff_pct" in s for s in agg.values())
     # Column widths chosen to fit a typical 100-col terminal.
-    header = f"{'label':<55} {'n':>3} {'mean':>10} {'p50':>10} {'p95':>10} {'stdev':>10}"
+    header = f"{'label':<48} {'n':>3} {'mean':>10} {'p50':>10} {'p95':>10} {'stdev':>10}"
+    if show_rss:
+        header += f" {'peak_rss':>10}"
+    if show_cpu:
+        header += f" {'cpu_eff':>8}"
     print(header)
     print("-" * len(header))
     for label in sorted(agg):
         s = agg[label]
-        print(
-            f"{label:<55} {int(s['n']):>3} "
+        row = (
+            f"{label:<48} {int(s['n']):>3} "
             f"{s['mean']:>9.3f}s {s['p50']:>9.3f}s "
             f"{s['p95']:>9.3f}s {s['stdev']:>9.3f}s"
         )
+        if show_rss:
+            rss = s.get("peak_rss_mb")
+            row += f" {(str(int(rss)) + 'MB') if rss is not None else 'NA':>10}"
+        if show_cpu:
+            eff = s.get("cpu_eff_pct")
+            row += f" {(f'{eff:.0f}%') if eff is not None else 'NA':>8}"
+        print(row)
     print("=" * 72)
 
 
@@ -237,6 +400,13 @@ def _emit_json(
                 "worker_id": r.worker_id,
                 "exit_code": r.exit_code,
                 "timings": r.timings,
+                "peak_rss_mb": r.peak_rss_mb,
+                "cpu_ms_total": r.cpu_ms_total,
+                "events_parsed": r.events_parsed,
+                # Raw BENCH_EVENT objects, verbatim, so downstream
+                # consumers (DuckDB / Pandas, per #9) get the full
+                # per-chunk × per-layer measurement surface.
+                "events": r.events,
             }
             for r in results
         ],
