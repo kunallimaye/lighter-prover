@@ -79,6 +79,12 @@ variable "cell_arch" {
   default     = "amd64"
 }
 
+variable "cell_machine_family" {
+  description = "Optional Autopilot machine-family nodeSelector for cells (cloud.google.com/machine-family). Set to 'c4a' to PIN Axion/neoverse-v2 (Gen-1) nodes. IMPORTANT: the 'Scale-Out' compute class provisions t2a (Ampere/neoverse-n1) nodes on Autopilot — a neoverse-v2 binary SIGILLs (exit 132) there. Use compute_class='Performance' + machine_family='c4a' for real Axion. Empty = no family pin (Autopilot chooses)."
+  type        = string
+  default     = ""
+}
+
 variable "cell_cpu_request" {
   description = "CPU request per cell pod. PRODUCTION whole-machine pods request the full c4a-highcpu-64 core count; SMOKE requests a fraction of a vCPU so a trivial workload schedules cheaply."
   type        = string
@@ -124,6 +130,12 @@ variable "coordinator_arch" {
   description = "kubernetes.io/arch nodeSelector for coordinators."
   type        = string
   default     = "amd64"
+}
+
+variable "coordinator_machine_family" {
+  description = "Optional Autopilot machine-family nodeSelector for coordinators (cloud.google.com/machine-family). Set to 'c4a' to PIN Axion/neoverse-v2 nodes (see cell_machine_family for the SIGILL rationale). Empty = no family pin."
+  type        = string
+  default     = ""
 }
 
 variable "coordinator_cpu_request" {
