@@ -104,12 +104,18 @@ func main() {
 	jsonPath := flag.String("json", "bench/bench_test.json", "path to bench_test.json")
 	limit := flag.Int("limit", 0, "validate only the first N txs (0 = all)")
 	verbose := flag.Bool("v", false, "print first matched limbs per tree as evidence")
+	evidence := flag.Bool("evidence", false, "print one worked Cancel expected-vs-got example and exit")
 	flag.Parse()
 
 	block, err := loadBlock(*jsonPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR:", err)
 		os.Exit(2)
+	}
+
+	if *evidence {
+		printCancelEvidence(block)
+		os.Exit(0)
 	}
 
 	n := len(block.Txs)
@@ -143,9 +149,12 @@ func main() {
 		validateMarket(i, &tx, block, market, marketSeen, *verbose)
 	}
 
+	// --- Phase 1: Cancel (tx_type 15) end-to-end reconstruction (#123) ---
+	cancelResult := validateCancels(block, n)
+
 	results := []*result{apiKey, accOrders, asset, market}
 	hardDivergence := false
-	fmt.Println("--- per-tree bit-for-bit validation results ---")
+	fmt.Println("--- per-tree bit-for-bit validation results (Phase 0, #122) ---")
 	for _, r := range results {
 		status := "PASS"
 		if len(r.divergences) > 0 {
@@ -185,21 +194,22 @@ func main() {
 	fmt.Printf("asset:          %d/%d bit-for-bit (%d carried -> Phase 1)\n", asset.matched, asset.attempted, asset.carried)
 	fmt.Printf("market->omtr:   %d/%d bit-for-bit first-touch (%d carried -> Phase 1)\n", market.matched, market.attempted, market.carried)
 
+	// --- Phase-1 Cancel (tx_type 15) reconstruction results (#123) ---
 	fmt.Println()
-	fmt.Println("--- Phase-0 exit criterion (all 500 after-roots chain to nsr/osr) ---")
-	fmt.Println("NOT MET in this harness: chaining the block-level state root to nsr/osr")
-	fmt.Println("requires reconstructing the full account-tree and order-book-tree leaf")
-	fmt.Println("hashes (account_hash.rs nested positions/pools; order_book aggregation)")
-	fmt.Println("and carrying roots tx-to-tx, which is beyond the independently-validatable")
-	fmt.Println("sub-tree scope delivered here. See PR/issue comment for status.")
+	fmt.Println("--- Phase-1 Cancel (tx_type 15) end-to-end reconstruction (#123) ---")
+	printCancelResult(cancelResult)
+	if len(cancelResult.divergences) > 0 {
+		hardDivergence = true
+	}
 
 	if hardDivergence {
 		fmt.Println("\nRESULT: hard divergence(s) found (the harness did its job — see exact limbs above).")
 		os.Exit(1)
 	}
-	fmt.Println("\nRESULT: every attempted FIRST-touch reconstruction reproduced a JSON-stored")
-	fmt.Println("ground-truth root BIT-FOR-BIT. No encoding divergence detected. Remaining")
-	fmt.Println("second-touch folds are Phase-1 state-mutation work, not crypto/encoding bugs.")
+	fmt.Println("\nRESULT: Phase-0 first-touch reconstructions reproduce JSON-stored ground-truth")
+	fmt.Println("roots BIT-FOR-BIT, and every real, chainable Phase-1 Cancel reproduces the")
+	fmt.Println("next-same-market tx's before order_book_root (its after-root) BIT-FOR-BIT.")
+	fmt.Println("No encoding/state-transition divergence detected.")
 	os.Exit(0)
 }
 

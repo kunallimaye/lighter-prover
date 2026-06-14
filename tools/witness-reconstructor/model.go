@@ -25,8 +25,13 @@ const (
 	marketDepth        = 12
 	assetDepth         = 6
 	accountDepth       = 48
+	orderBookDepth     = 80 // ORDER_PRICE_BITS(32) + ORDER_NONCE_BITS(48), constants.rs:35,37
 
-	ownerAccountID = 0 // OWNER_ACCOUNT_ID == TAKER_ACCOUNT_ID (constants.rs:466)
+	orderNonceBits = 48 // ORDER_NONCE_BITS (constants.rs:35)
+	orderPriceBits = 32 // ORDER_PRICE_BITS (constants.rs:37)
+
+	ownerAccountID      = 0  // OWNER_ACCOUNT_ID == TAKER_ACCOUNT_ID (constants.rs:466)
+	txTypeL2CancelOrder = 15 // TX_TYPE_L2_CANCEL_ORDER
 )
 
 // Block is the top-level bench_test.json document (only fields we use).
@@ -64,6 +69,42 @@ type Tx struct {
 	// --- market (single leaf + proof) ---
 	MarketBefore MarketLeaf  `json:"mmb"`   // market.rs leaf
 	MarketProof  [][4]uint64 `json:"mpmmb"` // 12 siblings (depth 12)
+
+	// --- cancel-specific (tx_type 15, key 2co) ---
+	Cancel        *CancelPayload  `json:"2co"`     // L2CancelOrderTx (l2_cancel_order.rs:26-40)
+	OrderInfoBefr OrderInfo       `json:"obinfob"` // order-book Order leaf BEFORE (order.rs:22-40)
+	OrderBookPath []OrderBookNode `json:"obpb"`    // [80] order-book proof path (order_book_node.rs:18-33)
+}
+
+// CancelPayload models the 2co tx payload (l2_cancel_order.rs:26-40).
+type CancelPayload struct {
+	AccountIndex int64  `json:"ai"` // owner account index
+	ApiKeyIndex  uint8  `json:"ki"` // api key index
+	MarketIndex  uint16 `json:"m"`  // market index (defaults 0 via serde(default))
+	Index        int64  `json:"i"`  // cloindex or oindex
+}
+
+// OrderInfo models the order-book Order leaf BEFORE the cancel (order.rs:22-40).
+// key_price/key_nonce locate the leaf in the depth-80 order-book tree; the four
+// sums are the leaf's aggregation contribution removed on cancel.
+type OrderInfo struct {
+	KeyPrice    int64 `json:"kp"` // 32 bits (price_index)
+	KeyNonce    int64 `json:"kn"` // 48 bits (nonce_index)
+	AskBaseSum  int64 `json:"ab"`
+	AskQuoteSum int64 `json:"aq"`
+	BidBaseSum  int64 `json:"bb"`
+	BidQuoteSum int64 `json:"bq"`
+}
+
+// OrderBookNode models one level of the obpb proof (order_book_node.rs:18-33):
+// the sibling child hash plus the PARENT node's aggregated sums. internal_hash()
+// uses the four sums as the 4 HashOut limbs (NOT a Poseidon permutation).
+type OrderBookNode struct {
+	SiblingHash [4]uint64 `json:"h"`  // sibling_child_hash
+	AskBaseSum  int64     `json:"ab"` // parent ask_base_sum
+	AskQuoteSum int64     `json:"aq"` // parent ask_quote_sum
+	BidBaseSum  int64     `json:"bb"` // parent bid_base_sum
+	BidQuoteSum int64     `json:"bq"` // parent bid_quote_sum
 }
 
 // ApiKeyLeaf models akb (api_key.rs). pk is a quintic-ext field elem (5 limbs).
