@@ -7,6 +7,7 @@
 //! same plonky2-free code paths.
 
 pub mod blob_encode;
+pub mod conductor;
 pub mod empty_witness;
 pub mod events;
 pub mod kzg;

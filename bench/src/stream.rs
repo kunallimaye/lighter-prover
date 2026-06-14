@@ -75,6 +75,14 @@ pub struct ProverOutput {
     pub pool_chunk_total: usize,
     /// Per-layer stats (L1 then L2 for the real prover).
     pub layers: Vec<LayerStat>,
+    /// Issue #61 / ADR-0008 §2.1/§2.2: the measured witness-acquisition wall
+    /// for this chunk (the resolve-and-read at the `{height, witness_index}`
+    /// load seam). `Some(ms)` when the chunk was proven via the conductor's
+    /// witness plane (`conductor::WitnessResolver`); `None` for the legacy
+    /// recycled-witness path that does not resolve a reference. Emitted on
+    /// the `ChunkProven` event (the ADR-0008 §2.2 primary site). This is the
+    /// **local-resolve FLOOR**, never `witness_move`.
+    pub witness_fetch_ms: Option<u64>,
 }
 
 /// State shared between the reader thread, the trace source, and the
@@ -199,7 +207,11 @@ impl Enqueuer {
         shared: std::sync::Arc<StreamShared>,
         tx_per_proof: usize,
     ) -> Self {
-        Self { tx, shared, tx_per_proof }
+        Self {
+            tx,
+            shared,
+            tx_per_proof,
+        }
     }
 
     /// Enqueue `ceil(tx_count / tx_per_proof)` jobs for one arrival,
@@ -308,7 +320,12 @@ pub struct SummaryData {
     pub lag_p95_ms: u64,
 }
 
-pub fn summarize(chunks_proven: u64, tx_per_proof: usize, lags_ms: &[u64], elapsed: Duration) -> SummaryData {
+pub fn summarize(
+    chunks_proven: u64,
+    tx_per_proof: usize,
+    lags_ms: &[u64],
+    elapsed: Duration,
+) -> SummaryData {
     let secs = elapsed.as_secs_f64();
     let throughput = if secs > 0.0 {
         (chunks_proven * tx_per_proof as u64) as f64 / secs
@@ -408,6 +425,13 @@ pub fn run_prover_loop(
                         lag_ms,
                         queue_depth: depth,
                         ts: now_iso8601(),
+                        // ADR-0008 §2.2 primary site. The witness-resolve
+                        // wall is per-chunk (one resolve per ChunkJob), so it
+                        // is attributed to the chunk's measurement, not split
+                        // per layer; carried on every layer line for this
+                        // chunk so `lag_ms - witness_fetch_ms` is computable
+                        // from any one line. Real local-resolve floor or None.
+                        witness_fetch_ms: out.witness_fetch_ms,
                     });
                 }
                 chunks_proven += 1;
@@ -440,8 +464,19 @@ pub fn run_prover_loop(
     }
 
     let elapsed = start.elapsed();
-    emit_stream_summary("final", shared, chunks_proven, cfg.tx_per_proof, &lags_ms, elapsed);
-    StreamOutcome { chunks_proven, lags_ms, elapsed }
+    emit_stream_summary(
+        "final",
+        shared,
+        chunks_proven,
+        cfg.tx_per_proof,
+        &lags_ms,
+        elapsed,
+    );
+    StreamOutcome {
+        chunks_proven,
+        lags_ms,
+        elapsed,
+    }
 }
 
 /// Install SIGINT/SIGTERM handlers that flip the process-wide shutdown
@@ -465,9 +500,10 @@ pub fn install_signal_handlers() -> &'static AtomicBool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
     use std::sync::mpsc::sync_channel;
+
+    use super::*;
 
     struct VecSource {
         events: std::vec::IntoIter<TraceEvent>,
@@ -475,7 +511,9 @@ mod tests {
 
     impl VecSource {
         fn new(events: Vec<TraceEvent>) -> Self {
-            Self { events: events.into_iter() }
+            Self {
+                events: events.into_iter(),
+            }
         }
     }
 
@@ -486,7 +524,11 @@ mod tests {
     }
 
     fn ev(height: u64, tx_count: Option<u64>) -> TraceEvent {
-        TraceEvent { ts_ms: height as i64, height, tx_count }
+        TraceEvent {
+            ts_ms: height as i64,
+            height,
+            tx_count,
+        }
     }
 
     fn stub_output(idx: usize, total: usize) -> ProverOutput {
@@ -495,9 +537,23 @@ mod tests {
             pool_chunk_idx: idx,
             pool_chunk_total: total,
             layers: vec![
-                LayerStat { layer: 1, name: "BlockTxCircuit", wall_ms: 2, cpu_ms: Some(2), completed_at: now },
-                LayerStat { layer: 2, name: "BlockTxChainCircuit", wall_ms: 1, cpu_ms: Some(1), completed_at: now },
+                LayerStat {
+                    layer: 1,
+                    name: "BlockTxCircuit",
+                    wall_ms: 2,
+                    cpu_ms: Some(2),
+                    completed_at: now,
+                },
+                LayerStat {
+                    layer: 2,
+                    name: "BlockTxChainCircuit",
+                    wall_ms: 1,
+                    cpu_ms: Some(1),
+                    completed_at: now,
+                },
             ],
+            // Legacy recycled-witness stub: no witness-plane resolve.
+            witness_fetch_ms: None,
         }
     }
 
@@ -666,8 +722,14 @@ mod tests {
         let outcome = run_prover_loop(rx, &shared, &cfg, &mut prove, None);
         assert_eq!(outcome.chunks_proven, 0);
         let elapsed = t0.elapsed();
-        assert!(elapsed >= Duration::from_millis(140), "stopped early: {elapsed:?}");
-        assert!(elapsed < Duration::from_secs(5), "deadline ignored: {elapsed:?}");
+        assert!(
+            elapsed >= Duration::from_millis(140),
+            "stopped early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "deadline ignored: {elapsed:?}"
+        );
     }
 
     #[test]

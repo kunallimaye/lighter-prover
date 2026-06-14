@@ -694,6 +694,7 @@ fn main() {
         ts: now_iso8601(),
         tx_types: None,
         chunk_tx_type_homogeneous: None,
+        witness_fetch_ms: None,
     });
 
     let pre_exec_witness =
@@ -802,12 +803,11 @@ fn main() {
         // the caller opted in via `--attribute-tx-type` or its implier
         // `--group-by-tx-type`. `None` keeps the pre-#157 JSON shape
         // byte-identical.
-        let (tx_types_attr, homogeneous_attr) =
-            if args.attribute_tx_type || args.group_by_tx_type {
-                chunk_tx_type_attribution(tx)
-            } else {
-                (None, None)
-            };
+        let (tx_types_attr, homogeneous_attr) = if args.attribute_tx_type || args.group_by_tx_type {
+            chunk_tx_type_attribution(tx)
+        } else {
+            (None, None)
+        };
 
         events::emit(&BenchEvent::LayerProve {
             layer: 1,
@@ -822,6 +822,7 @@ fn main() {
             ts: now_iso8601(),
             tx_types: tx_types_attr.clone(),
             chunk_tx_type_homogeneous: homogeneous_attr,
+            witness_fetch_ms: None,
         });
 
         info!(
@@ -874,6 +875,7 @@ fn main() {
             // same chunk, so it gets the same attribution.
             tx_types: tx_types_attr,
             chunk_tx_type_homogeneous: homogeneous_attr,
+            witness_fetch_ms: None,
         });
 
         chain_prove_total += chain_dt;
@@ -1002,6 +1004,31 @@ fn run_stream(args: &Args) {
         pool_total, args.tx_per_proof
     );
 
+    // ---- Witness plane (ADR-0008 §1.4 k=1 mounted corpus; #61) ----
+    //
+    // Build a LOCAL mounted read-only corpus keyed by `{height,
+    // witness_index}` (ADR-0008 §1.1). This is the k=1 degenerate case: a
+    // single whole block (`bench_test.json`, height = block.block_number)
+    // mounted on local disk, partitioned into `pool_total` `S`-tx slices
+    // indexed `0..pool_total` (ADR-0008 §1.4 -- "today's `bench_test.json`").
+    // The resolver payload is just the slice's pool index; the prove path
+    // still reads the real txs from `pool` (the resolve MODELS the
+    // `{height, witness_index}` -> witness-bytes lookup whose wall is the
+    // `witness_fetch_ms` seam, ADR-0008 §2.1). Dispatch carries the
+    // REFERENCE `{height, witness_index}`, not the bytes (ADR-0008 §1.2).
+    let corpus_height: u64 = block.block_number;
+    let witness_corpus: bench::conductor::MountedCorpus<usize> =
+        bench::conductor::MountedCorpus::single_block(
+            corpus_height,
+            (0..pool_total).map(|i| (i, args.tx_per_proof)).collect(),
+        );
+    info!(
+        "stream: witness plane = k=1 mounted corpus at height {} with {} \
+         {{height, witness_index}} slices (ADR-0008 §1.4); witness_fetch_ms \
+         is the LOCAL-RESOLVE FLOOR, not witness_move (ADR-0008 §2.3)",
+        corpus_height, pool_total
+    );
+
     // ---- Circuit build: identical sequence and events to batch mode ----
 
     let l1_define_t = Instant::now();
@@ -1074,6 +1101,7 @@ fn run_stream(args: &Args) {
         ts: now_iso8601(),
         tx_types: None,
         chunk_tx_type_homogeneous: None,
+        witness_fetch_ms: None,
     });
 
     let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
@@ -1135,6 +1163,20 @@ fn run_stream(args: &Args) {
     );
 
     let mut prove = |_job: &ChunkJob| -> ProverOutput {
+        use bench::conductor::{WitnessKey, WitnessResolver};
+
+        // WITNESS RESOLVE (ADR-0008 §1.2/§2.1): the cell resolves its chunk's
+        // witness REFERENCE `{height, witness_index}` through the witness
+        // plane, measuring the real local-resolve wall (witness_fetch_ms).
+        // The reference is what the dispatch carried; the bytes are pulled
+        // locally here. This is the k=1 mounted-corpus lookup -- a local
+        // indexed read, never a network GET (ADR-0008 §1.3). The measured
+        // wall is the LOCAL-RESOLVE FLOOR, never witness_move (ADR-0008 §2.3).
+        let witness_key = WitnessKey::new(corpus_height, pool_idx as u64);
+        let witness_fetch_ms = witness_corpus
+            .resolve(witness_key)
+            .map(|resolved| resolved.fetch_ms);
+
         let block_tx = BlockTx {
             created_at,
             old_system_config: system_config,
@@ -1195,6 +1237,9 @@ fn run_stream(args: &Args) {
             pool_chunk_idx: pool_idx,
             pool_chunk_total: pool_total,
             layers: vec![l1_stat, l2_stat],
+            // ADR-0008 §2.1/§2.2: the real measured local-resolve floor for
+            // this chunk's witness reference. Emitted on ChunkProven.
+            witness_fetch_ms,
         };
 
         pool_idx = (pool_idx + 1) % pool_total;
@@ -1248,6 +1293,7 @@ fn run_stream(args: &Args) {
             ts: now_iso8601(),
             tx_types: None,
             chunk_tx_type_homogeneous: None,
+            witness_fetch_ms: None,
         });
     };
     let mut l3_opt: Option<&mut dyn FnMut()> = if args.l3_every.is_some() {
@@ -1447,6 +1493,7 @@ fn run_tree_fold(
             // `Tx` slice into the tree-fold scheduler -- deferred.
             tx_types: None,
             chunk_tx_type_homogeneous: None,
+            witness_fetch_ms: None,
         });
         info!(
             "tx chunk #{index}/{} BlockTxCircuit::prove time: {:?}",
@@ -1749,6 +1796,7 @@ fn run_tree_fold(
                         // chunks -- no single tx-type attribution applies.
                         tx_types: None,
                         chunk_tx_type_homogeneous: None,
+                        witness_fetch_ms: None,
                     });
                     info!(
                         "merge pair #{i}/{pair_count} (level {depth}) \
@@ -2064,6 +2112,7 @@ fn prove_leaf(
         // L1 site above).
         tx_types: None,
         chunk_tx_type_homogeneous: None,
+        witness_fetch_ms: None,
     });
     info!(
         "tx chunk #{index}/{} leaf BlockTxChainCircuit::prove time (incl. base proof): {:?}",
@@ -2170,6 +2219,7 @@ fn run_l4_check(
         // Issue #157: L4 is a block-level aggregate, not per-tx-chunk.
         tx_types: None,
         chunk_tx_type_homogeneous: None,
+        witness_fetch_ms: None,
     });
     // Issue #102 (additive): build / prove / verify split for the
     // calibration suite's objective-4 constants (per-machine L4_WALL).
@@ -3308,9 +3358,7 @@ fn run_l5_tree_fold(
             &l5_dummy_proof,
             l4_proof,
         )
-        .unwrap_or_else(|err| {
-            panic!("L5_TREEFOLD: leaf L5 prove for block {i} failed: {err:?}")
-        });
+        .unwrap_or_else(|err| panic!("L5_TREEFOLD: leaf L5 prove for block {i} failed: {err:?}"));
         info!(
             "L5_TREEFOLD: L5 leaf {}/{} (block {}) in {:?}",
             i + 1,
@@ -3330,7 +3378,10 @@ fn run_l5_tree_fold(
     info!(
         "L5_TREEFOLD: {} live L5 leaf proofs built (contiguous block range {}..={})",
         num_leaves,
-        leaf_batches.first().map(|b| b.end_block_number).unwrap_or(0),
+        leaf_batches
+            .first()
+            .map(|b| b.end_block_number)
+            .unwrap_or(0),
         leaf_batches.last().map(|b| b.end_block_number).unwrap_or(0),
     );
 
@@ -3338,13 +3389,12 @@ fn run_l5_tree_fold(
     // (proof, batch, segment, is_merge); the BatchMergeCircuit live-proves
     // each pairwise merge using PR #96 (`generate_witness`) to populate the
     // merged Batch/SegmentInfo PIs.
-    let mut level: Vec<(ProofWithPublicInputs<F, C, D>, Batch<F>, SegmentInfo, bool)> =
-        leaf_proofs
-            .into_iter()
-            .zip(leaf_batches.iter().cloned())
-            .zip(leaf_segments.iter().cloned())
-            .map(|((p, b), s)| (p, b, s, false))
-            .collect();
+    let mut level: Vec<(ProofWithPublicInputs<F, C, D>, Batch<F>, SegmentInfo, bool)> = leaf_proofs
+        .into_iter()
+        .zip(leaf_batches.iter().cloned())
+        .zip(leaf_segments.iter().cloned())
+        .map(|((p, b), s)| (p, b, s, false))
+        .collect();
 
     let mut depth = 0usize;
     let mut merges = 0usize;
@@ -3379,7 +3429,9 @@ fn run_l5_tree_fold(
                         right_is_merge,
                     )
                     .unwrap_or_else(|err| {
-                        panic!("L5_TREEFOLD merge #{merges} (level {depth}) live prove failed: {err:?}")
+                        panic!(
+                            "L5_TREEFOLD merge #{merges} (level {depth}) live prove failed: {err:?}"
+                        )
                     });
                     info!(
                         "L5_TREEFOLD: merge #{} (level {}) live-proved in {:?}",
@@ -3416,7 +3468,9 @@ fn run_l5_tree_fold(
     };
     root_verify_data
         .verify(root_proof.clone())
-        .unwrap_or_else(|err| panic!("L5_TREEFOLD: root proof verify failed ({root_verify_label}): {err:?}"));
+        .unwrap_or_else(|err| {
+            panic!("L5_TREEFOLD: root proof verify failed ({root_verify_label}): {err:?}")
+        });
 
     info!(
         "L5_TREEFOLD wired+proved: leaves={} depth={} merges={} root_block_range={}..={} \

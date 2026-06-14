@@ -73,6 +73,17 @@ pub enum BenchEvent<'a> {
         /// it. Default behavior is byte-identical to pre-#157.
         #[serde(skip_serializing_if = "Option::is_none")]
         chunk_tx_type_homogeneous: Option<u8>,
+        /// Issue #61 / ADR-0008 §2.2: witness-acquisition wall for this
+        /// chunk -- the resolve-and-read time at the `{height,
+        /// witness_index}` load seam (ADR-0008 §2.1), separately
+        /// accountable and subtractable from the prove `wall_ms`. This is
+        /// the **local-resolve FLOOR**, NOT `witness_move` (the distributed
+        /// term stays UNMODELED until ADR-0008 §3's gated fleet study;
+        /// ADR-0004 §3.1/§3.2). `None` (skipped from JSON) when the resolve
+        /// was not routed through the witness plane -- additive,
+        /// consumer-safe, byte-identical to pre-#61 default behavior.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        witness_fetch_ms: Option<u64>,
     },
     /// A `*::define(...) + builder.build()` measurement.
     CircuitDefine {
@@ -123,6 +134,20 @@ pub enum BenchEvent<'a> {
         lag_ms: u64,
         queue_depth: usize,
         ts: String,
+        /// Issue #61 / ADR-0008 §2.2: witness-acquisition wall for this
+        /// chunk. This is the **PRIMARY** `witness_fetch_ms` site (ADR-0008
+        /// §2.2): `ChunkProven` already carries `height`, `lag_ms`,
+        /// `wall_ms`, and `chunk_idx`/`chunk_total`, so `witness_fetch_ms`
+        /// joins the per-chunk lag accounting directly -- `lag_ms -
+        /// witness_fetch_ms` isolates the pure prover lag. It is the
+        /// measured **local-resolve FLOOR** (the resolve-and-read at the
+        /// `{height, witness_index}` seam, ADR-0008 §2.1), NEVER
+        /// `witness_move` (distributed; stays UNMODELED, ADR-0008 §2.3 /
+        /// ADR-0004 §3.1). `None` (serialized as JSON `null`) when the
+        /// chunk was proven without going through the witness plane (e.g.
+        /// the legacy recycled-witness stream path); additive and
+        /// consumer-safe.
+        witness_fetch_ms: Option<u64>,
     },
     /// Stream mode: rolling aggregates. Emitted every 60s
     /// (`phase = "periodic"`) and once at exit (`phase = "final"`).
@@ -406,11 +431,36 @@ mod tests {
             lag_ms: 1234,
             queue_depth: 7,
             ts: "2026-06-11T00:00:01Z".into(),
+            // ADR-0008 §2.2: real measured local-resolve floor.
+            witness_fetch_ms: Some(3),
         };
         let json = serde_json::to_string(&proven).unwrap();
         assert!(json.contains("\"event\":\"chunk_proven\""));
         assert!(json.contains("\"lag_ms\":1234"));
         assert!(json.contains("\"queue_depth\":7"));
+        // ADR-0008 §2.2: witness_fetch_ms is on the primary ChunkProven site.
+        assert!(json.contains("\"witness_fetch_ms\":3"));
+
+        // When absent (legacy recycled-witness path), the field serializes
+        // as JSON null -- additive, consumer-safe (ADR-0008 §2.2).
+        let proven_null = BenchEvent::ChunkProven {
+            layer: 1,
+            name: "BlockTxCircuit",
+            chunk_idx: Some(0),
+            chunk_total: Some(1),
+            tx_per_proof: 4,
+            wall_ms: 100,
+            cpu_ms: None,
+            rss_mb_peak: None,
+            rss_mb_after: None,
+            height: 1,
+            lag_ms: 100,
+            queue_depth: 0,
+            ts: "2026-06-11T00:00:02Z".into(),
+            witness_fetch_ms: None,
+        };
+        let json_null = serde_json::to_string(&proven_null).unwrap();
+        assert!(json_null.contains("\"witness_fetch_ms\":null"));
 
         let summary = BenchEvent::StreamSummary {
             phase: "final",
@@ -519,6 +569,7 @@ mod tests {
             ts: "2026-06-14T07:14:22Z".into(),
             tx_types: None,
             chunk_tx_type_homogeneous: None,
+            witness_fetch_ms: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"event\":\"layer_prove\""));
@@ -549,6 +600,7 @@ mod tests {
             ts: "2026-06-14T07:14:24Z".into(),
             tx_types: Some(vec![14, 14, 14, 14]),
             chunk_tx_type_homogeneous: Some(14),
+            witness_fetch_ms: None,
         };
         let json = serde_json::to_string(&homogeneous).unwrap();
         assert!(json.contains("\"tx_types\":[14,14,14,14]"));
@@ -567,6 +619,7 @@ mod tests {
             ts: "2026-06-14T07:14:25Z".into(),
             tx_types: Some(vec![14, 14, 15, 15]),
             chunk_tx_type_homogeneous: None,
+            witness_fetch_ms: None,
         };
         let json = serde_json::to_string(&mixed).unwrap();
         assert!(json.contains("\"tx_types\":[14,14,15,15]"));
