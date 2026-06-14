@@ -178,6 +178,49 @@ variable "pubsub_subscription" {
   default     = "lighter-prover-smoke-dispatch-sub"
 }
 
+# ── Inner chunk-dispatch + results planes (issue #172) ──
+# The genuine distributed coordinator/cell coordination needs two MORE
+# topic/subscription pairs beyond the outer block-dispatch + backlog signal:
+# the chunk plane (coordinator -> cells) and the results plane (cells ->
+# coordinator). Gated behind enable_chunk_plane so the smoke automation is
+# unchanged by default; the scale tfvars turn it on.
+
+variable "enable_chunk_plane" {
+  description = "Create the inner chunk-dispatch + results Pub/Sub topic/subscription pairs (issue #172). false at smoke scale (only the outer backlog signal is needed); true for the real distributed coordinator/cell run."
+  type        = bool
+  default     = false
+}
+
+variable "chunk_topic" {
+  description = "Pub/Sub topic the coordinator publishes chunk REFERENCES to (coordinator -> cells; ADR-0006 §1.2). Maps to the cell pods' LIGHTER_CHUNK_TOPIC / the coordinator's --chunk-topic."
+  type        = string
+  default     = "lighter-prover-chunk"
+}
+
+variable "chunk_subscription" {
+  description = "Pub/Sub subscription the cell pods competing-pull chunk references from. Maps to the cells' LIGHTER_CHUNK_SUBSCRIPTION."
+  type        = string
+  default     = "lighter-prover-chunk-sub"
+}
+
+variable "chunk_ack_deadline_seconds" {
+  description = "Ack deadline for the chunk subscription. A chunk's L1+L2 prove is multi-second; give cells ample headroom so an in-flight chunk is not redelivered mid-prove."
+  type        = number
+  default     = 600
+}
+
+variable "results_topic" {
+  description = "Pub/Sub topic the cell pods publish chunk RESULTS to (cells -> coordinator). Maps to the cells' LIGHTER_RESULTS_TOPIC."
+  type        = string
+  default     = "lighter-prover-results"
+}
+
+variable "results_subscription" {
+  description = "Pub/Sub subscription the coordinator pulls chunk results from. Maps to the coordinator's LIGHTER_RESULTS_SUBSCRIPTION."
+  type        = string
+  default     = "lighter-prover-results-sub"
+}
+
 variable "hpa_target_class" {
   description = "Which workload the backlog HPA scales (cells | coordinator). Cells consume the block backlog at smoke scale."
   type        = string

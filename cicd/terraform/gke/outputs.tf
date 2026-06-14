@@ -29,6 +29,17 @@ output "pubsub_subscription" {
   value       = google_pubsub_subscription.dispatch.name
 }
 
+output "chunk_plane" {
+  description = "The inner chunk-dispatch + results Pub/Sub planes (issue #172). null fields when enable_chunk_plane = false."
+  value = {
+    enabled              = var.enable_chunk_plane
+    chunk_topic          = var.enable_chunk_plane ? google_pubsub_topic.chunk[0].name : null
+    chunk_subscription   = var.enable_chunk_plane ? google_pubsub_subscription.chunk[0].name : null
+    results_topic        = var.enable_chunk_plane ? google_pubsub_topic.results[0].name : null
+    results_subscription = var.enable_chunk_plane ? google_pubsub_subscription.results[0].name : null
+  }
+}
+
 output "hpa_target_class" {
   description = "Which machine class the backlog HPA scales."
   value       = var.hpa_target_class

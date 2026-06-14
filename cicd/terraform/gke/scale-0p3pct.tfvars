@@ -51,7 +51,13 @@ cell_memory_request = "16Gi"  # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L
 # DEPENDENCY: replace with the REAL arm64 prover image tag
 # (<sha>-neoverse-v2) emitted by cicd/cloudbuild.yaml. Placeholder until built.
 cell_image   = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
-cell_command = ["/usr/local/bin/prover", "--mode", "cell"]
+cell_command = [
+  "/usr/local/bin/prover", "--mode", "cell",
+  "--project", "PROJECT",
+  "--chunk-subscription", "lighter-prover-scale-0p3pct-chunk-sub",
+  "--results-topic", "lighter-prover-scale-0p3pct-results",
+  "--poll-interval-s", "2",
+]
 
 # ── Machine CLASS 2: COORDINATORS (ADR-0006 §1.1, §2) — DISTINCT class ──
 # Fold L2 merge tree + prove L4. Sized SEPARATELY, NEVER summed with cells.
@@ -67,7 +73,14 @@ coordinator_cpu_request    = "62"    # whole box; coordinator-specific profile U
 coordinator_memory_request = "16Gi"  # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
 # DEPENDENCY: same real arm64 prover image tag from cicd/cloudbuild.yaml.
 coordinator_image   = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
-coordinator_command = ["/usr/local/bin/prover", "--mode", "coordinator"]
+coordinator_command = [
+  "/usr/local/bin/prover", "--mode", "coordinator",
+  "--project", "PROJECT",
+  "--dispatch-subscription", "lighter-prover-scale-0p3pct-dispatch-sub",
+  "--chunk-topic", "lighter-prover-scale-0p3pct-chunk",
+  "--results-subscription", "lighter-prover-scale-0p3pct-results-sub",
+  "--poll-interval-s", "2",
+]
 
 # ── HARD DAY-1 mitigation (NON-NEGOTIABLE at EVERY scale) ──
 # safe-to-evict=false + the PDB are hardwired in main.tf; this var only
@@ -77,6 +90,13 @@ coordinator_command = ["/usr/local/bin/prover", "--mode", "coordinator"]
 coordinator_pdb_min_available = 1
 
 # ── Autoscaling on Pub/Sub backlog ──
+# ── Inner chunk-dispatch + results planes (#172, the real coordination) ──
+enable_chunk_plane   = true
+chunk_topic          = "lighter-prover-scale-0p3pct-chunk"
+chunk_subscription   = "lighter-prover-scale-0p3pct-chunk-sub"
+results_topic        = "lighter-prover-scale-0p3pct-results"
+results_subscription = "lighter-prover-scale-0p3pct-results-sub"
+
 pubsub_topic        = "lighter-prover-scale-0p3pct-dispatch"
 pubsub_subscription = "lighter-prover-scale-0p3pct-dispatch-sub"
 hpa_target_class    = "cells"
