@@ -417,5 +417,299 @@ class TestTxMixHelpers(unittest.TestCase):
         self.assertIn("TX-TYPE MIX", text)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# tx-mix region/egress config + rate-limit hardening (issue #128 follow-up).
+# All offline: a fake `requests` module drives the 403 / 429 / Retry-After /
+# transient-backoff paths with NO real network and NO real sleeps.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _FakeRequestException(Exception):
+    pass
+
+
+class _FakeConnectionError(_FakeRequestException):
+    pass
+
+
+class _FakeHTTPError(_FakeRequestException):
+    def __init__(self, msg, response=None):
+        super().__init__(msg)
+        self.response = response
+
+
+class _FakeExceptions:
+    RequestException = _FakeRequestException
+    ConnectionError = _FakeConnectionError
+    HTTPError = _FakeHTTPError
+
+
+class _FakeResponse:
+    """Minimal stand-in for a requests.Response."""
+
+    def __init__(self, status_code=200, json_data=None, headers=None):
+        self.status_code = status_code
+        self._json = json_data if json_data is not None else []
+        self.headers = headers or {}
+
+    def json(self):
+        return self._json
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise _FakeHTTPError(f"HTTP {self.status_code}", response=self)
+
+
+class _FakeRequests:
+    """Scriptable fake `requests` module. `responses` is a list of
+    _FakeResponse or Exception instances returned/raised in order; the last
+    entry repeats if exhausted. Records every GET call for assertions."""
+
+    exceptions = _FakeExceptions
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def get(self, url, params=None, headers=None, proxies=None, timeout=None):
+        self.calls.append({"url": url, "params": params, "headers": headers,
+                           "proxies": proxies, "timeout": timeout})
+        item = (self._responses.pop(0) if len(self._responses) > 1
+                else self._responses[0])
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class _RecordingSleep:
+    """Captures sleep durations instead of waiting."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, secs):
+        self.calls.append(secs)
+
+
+class TestTxMixConfigResolution(unittest.TestCase):
+    """Region / egress / rate config resolution (pure, precedence rules)."""
+
+    def test_base_url_precedence_flag_env_default(self):
+        self.assertEqual(feeder.resolve_base_url("http://flag", {}),
+                         "http://flag")
+        self.assertEqual(
+            feeder.resolve_base_url(
+                None, {feeder.ENV_TXMIX_BASE_URL: "http://env"}),
+            "http://env")
+        self.assertEqual(feeder.resolve_base_url(None, {}),
+                         feeder.TXMIX_BLOCK_URL)
+
+    def test_proxy_precedence_and_none(self):
+        self.assertEqual(feeder.resolve_proxies("http://p", {}),
+                         {"http": "http://p", "https": "http://p"})
+        self.assertEqual(
+            feeder.resolve_proxies(
+                None, {feeder.ENV_EGRESS_PROXY: "http://envp"}),
+            {"http": "http://envp", "https": "http://envp"})
+        # HTTPS_PROXY fallback
+        self.assertEqual(
+            feeder.resolve_proxies(None, {"HTTPS_PROXY": "http://hp"}),
+            {"http": "http://hp", "https": "http://hp"})
+        # nothing configured -> None (so requests uses its own defaults)
+        self.assertIsNone(feeder.resolve_proxies(None, {}))
+
+    def test_region_label_precedence(self):
+        self.assertEqual(feeder.resolve_region("tokyo", {}), "tokyo")
+        self.assertEqual(
+            feeder.resolve_region(None, {feeder.ENV_REGION: "asia-ne1"}),
+            "asia-ne1")
+        self.assertIsNone(feeder.resolve_region(None, {}))
+
+    def test_min_interval_from_rpm(self):
+        self.assertAlmostEqual(feeder.min_interval_from_rpm(60), 1.0)
+        self.assertAlmostEqual(feeder.min_interval_from_rpm(120), 0.5)
+        # conservative default stays under the 90/min per-IP limit
+        self.assertGreater(feeder.min_interval_from_rpm(feeder.TXMIX_MAX_RPM),
+                           60.0 / 90.0)
+        self.assertEqual(feeder.min_interval_from_rpm(0), 0.0)
+
+    def test_backoff_is_exponential_and_capped(self):
+        delays = [feeder._backoff_delay(i, initial=1.0, cap=60.0)
+                  for i in range(8)]
+        self.assertEqual(delays[:4], [1.0, 2.0, 4.0, 8.0])
+        self.assertTrue(all(d <= 60.0 for d in delays))
+        self.assertEqual(delays[-1], 60.0)  # saturates at the cap
+
+    def test_parse_retry_after_capped_and_tolerant(self):
+        self.assertEqual(feeder._parse_retry_after("5"), 5.0)
+        self.assertEqual(feeder._parse_retry_after("2.5"), 2.5)
+        self.assertIsNone(feeder._parse_retry_after(None))
+        self.assertIsNone(feeder._parse_retry_after("Mon, 01 Jan 2030"))
+        self.assertIsNone(feeder._parse_retry_after("-3"))
+        # hostile/huge value is capped, never honored unboundedly
+        self.assertEqual(
+            feeder._parse_retry_after("99999", cap_s=120.0), 120.0)
+
+
+class TestRateLimiter(unittest.TestCase):
+    """Min-interval pacing — the client cannot accidentally hammer."""
+
+    def test_first_call_no_wait_then_paces(self):
+        clock = {"t": 0.0}
+        sleeps = _RecordingSleep()
+
+        def fake_clock():
+            return clock["t"]
+
+        rl = feeder.RateLimiter(1.0, sleep=sleeps, clock=fake_clock)
+        rl.wait()                       # first call: no sleep
+        self.assertEqual(sleeps.calls, [])
+        clock["t"] = 0.25               # only 0.25s elapsed
+        rl.wait()                       # must sleep the remaining 0.75s
+        self.assertEqual(len(sleeps.calls), 1)
+        self.assertAlmostEqual(sleeps.calls[0], 0.75)
+
+    def test_zero_interval_never_sleeps(self):
+        sleeps = _RecordingSleep()
+        rl = feeder.RateLimiter(0.0, sleep=sleeps)
+        rl.wait()
+        rl.wait()
+        self.assertEqual(sleeps.calls, [])
+
+
+class TestTxMixHTTPHardening(unittest.TestCase):
+    """403 / 429 / Retry-After / transient backoff — offline, no real waits."""
+
+    def _http(self, responses, sleep=None, **kw):
+        fake = _FakeRequests(responses)
+        sleep = sleep or _RecordingSleep()
+        limiter = feeder.RateLimiter(0.0, sleep=sleep)
+        http = feeder.TxMixHTTP(fake, "http://test/blockTxs", limiter=limiter,
+                                sleep=sleep, **kw)
+        return http, fake, sleep
+
+    def test_403_raises_immediately_not_retried(self):
+        resp = _FakeResponse(status_code=403)
+        http, fake, sleep = self._http([resp])
+        with self.assertRaises(_FakeHTTPError) as cm:
+            feeder._http_get_with_retry(http, http.base_url, {})
+        self.assertEqual(cm.exception.response.status_code, 403)
+        # geo-block is NOT transient: exactly one attempt, no backoff sleeps
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(sleep.calls, [])
+
+    def test_429_honors_retry_after_then_succeeds(self):
+        responses = [
+            _FakeResponse(status_code=429, headers={"Retry-After": "7"}),
+            _FakeResponse(status_code=200, json_data=[{"tx_type": 15}]),
+        ]
+        http, fake, sleep = self._http(responses)
+        r = feeder._http_get_with_retry(http, http.base_url, {})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(fake.calls), 2)
+        # slept exactly the Retry-After value, not the backoff schedule
+        self.assertIn(7.0, sleep.calls)
+
+    def test_429_without_retry_after_uses_backoff(self):
+        responses = [
+            _FakeResponse(status_code=429),   # no Retry-After header
+            _FakeResponse(status_code=200, json_data=[]),
+        ]
+        http, fake, sleep = self._http(responses)
+        feeder._http_get_with_retry(http, http.base_url, {})
+        # first retry backoff = initial (1.0s)
+        self.assertIn(feeder.TXMIX_BACKOFF_INITIAL_S, sleep.calls)
+
+    def test_transient_5xx_backs_off_then_succeeds(self):
+        responses = [
+            _FakeResponse(status_code=503),
+            _FakeResponse(status_code=503),
+            _FakeResponse(status_code=200, json_data=[{"tx_type": 17}]),
+        ]
+        http, fake, sleep = self._http(responses)
+        r = feeder._http_get_with_retry(http, http.base_url, {})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(fake.calls), 3)
+        # exponential: 1.0 then 2.0
+        self.assertEqual(sleep.calls[:2], [1.0, 2.0])
+
+    def test_connection_error_retried_then_reraised_after_max(self):
+        err = _FakeConnectionError("boom")
+        http, fake, sleep = self._http([err], max_retries=2)
+        with self.assertRaises(_FakeConnectionError):
+            feeder._http_get_with_retry(http, http.base_url, {})
+        # initial attempt + 2 retries = 3 calls; 2 backoff sleeps
+        self.assertEqual(len(fake.calls), 3)
+        self.assertEqual(len(sleep.calls), 2)
+
+    def test_429_gives_up_after_max_retries(self):
+        resp = _FakeResponse(status_code=429, headers={"Retry-After": "1"})
+        http, fake, sleep = self._http([resp], max_retries=3)
+        with self.assertRaises(_FakeHTTPError) as cm:
+            feeder._http_get_with_retry(http, http.base_url, {})
+        self.assertEqual(cm.exception.response.status_code, 429)
+        self.assertEqual(len(fake.calls), 4)   # 1 + 3 retries
+
+    def test_proxy_threaded_through_to_requests(self):
+        resp = _FakeResponse(status_code=200, json_data=[])
+        fake = _FakeRequests([resp])
+        limiter = feeder.RateLimiter(0.0, sleep=_RecordingSleep())
+        http = feeder.TxMixHTTP(fake, "http://test/blockTxs",
+                                proxies={"https": "http://tokyo"},
+                                limiter=limiter)
+        feeder._http_get_with_retry(http, http.base_url, {})
+        self.assertEqual(fake.calls[0]["proxies"], {"https": "http://tokyo"})
+
+
+class TestTxMixGeoBlockGuidance(unittest.TestCase):
+    """The 403 path must fail clearly with actionable Tokyo guidance and
+    NOT produce a mix (measurement-citation norm)."""
+
+    def test_guidance_text_is_actionable(self):
+        msg = feeder.geo_block_guidance("http://x/blockTxs")
+        for needle in ("403", "US", "Tokyo", "ap-northeast", "asia-northeast1",
+                       "--base-url", "--proxy", "sample-block"):
+            self.assertIn(needle, msg)
+        self.assertIn("http://x/blockTxs", msg)
+
+    def test_cmd_tx_mix_403_exits_2_with_guidance(self):
+        resp = _FakeResponse(status_code=403)
+        fake = _FakeRequests([resp])
+
+        class Args:
+            sample_block = None
+            heights = [100, 100]      # avoid the tip-resolution call
+            blocks = 1
+            page_limit = 100
+            base_url = "http://blocked/blockTxs"
+            proxy = None
+            region = "us-test"
+            max_rpm = feeder.TXMIX_MAX_RPM
+            max_retries = 2
+
+        out = io.StringIO()
+        err = io.StringIO()
+
+        # Inject the fake `requests` for the lazy `import requests`.
+        import sys as _sys
+        from contextlib import redirect_stderr
+        had_requests = "requests" in _sys.modules
+        saved = _sys.modules.get("requests")
+        _sys.modules["requests"] = fake
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = feeder.cmd_tx_mix(Args(), out=out)
+        finally:
+            if had_requests:
+                _sys.modules["requests"] = saved
+            else:
+                _sys.modules.pop("requests", None)
+
+        self.assertEqual(rc, 2)                          # honest geo-block exit
+        self.assertIn("Tokyo", err.getvalue())           # actionable guidance
+        # measurement-citation norm: NO mix table emitted on a geo-block
+        self.assertNotIn("TX-TYPE MIX", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

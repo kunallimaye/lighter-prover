@@ -27,6 +27,7 @@ import asyncio
 import datetime
 import json
 import math
+import os
 import signal
 import statistics
 import sys
@@ -42,11 +43,33 @@ UA = "lighter-prover-feeder/48 (research; single conn; <=85 req/min)"
 # the only HTTP source that exposes tx_type per transaction is the zklighter
 # mainnet API's blockTxs endpoint. (Confirmed by probing: explorer
 # /api/blocks/{h} returns {total_transactions, markets, logs} only.)
-# That API geo-blocks some IPs with HTTP 403 (same block the main REST API
-# applies, see cmd_peak_hours), which `tx-mix` reports honestly rather than
-# inventing numbers.
+# That API geo-blocks some IPs with HTTP 403 (observed: US regions); Tokyo /
+# ap-northeast is normally NOT geo-blocked, so the operable answer is to run
+# this capture from there. The tool cannot change its own egress IP, so it
+# (a) reports a 403 honestly with crisp Tokyo guidance rather than inventing
+# numbers, and (b) exposes config knobs (--base-url / --proxy / env) so an
+# operator can point it at a Tokyo egress without code edits.
 TXMIX_BLOCK_URL = "https://mainnet.zklighter.elliot.ai/api/v1/blockTxs"
-TXMIX_POLL_PERIOD_S = 0.71  # ~84.5 req/min, under the 90/min per-IP limit
+
+# Rate-limit hardening (the explicit maintainer requirement: the tool must
+# be a well-behaved client that cannot accidentally hammer the endpoint).
+# Conservative defaults keep us well under the documented 90 req/min per-IP
+# limit; all are CLI/env-overridable. Backoff honors Retry-After / 429.
+TXMIX_MAX_RPM = 80          # cap requests/min (-> min-interval below)
+TXMIX_BACKOFF_INITIAL_S = 1.0
+TXMIX_BACKOFF_CAP_S = 60.0  # ceiling for a single backoff sleep
+TXMIX_MAX_RETRIES = 5       # per-request retries on 429/transient before fail
+TXMIX_RETRY_AFTER_CAP_S = 120.0  # honor Retry-After but never sleep forever
+
+# Region/egress config knobs (issue #128 follow-up). The tool runs from
+# wherever it is invoked and cannot change its IP from inside the process;
+# these let an operator point it at a Tokyo egress without code edits.
+#   LIGHTER_TXMIX_BASE_URL  alternate blockTxs base URL (e.g. a Tokyo egress)
+#   LIGHTER_EGRESS_PROXY    egress proxy (falls back to HTTPS_PROXY)
+#   LIGHTER_REGION          a label recorded in output for citation hygiene
+ENV_TXMIX_BASE_URL = "LIGHTER_TXMIX_BASE_URL"
+ENV_EGRESS_PROXY = "LIGHTER_EGRESS_PROXY"
+ENV_REGION = "LIGHTER_REGION"
 
 # Lighter tx_type enum -> human name. The four dominant trading types are
 # {14,15,17,21}; others are carried through as "type_<n>" so an unexpected
@@ -498,6 +521,138 @@ def cmd_peak_hours(args, out=None):
 # sample block offline (labeled sample-size-1 — a SAMPLE, never the mix).
 # ──────────────────────────────────────────────────────────────────────
 
+# ── region / egress config resolution (no hardcoded US assumptions) ──────
+# Precedence everywhere: explicit CLI value > environment variable > default.
+# None of these change the process's egress IP — they let an operator point
+# the tool at a Tokyo egress (alternate base URL and/or proxy) without code
+# edits. Pure + offline-testable (env passed in so tests need no monkeypatch
+# of os.environ globally).
+
+def resolve_base_url(cli_value=None, env=None):
+    """Resolve the blockTxs base URL: --base-url > env > TXMIX_BLOCK_URL."""
+    if cli_value:
+        return cli_value
+    env = os.environ if env is None else env
+    return env.get(ENV_TXMIX_BASE_URL) or TXMIX_BLOCK_URL
+
+
+def resolve_proxies(cli_value=None, env=None):
+    """Resolve an egress proxy -> a requests `proxies` dict, or None.
+
+    Precedence: --proxy > LIGHTER_EGRESS_PROXY > HTTPS_PROXY/https_proxy.
+    A single URL is applied to both http and https (requests honors the
+    scheme of the target). Returns None when no proxy is configured.
+    """
+    env = os.environ if env is None else env
+    proxy = (cli_value or env.get(ENV_EGRESS_PROXY)
+             or env.get("HTTPS_PROXY") or env.get("https_proxy"))
+    if not proxy:
+        return None
+    return {"http": proxy, "https": proxy}
+
+
+def resolve_region(cli_value=None, env=None):
+    """Resolve a human region label for citation hygiene (or None).
+
+    This is purely a label recorded in the output's source line so a
+    captured mix cites WHERE it was captured from; it does not influence
+    routing. Precedence: --region > LIGHTER_REGION.
+    """
+    if cli_value:
+        return cli_value
+    env = os.environ if env is None else env
+    return env.get(ENV_REGION) or None
+
+
+def min_interval_from_rpm(max_rpm):
+    """Requests/min cap -> minimum seconds between requests (>= 0)."""
+    if max_rpm is None or max_rpm <= 0:
+        return 0.0
+    return 60.0 / float(max_rpm)
+
+
+def geo_block_guidance(base_url):
+    """Crisp, actionable 403 guidance (centralized so tests stay in sync).
+
+    The endpoint geo-blocks some regions (observed: US). The operable
+    answer is to run the capture from Tokyo / ap-northeast (not geo-blocked)
+    — or point the tool at a Tokyo egress via --base-url / --proxy.
+    """
+    return (
+        "BLOCKER: this endpoint geo-blocks some regions (observed: US) with "
+        "HTTP 403.\n"
+        f"  endpoint: {base_url}\n"
+        "The zklighter mainnet blockTxs API is the ONLY HTTP source exposing "
+        "per-tx tx_type; the explorer API does NOT carry tx_type (its block "
+        "endpoints return block_size/total_transactions/markets only), so the "
+        "tx-mix cannot be measured from a geo-blocked IP.\n"
+        "FIX — run from Tokyo / ap-northeast (normally NOT geo-blocked):\n"
+        "  * provision a small GCP VM in asia-northeast1 (or an equivalent "
+        "non-US egress) and run this `tx-mix` command there; or\n"
+        "  * point this tool at a Tokyo egress without moving it: set "
+        "--base-url <tokyo-egress-url> and/or --proxy <tokyo-proxy> "
+        "(env: LIGHTER_TXMIX_BASE_URL / LIGHTER_EGRESS_PROXY).\n"
+        "Or use --sample-block for the in-repo sample-size-1 block (a SAMPLE, "
+        "never presented as the mainnet mix)."
+    )
+
+
+class RateLimiter:
+    """A minimal, well-behaved client pacer: enforce a minimum interval
+    between requests so the tool cannot accidentally hammer the endpoint.
+
+    `sleep` is injectable so tests assert pacing without real waits. Uses a
+    monotonic clock; `clock` is injectable for the same reason.
+    """
+
+    def __init__(self, min_interval_s, sleep=time.sleep, clock=time.monotonic):
+        self.min_interval_s = max(0.0, float(min_interval_s))
+        self._sleep = sleep
+        self._clock = clock
+        self._last = None
+
+    def wait(self):
+        """Block (via the injected sleep) until min_interval has elapsed
+        since the previous call. First call returns immediately."""
+        if self.min_interval_s <= 0:
+            self._last = self._clock()
+            return 0.0
+        now = self._clock()
+        if self._last is not None:
+            elapsed = now - self._last
+            remaining = self.min_interval_s - elapsed
+            if remaining > 0:
+                self._sleep(remaining)
+                now = self._clock()
+        self._last = now
+        return 0.0
+
+
+def _parse_retry_after(value, cap_s=TXMIX_RETRY_AFTER_CAP_S):
+    """Parse a Retry-After header value (delta-seconds form) -> capped float.
+
+    Only the integer/float delta-seconds form is honored (the HTTP-date form
+    is uncommon for rate limiting here); unparseable -> None so the caller
+    falls back to exponential backoff. Always capped so we never sleep
+    unboundedly on a hostile/misconfigured header.
+    """
+    if value is None:
+        return None
+    try:
+        secs = float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if secs < 0:
+        return None
+    return min(secs, cap_s)
+
+
+def _backoff_delay(attempt, initial=TXMIX_BACKOFF_INITIAL_S,
+                   cap=TXMIX_BACKOFF_CAP_S):
+    """Exponential backoff for retry `attempt` (0-based), capped. Pure."""
+    return min(cap, initial * (2 ** attempt))
+
+
 def _extract_block_txs(payload):
     """Find the per-tx list inside a blockTxs API response (shape-tolerant).
 
@@ -526,16 +681,106 @@ def _extract_block_txs(payload):
         f"{', keys ' + str(sorted(payload.keys())) if isinstance(payload, dict) else ''})")
 
 
-def _fetch_block_txs(requests, height, limit):
-    """Fetch all txs for one block from the blockTxs API (paginated by index)."""
+class TxMixHTTP:
+    """Bundles the resolved network config for a tx-mix capture run:
+    base URL, optional egress proxy, a RateLimiter (min-interval pacing),
+    and the backoff/retry parameters. Injectable `requests`/`sleep` keep
+    the retry+backoff paths fully unit-testable offline (no real network,
+    no real waits)."""
+
+    def __init__(self, requests, base_url, proxies=None, limiter=None,
+                 sleep=time.sleep, max_retries=TXMIX_MAX_RETRIES,
+                 backoff_initial=TXMIX_BACKOFF_INITIAL_S,
+                 backoff_cap=TXMIX_BACKOFF_CAP_S,
+                 retry_after_cap=TXMIX_RETRY_AFTER_CAP_S):
+        self.requests = requests
+        self.base_url = base_url
+        self.proxies = proxies
+        self.limiter = limiter or RateLimiter(0.0, sleep=sleep)
+        self.sleep = sleep
+        self.max_retries = max_retries
+        self.backoff_initial = backoff_initial
+        self.backoff_cap = backoff_cap
+        self.retry_after_cap = retry_after_cap
+
+
+def _http_get_with_retry(http, url, params):
+    """A well-behaved GET: rate-limited, honors Retry-After / 429, and
+    backs off exponentially on transient errors (429 + 5xx + connection).
+
+    - Paces every attempt through the RateLimiter (cannot hammer).
+    - On HTTP 429: sleeps Retry-After (capped) if present, else exponential
+      backoff, then retries — never tight-loops.
+    - On HTTP 5xx / connection errors: exponential backoff then retry.
+    - On HTTP 403 (geo-block) or other 4xx: raises immediately — these are
+      NOT transient, retrying would just hammer a hard rejection.
+    - Gives up after max_retries, re-raising the last error.
+    """
+    requests = http.requests
+    last_exc = None
+    for attempt in range(http.max_retries + 1):
+        http.limiter.wait()
+        try:
+            r = requests.get(
+                url, params=params,
+                headers={"User-Agent": UA},
+                proxies=http.proxies, timeout=15)
+        except requests.exceptions.RequestException as e:
+            # Connection-level transient: back off and retry.
+            last_exc = e
+            if attempt >= http.max_retries:
+                raise
+            http.sleep(_backoff_delay(attempt, http.backoff_initial,
+                                      http.backoff_cap))
+            continue
+
+        status = getattr(r, "status_code", None)
+        if status == 429:
+            # Rate limited: respect Retry-After, else exponential backoff.
+            retry_after = _parse_retry_after(
+                r.headers.get("Retry-After") if getattr(r, "headers", None)
+                else None, http.retry_after_cap)
+            last_exc = requests.exceptions.HTTPError(
+                "429 Too Many Requests", response=r)
+            if attempt >= http.max_retries:
+                r.raise_for_status()
+            delay = (retry_after if retry_after is not None
+                     else _backoff_delay(attempt, http.backoff_initial,
+                                         http.backoff_cap))
+            http.sleep(delay)
+            continue
+        if status is not None and 500 <= status < 600:
+            # Server-side transient: back off and retry.
+            last_exc = requests.exceptions.HTTPError(
+                f"{status} server error", response=r)
+            if attempt >= http.max_retries:
+                r.raise_for_status()
+            http.sleep(_backoff_delay(attempt, http.backoff_initial,
+                                      http.backoff_cap))
+            continue
+
+        # 403 (geo-block) and any other 4xx fall through to raise_for_status,
+        # which raises HTTPError immediately — NOT retried (not transient).
+        r.raise_for_status()
+        return r
+    # Exhausted retries without returning (defensive; loop normally raises).
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("unreachable: retry loop exited without result")
+
+
+def _fetch_block_txs(http, height, limit):
+    """Fetch all txs for one block from the blockTxs API (paginated by index).
+
+    `http` is a TxMixHTTP carrying the resolved base URL, proxy, rate
+    limiter, and retry policy — so every page fetch is paced + backoff-aware.
+    """
     txs = []
     index = 0
     while True:
-        r = requests.get(
-            TXMIX_BLOCK_URL,
-            params={"block_height": height, "index": index, "limit": limit},
-            headers={"User-Agent": UA}, timeout=15)
-        r.raise_for_status()
+        r = _http_get_with_retry(
+            http, http.base_url,
+            {"block_height": height, "index": index, "limit": limit})
         page = _extract_block_txs(r.json())
         if not page:
             break
@@ -572,12 +817,33 @@ def _tx_mix_from_sample(args, out):
     return 0
 
 
+def _build_tx_mix_http(args, requests):
+    """Resolve region/egress config + rate policy into a TxMixHTTP.
+
+    Honors --base-url/--proxy/--region (and their env fallbacks) and the
+    rate knobs (--max-rpm/--max-retries). Conservative defaults keep us a
+    well-behaved client well under the per-IP limit.
+    """
+    base_url = resolve_base_url(getattr(args, "base_url", None))
+    proxies = resolve_proxies(getattr(args, "proxy", None))
+    max_rpm = getattr(args, "max_rpm", None)
+    max_rpm = TXMIX_MAX_RPM if max_rpm is None else max_rpm
+    limiter = RateLimiter(min_interval_from_rpm(max_rpm))
+    max_retries = getattr(args, "max_retries", None)
+    max_retries = TXMIX_MAX_RETRIES if max_retries is None else max_retries
+    return TxMixHTTP(requests, base_url, proxies=proxies, limiter=limiter,
+                     max_retries=max_retries)
+
+
 def cmd_tx_mix(args, out=None):
     out = out or sys.stdout
     if args.sample_block is not None:
         return _tx_mix_from_sample(args, out)
 
     import requests  # lazy: keep offline subcommands dependency-free
+    http = _build_tx_mix_http(args, requests)
+    region = resolve_region(getattr(args, "region", None))
+
     # Resolve the height window. With --heights A B we capture [A, B];
     # otherwise --blocks N most-recent blocks ending at the chain tip.
     if args.heights:
@@ -587,7 +853,8 @@ def cmd_tx_mix(args, out=None):
         heights = list(range(lo, hi + 1))
     else:
         try:
-            r = requests.get(POLL_URL, headers={"User-Agent": UA}, timeout=15)
+            r = requests.get(POLL_URL, headers={"User-Agent": UA},
+                             proxies=http.proxies, timeout=15)
             r.raise_for_status()
             body = r.json()
             blocks = body if isinstance(body, list) else body.get("blocks", [])
@@ -603,24 +870,14 @@ def cmd_tx_mix(args, out=None):
     captured_blocks = 0
     captured_heights = []
     for h in heights:
-        t0 = time.time()
         try:
-            txs = _fetch_block_txs(requests, h, args.page_limit)
+            txs = _fetch_block_txs(http, h, args.page_limit)
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
             print(f"error: blockTxs API returned HTTP {code} for height {h}.",
                   file=sys.stderr)
             if code == 403:
-                print(
-                    "BLOCKER: the zklighter mainnet API (the only HTTP source "
-                    "exposing per-tx tx_type) geo-blocks this IP with 403 — "
-                    "the same block the main REST API applies (see peak-hours).\n"
-                    "The explorer API does NOT carry tx_type (block endpoints "
-                    "return block_size/total_transactions/markets only), so the "
-                    "tx-mix cannot be measured from here. Run this command from "
-                    "a non-geo-blocked network to capture the real mix, or use "
-                    "--sample-block for the in-repo sample-size-1 block.",
-                    file=sys.stderr)
+                print(geo_block_guidance(http.base_url), file=sys.stderr)
             return 2
         except requests.exceptions.RequestException as e:
             print(f"error: blockTxs request failed for height {h}: {e}",
@@ -634,10 +891,6 @@ def cmd_tx_mix(args, out=None):
         if txs:
             captured_blocks += 1
             captured_heights.append(h)
-        # polite pacing under the per-IP rate limit
-        sleep_for = max(0.0, TXMIX_POLL_PERIOD_S - (time.time() - t0))
-        if sleep_for and h != heights[-1]:
-            time.sleep(sleep_for)
 
     if not total:
         print("error: no transactions captured in the requested window.",
@@ -652,7 +905,10 @@ def cmd_tx_mix(args, out=None):
                  f"n={n} txs; {win}) — small sample, NOT the full distribution")
     else:
         label = (f"window: {win}, {captured_blocks} blocks, n={n} txs")
-    source = f"{TXMIX_BLOCK_URL} (block_height in {win})"
+    # Citation hygiene: record WHERE the capture egressed from (region label
+    # and the actual base URL hit) so a captured mix cites its provenance.
+    region_tag = f"; region={region}" if region else ""
+    source = f"{http.base_url} (block_height in {win}{region_tag})"
     print(render_tx_mix(total, captured_blocks, source, label), file=out)
     return 0
 
@@ -910,7 +1166,16 @@ def build_parser():
 
     pm = sub.add_parser(
         "tx-mix",
-        help="capture per-block tx_type counts -> the mainnet tx-mix (#128)")
+        help="capture per-block tx_type counts -> the mainnet tx-mix (#128)",
+        description=(
+            "Capture the mainnet tx-type mix from the zklighter blockTxs API "
+            "(the only HTTP source exposing per-tx tx_type). That endpoint "
+            "geo-blocks some regions (observed: US) with HTTP 403; run this "
+            "from Tokyo / ap-northeast (normally NOT geo-blocked) — e.g. a GCP "
+            "VM in asia-northeast1 — or point it at a Tokyo egress with "
+            "--base-url / --proxy. On 403 it fails honestly with this guidance "
+            "rather than fabricating a mix. See bench/README.md for the full "
+            "Tokyo run recipe."))
     pm.add_argument("--blocks", type=int, default=200,
                     help="capture the N most-recent blocks (default 200)")
     pm.add_argument("--heights", type=int, nargs=2, metavar=("LO", "HI"),
@@ -922,6 +1187,30 @@ def build_parser():
                     metavar="PATH",
                     help="offline: count tx_type in the in-repo sample block "
                          "(sample-size-1); optional PATH overrides the default")
+    # Region / egress config (no hardcoded US assumptions; cannot change the
+    # process IP — these point the tool at a Tokyo egress without code edits).
+    pm.add_argument("--base-url", default=None, metavar="URL",
+                    help="alternate blockTxs base URL, e.g. a Tokyo egress "
+                         f"(env {ENV_TXMIX_BASE_URL}; "
+                         f"default {TXMIX_BLOCK_URL})")
+    pm.add_argument("--proxy", default=None, metavar="URL",
+                    help="egress proxy URL to route requests through, e.g. a "
+                         f"Tokyo proxy (env {ENV_EGRESS_PROXY}, else "
+                         "HTTPS_PROXY)")
+    pm.add_argument("--region", default=None, metavar="LABEL",
+                    help="region label recorded in the output for citation "
+                         f"hygiene (env {ENV_REGION}); does not affect routing")
+    # Rate-limit hardening (well-behaved client; conservative defaults).
+    pm.add_argument("--max-rpm", type=positive_float, default=TXMIX_MAX_RPM,
+                    metavar="N",
+                    help="max requests/min — paces every call so the endpoint "
+                         f"is never hammered (default {TXMIX_MAX_RPM}, under "
+                         "the 90/min per-IP limit)")
+    pm.add_argument("--max-retries", type=int, default=TXMIX_MAX_RETRIES,
+                    metavar="N",
+                    help="retries on 429/transient errors before failing; "
+                         "honors Retry-After + exponential backoff "
+                         f"(default {TXMIX_MAX_RETRIES})")
     pm.set_defaults(func=cmd_tx_mix)
     return p
 
