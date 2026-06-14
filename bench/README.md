@@ -94,21 +94,76 @@ data itself.
 | `replay` | offline | Re-emit a recorded trace retimed (`--speed N` or `--target-rate TXS`; `--loop`, `--duration`, `--dry-run`) |
 | `synth-peak` | offline, no inputs | Fabricate an idealized trace from a rate: back-to-back 500-tx blocks at cadence `500/rate` s |
 | `peak-hours` | analysis helper | Locate peak windows from the explorer hourly tx stats (top-N hours by tx/s) |
+| `tx-mix` | network (geo-sensitive) | Capture the per-block tx-type mix (#128) from the zklighter `blockTxs` API — the only HTTP source carrying per-tx `tx_type`. Geo-blocks some regions (observed: US); **run from Tokyo / ap-northeast** (see recipe below). `--sample-block` reads the in-repo sample-size-1 block offline |
 
 Make targets (from `bench/`): `stream-record OUT=... [DURATION=...]`,
 `stream-replay TRACE=... [SPEED=N | RATE=TXS] [DURATION=...]`,
-`stream-peak RATE=... DURATION=...`, and `feeder-test` (offline suite,
-no network, <1 min; also wired into the repo-root `make local-test`).
+`stream-peak RATE=... DURATION=...`, `stream-tx-mix [BLOCKS=N | HEIGHTS="LO
+HI"] | SAMPLE=1`, and `feeder-test` (offline suite, no network, <1 min;
+also wired into the repo-root `make local-test`).
 
-Dependencies: `record` and `peak-hours` need `bench/feeder/requirements.txt`
-(`websockets`, `requests`); `replay`, `synth-peak`, and the tests are pure
-Python 3 stdlib.
+Dependencies: `record`, `peak-hours`, and `tx-mix` need
+`bench/feeder/requirements.txt` (`websockets`, `requests`); `replay`,
+`synth-peak`, and the tests are pure Python 3 stdlib.
 
 Geo-block note: the chain's main REST API returns 403 to US IPs. The
-feeder avoids it entirely — the WS stream with `?readonly=true` and the
-explorer API (`explorer.elliot.ai`) are not geo-blocked. The explorer
-blocks endpoint is rate-limited to 90 req/min per IP; `record` polls at
-~85 req/min with an identifying User-Agent.
+cadence feeder (`record`/`replay`/`synth-peak`/`peak-hours`) avoids it
+entirely — the WS stream with `?readonly=true` and the explorer API
+(`explorer.elliot.ai`) are not geo-blocked. The explorer blocks endpoint
+is rate-limited to 90 req/min per IP; `record` polls at ~85 req/min with an
+identifying User-Agent.
+
+### tx-mix: region-operable capture (issue #128)
+
+The tx-type **mix** is NOT in the trace format and is NOT served by the
+explorer (its block endpoints carry `block_size`/`total_transactions`/
+`markets`, no per-tx `tx_type`). The only HTTP source exposing per-tx
+`tx_type` is the zklighter mainnet `blockTxs` API — and that endpoint
+**geo-blocks some regions (observed: US) with HTTP 403**. Tokyo /
+ap-northeast is normally **not** geo-blocked, so the operable answer is to
+run the capture from there. The tool cannot change its own egress IP, so on
+a 403 it **fails honestly with Tokyo guidance** and exits non-zero rather
+than fabricating a mix (a tx-mix result must cite a real successful
+capture).
+
+**Tokyo run recipe** (the actual capture is an operator step):
+
+```bash
+# 1. Provision a small VM in a non-geo-blocked region (Tokyo / ap-northeast).
+gcloud compute instances create txmix-capture \
+  --zone=asia-northeast1-b --machine-type=e2-small \
+  --image-family=debian-12 --image-project=debian-cloud
+gcloud compute ssh txmix-capture --zone=asia-northeast1-b
+
+# 2. On the VM: clone, install deps, run the capture.
+git clone https://github.com/kunallimaye/lighter-prover && cd lighter-prover
+pip install -r bench/feeder/requirements.txt
+make -C bench stream-tx-mix BLOCKS=200      # or HEIGHTS="LO HI"
+#   equivalently: python3 bench/feeder/feeder.py tx-mix --blocks 200 \
+#                   --region asia-northeast1
+
+# 3. Tear the VM down when done.
+gcloud compute instances delete txmix-capture --zone=asia-northeast1-b
+```
+
+Config knobs (no code edits needed; all optional, conservative defaults):
+
+| Flag | Env | Purpose |
+|---|---|---|
+| `--base-url URL` | `LIGHTER_TXMIX_BASE_URL` | Alternate `blockTxs` base URL — point the tool at a Tokyo egress |
+| `--proxy URL` | `LIGHTER_EGRESS_PROXY` (else `HTTPS_PROXY`) | Route requests through a Tokyo egress proxy without moving the tool |
+| `--region LABEL` | `LIGHTER_REGION` | Region label recorded in the output for citation hygiene (does not affect routing) |
+| `--max-rpm N` | — | Cap requests/min (default 80, under the 90/min per-IP limit) |
+| `--max-retries N` | — | Retries on 429/transient before failing (default 5) |
+
+Rate-limit behavior (the tool is a well-behaved client that cannot hammer
+the endpoint): every request is paced to the `--max-rpm` minimum interval;
+HTTP **429** responses respect `Retry-After` (capped) or fall back to
+exponential backoff; transient 5xx / connection errors back off
+exponentially up to `--max-retries`; a **403 geo-block is treated as a hard,
+non-transient failure** (not retried — it just prints the Tokyo guidance and
+exits 2). All of this is unit-tested offline (`feeder-test`) with mocked
+403/429/Retry-After/backoff paths — no real network, no real sleeps.
 
 ## Tree-fold mode (bench --l2-fold tree)
 
