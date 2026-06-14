@@ -6,8 +6,12 @@
 //! and the bounded-queue scheduler), so the binary and tests share the
 //! same plonky2-free code paths.
 
+pub mod blob_encode;
+pub mod empty_witness;
 pub mod events;
+pub mod kzg;
 pub mod l5segment;
+pub mod l6drive;
 pub mod seed;
 pub mod stream;
 pub mod trace;
