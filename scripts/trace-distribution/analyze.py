@@ -62,17 +62,27 @@ DEFAULT_FIXTURE = os.path.join(
 # ──────────────────────────────────────────────────────────────────────
 
 def percentile(sorted_values, p):
-    """Nearest-rank percentile of an already-sorted, non-empty list."""
+    """Nearest-rank percentile of an already-sorted, non-empty list.
+
+    Supports fractional p (e.g. 99.9). Uses ceil(p/100 * N), 1-indexed —
+    the standard nearest-rank convention; matches how operators read "p99.9".
+    """
     if not sorted_values:
         raise ValueError("percentile of empty list")
     if p <= 0:
         return sorted_values[0]
     if p >= 100:
         return sorted_values[-1]
-    # nearest-rank: ceil(p/100 * N), 1-indexed
-    rank = -(-p * len(sorted_values) // 100)  # ceil division
-    idx = int(rank) - 1
-    idx = max(0, min(idx, len(sorted_values) - 1))
+    import math as _math  # stdlib, local for clarity
+    # nearest-rank with float-tolerance: 99.9/100 * 10000 == 9990.0000000001
+    # in IEEE-754, which would naive-ceil to 9991. Subtract a tiny epsilon
+    # before ceiling so exact-fraction percentiles land where they should.
+    n = len(sorted_values)
+    raw = (p / 100.0) * n
+    rank = _math.ceil(raw - 1e-9)
+    if rank < 1:
+        rank = 1
+    idx = max(0, min(rank - 1, n - 1))
     return sorted_values[idx]
 
 
@@ -99,6 +109,21 @@ def analyze_trace(path):
     null_count = len(events) - len(non_null)
     non_null_sorted = sorted(non_null)
 
+    # Size bands — the headline tail picture. The trace is bimodal (mass at
+    # the 500 cap + a small-block tail), so percentiles alone (which collapse to
+    # the cap above p50) hide the shape; the bands surface it.
+    bands_spec = [
+        ("eq_1", lambda v: v == 1),
+        ("2_49", lambda v: 2 <= v <= 49),
+        ("50_99", lambda v: 50 <= v <= 99),
+        ("100_249", lambda v: 100 <= v <= 249),
+        ("250_399", lambda v: 250 <= v <= 399),
+        ("400_499", lambda v: 400 <= v <= 499),
+        ("eq_500", lambda v: v == BLOCK_TX_CAP),
+    ]
+    bands = {name: sum(1 for v in non_null if pred(v))
+             for name, pred in bands_spec}
+
     block_size = {
         "blocks": len(events),
         "non_null_blocks": len(non_null),
@@ -109,9 +134,12 @@ def analyze_trace(path):
         "min": non_null_sorted[0] if non_null else None,
         "max": non_null_sorted[-1] if non_null else None,
         "p50": percentile(non_null_sorted, 50) if non_null else None,
+        "p75": percentile(non_null_sorted, 75) if non_null else None,
         "p90": percentile(non_null_sorted, 90) if non_null else None,
         "p95": percentile(non_null_sorted, 95) if non_null else None,
         "p99": percentile(non_null_sorted, 99) if non_null else None,
+        "p99_9": percentile(non_null_sorted, 99.9) if non_null else None,
+        "bands": bands,
     }
 
     # ── OUTLIER frequency: blocks at / over the chain cap ──
@@ -152,9 +180,45 @@ def analyze_trace(path):
     agg_rate = feeder.aggregate_rate(expanded)
     span_s = (events[-1]["ts_ms"] - events[0]["ts_ms"]) / 1000.0
 
+    # Burst characterization: blocks/s in 1-s wall buckets and rolling N-s windows.
+    # Uses EXPANDED block counts (height-jumps attributed to their announcing
+    # second, matching the consumer's enqueue model — see P2). This is the
+    # signal the conductor (#75) is sized against (ADR-0004: lag SLO).
+    ts0 = events[0]["ts_ms"]
+    span_ms = events[-1]["ts_ms"] - ts0
+    n_buckets = max(1, span_ms // 1000 + 1)
+    bucket_blocks = [0] * int(n_buckets)
+    prev_h = None
+    for ev in events:
+        b = int((ev["ts_ms"] - ts0) // 1000)
+        if prev_h is None:
+            bucket_blocks[b] += 1
+        else:
+            bucket_blocks[b] += ev["height"] - prev_h
+        prev_h = ev["height"]
+    bs_sorted = sorted(bucket_blocks)
+
+    def _rolling_max(values, win):
+        if win <= 0 or win > len(values):
+            return 0
+        s = sum(values[:win])
+        m = s
+        for i in range(win, len(values)):
+            s += values[i] - values[i - win]
+            if s > m:
+                m = s
+        return m
+
+    bursts = {
+        f"peak_blocks_in_{w}s": _rolling_max(bucket_blocks, w)
+        for w in (1, 3, 5, 10)
+    }
+
     arrival_rate = {
         "gap_median_ms": statistics.median(raw_gaps) if raw_gaps else 0.0,
         "gap_p95_ms": percentile(raw_gaps, 95) if raw_gaps else 0.0,
+        "gap_p99_ms": percentile(raw_gaps, 99) if raw_gaps else 0.0,
+        "gap_p99_9_ms": percentile(raw_gaps, 99.9) if raw_gaps else 0.0,
         "gap_max_ms": raw_gaps[-1] if raw_gaps else 0.0,
         "gap_min_ms": raw_gaps[0] if raw_gaps else 0.0,
         "jumps": len(jump_deltas),
@@ -166,6 +230,17 @@ def analyze_trace(path):
                              (events[-1]["height"] - events[0]["height"] + 1)),
         "aggregate_tx_per_s_p1": agg_rate,
         "expanded_blocks": len(expanded),
+        # blocks/s distribution (height-expansion-aware, 1-s wall buckets)
+        "blocks_per_s_mean": statistics.mean(bucket_blocks),
+        "blocks_per_s_p50": percentile(bs_sorted, 50),
+        "blocks_per_s_p90": percentile(bs_sorted, 90),
+        "blocks_per_s_p95": percentile(bs_sorted, 95),
+        "blocks_per_s_p99": percentile(bs_sorted, 99),
+        "blocks_per_s_p99_9": percentile(bs_sorted, 99.9),
+        "blocks_per_s_max": bs_sorted[-1] if bs_sorted else 0,
+        # peak block count in rolling N-second windows (burst sizing)
+        "bursts": bursts,
+        "wall_seconds_observed": int(n_buckets),
     }
 
     return {
@@ -222,6 +297,19 @@ def render(report):
     lines.append(f"  min / max       : {_fmt(bs['min'])} / {_fmt(bs['max'])}")
     lines.append(f"  p50/p90/p95/p99 : {_fmt(bs['p50'])} / {_fmt(bs['p90'])}"
                  f" / {_fmt(bs['p95'])} / {_fmt(bs['p99'])}")
+    lines.append(f"  p75/p99.9       : {_fmt(bs['p75'])} / {_fmt(bs['p99_9'])}")
+    if bs.get("bands"):
+        bnz = bs["non_null_blocks"] or 1
+        b = bs["bands"]
+        lines.append("  size bands      : "
+                     f"=1: {_fmt(b['eq_1'])} ({b['eq_1']*100/bnz:.2f}%), "
+                     f"2-49: {_fmt(b['2_49'])} ({b['2_49']*100/bnz:.2f}%), "
+                     f"50-99: {_fmt(b['50_99'])} ({b['50_99']*100/bnz:.2f}%), "
+                     f"100-249: {_fmt(b['100_249'])} ({b['100_249']*100/bnz:.2f}%),")
+        lines.append("                    "
+                     f"250-399: {_fmt(b['250_399'])} ({b['250_399']*100/bnz:.2f}%), "
+                     f"400-499: {_fmt(b['400_499'])} ({b['400_499']*100/bnz:.2f}%), "
+                     f"=500 (cap): {_fmt(b['eq_500'])} ({b['eq_500']*100/bnz:.2f}%)")
     lines.append("")
     lines.append("-- OUTLIER (large-block) FREQUENCY --")
     lines.append(f"  chain tx cap    : {_fmt(ol['cap'])}")
@@ -233,8 +321,8 @@ def render(report):
     lines.append("")
     lines.append("-- ARRIVAL-RATE / BURST DISTRIBUTION --")
     lines.append(f"  inter-block gap : median {_fmt(ar['gap_median_ms'])} ms / "
-                 f"p95 {_fmt(ar['gap_p95_ms'])} ms / max {_fmt(ar['gap_max_ms'])} ms "
-                 f"(min {_fmt(ar['gap_min_ms'])} ms)")
+                 f"p95 {_fmt(ar['gap_p95_ms'])} ms / p99 {_fmt(ar['gap_p99_ms'])} ms / "
+                 f"p99.9 {_fmt(ar['gap_p99_9_ms'])} ms / max {_fmt(ar['gap_max_ms'])} ms")
     lines.append(f"  height jumps    : {_fmt(ar['jumps'])}  "
                  f"(max Δ={_fmt(ar['max_jump_delta'])}, "
                  f"{_fmt(ar['skipped_heights'])} heights skipped = "
@@ -242,6 +330,16 @@ def render(report):
     lines.append(f"  jump Δ histogram: {ar['delta_histogram']}")
     lines.append(f"  aggregate rate  : {_fmt(ar['aggregate_tx_per_s_p1'])} tx/s "
                  f"(P1 mean-fill, post-expand; {_fmt(ar['expanded_blocks'])} blocks)")
+    lines.append(f"  blocks/s (1-s)  : mean {_fmt(ar['blocks_per_s_mean'])} / "
+                 f"p50 {_fmt(ar['blocks_per_s_p50'])} / p90 {_fmt(ar['blocks_per_s_p90'])} / "
+                 f"p95 {_fmt(ar['blocks_per_s_p95'])} / p99 {_fmt(ar['blocks_per_s_p99'])} / "
+                 f"p99.9 {_fmt(ar['blocks_per_s_p99_9'])} / max {_fmt(ar['blocks_per_s_max'])}")
+    bursts = ar.get("bursts", {})
+    if bursts:
+        lines.append("  burst peaks     : "
+                     + " / ".join(f"{w}s: {_fmt(bursts[f'peak_blocks_in_{w}s'])} blocks "
+                                  f"({bursts[f'peak_blocks_in_{w}s']/w:.2f}/s)"
+                                  for w in (1, 3, 5, 10) if f"peak_blocks_in_{w}s" in bursts))
     lines.append("")
     lines.append("-- TX-TYPE MIX --")
     lines.append("  NOT AVAILABLE: the trace format (§2) has no tx-type field.")
