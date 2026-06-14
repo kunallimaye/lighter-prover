@@ -84,6 +84,22 @@ def _emit(name: str, value):
     print(f"{name}='{s}'")
 
 
+def _strip_gs(value):
+    """Strip a leading gs:// from a bucket reference, return a bare name.
+
+    Consumers that build URIs with gs://${BUCKET}/... (cloud-txmix.sh,
+    cicd/txmix-entrypoint.sh) need a BARE bucket name; config.toml mirrors
+    the [fleet].results_bucket convention of storing a full gs:// URI, so
+    normalize here to avoid gs://gs://... double-prefixing.
+    """
+    if value is None:
+        return ''
+    s = str(value).strip()
+    if s.startswith('gs://'):
+        s = s[len('gs://'):]
+    return s.rstrip('/')
+
+
 def main():
     config_path = os.path.join(os.path.dirname(__file__), '..', 'config.toml')
     if not os.path.exists(config_path):
@@ -198,6 +214,18 @@ def main():
     _emit('FLEET_MACHINES_TSV_CFG', fleet.get('machines_tsv', ''))
     _emit('FLEET_SVALUES', fleet.get('svalues', ''))
     _emit('FLEET_TX_LIMIT', fleet.get('tx_limit', ''))
+
+    # ─── tx-mix capture (scripts/cloud-txmix.sh, #128) ────────────
+    # Top-level [txmix] section (like [fleet], a project-specific toolkit,
+    # not a role). The tx-mix Cloud Run Job REUSES the fleet results
+    # bucket (no new bucket) under a `txmix/` prefix. cloud-txmix.sh and
+    # cicd/txmix-entrypoint.sh consume TXMIX_BUCKET as a BARE bucket name
+    # and prepend gs:// themselves, so strip any gs:// prefix here to keep
+    # writes landing at gs://<bucket>/txmix/... and NOT gs://gs://... .
+    txmix = config.get('txmix', {})
+    _emit('TXMIX_BUCKET', _strip_gs(txmix.get('bucket', '')))
+    _emit('TXMIX_RUN_AS_SA', txmix.get('run_as_sa', ''))
+    _emit('TXMIX_IMPERSONATE_SA', txmix.get('impersonate_sa', ''))
 
 
 if __name__ == '__main__':

@@ -173,13 +173,40 @@ make cloud-txmix-results    # the captured mix + its provenance
 make cloud-txmix-post       # post the cited summary to issue #128
 ```
 
-Output (durable — a Job's filesystem evaporates on exit) lands at
-`gs://<project>-lighter-txmix/txmix/<ts>-<label>-<id>/`:
+Output (durable — a Job's filesystem evaporates on exit) lands in the
+**shared fleet results bucket** under a `txmix/` prefix:
+`gs://kunal-scratch-bench-fleet-runs/txmix/<ts>-<label>-<id>/`:
 `tx-mix.txt` (the rendered mix table), `tx-mix.meta.json` (machine-readable
 provenance: egress region/IP, endpoint, window, N, `--max-rpm`),
 `tx-mix.stderr.txt` (tool stderr, incl. any 403 guidance), and a `DONE`
 sentinel. Every knob (window, `--max-rpm`, GCS bucket/path, `--base-url`/
 `--proxy`, task timeout) is an env var — see `scripts/cloud-txmix.sh`.
+
+**Output bucket — config-driven, reuses the fleet bucket.** The bucket is
+set in `config.toml` under `[txmix].bucket` (mirroring `[fleet].results_bucket`)
+and flows through `scripts/config.py` as the `TXMIX_BUCKET` env var; the
+`TXMIX_BUCKET` env var overrides. We **reuse the existing shared fleet
+results bucket** (`gs://kunal-scratch-bench-fleet-runs`, region
+**us-central1**) rather than provisioning a new txmix-only bucket — it
+already exists (created by `make admin-cloud-init`, Owner-tier) and already
+hosts other data-collection output. The Job runs in **Tokyo**
+(asia-northeast1) for the egress geo-block workaround but writes its tiny
+payload to the **us-central1** fleet bucket; a cross-region write of a few
+KB is negligible. `cloud-txmix.sh` only **verifies** the bucket exists
+(read-only `describe`) — it never creates one, so no `storage.buckets.create`
+is needed.
+
+**Identity / run-as model (single SA).** The Cloud Run control-plane calls
+(`build`/`deploy`/`smoke`/`capture`/`results`) run **as the project agent
+SA** `lighter-prover-agent@kunal-scratch.iam.gserviceaccount.com` via
+`--impersonate-service-account` (the active operator/runtime identity holds
+`roles/iam.serviceAccountTokenCreator` + `serviceAccountUser` on it). The
+**Job itself also runs as** that agent SA (`--service-account`), whose
+project-level `storage.objects.*` lets the running Tokyo job write to the
+us-central1 fleet bucket. Both are configurable via `TXMIX_IMPERSONATE_SA`
+and `TXMIX_RUN_AS_SA` (config.toml `[txmix].impersonate_sa` /
+`[txmix].run_as_sa`); set `TXMIX_IMPERSONATE_SA=""` to run as the active
+gcloud account directly.
 
 Egress fallback: the job uses **public** Cloud Run egress (a GCP-assigned
 Tokyo IP) — no Cloud NAT / static egress by default. If a smoke run 403s

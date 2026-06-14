@@ -115,3 +115,24 @@ region  = ""
 # machines_tsv   = "scripts/bench-fleet/machines.tsv"
 # svalues        = "1 2 4 6"
 # tx_limit       = 480
+
+# ─── tx-mix capture (scripts/cloud-txmix.sh, #128) ─────────────────
+#
+# The tx-type-mix capture is a parametrised Cloud Run JOB that runs from
+# asia-northeast1 (Tokyo) to dodge the zklighter blockTxs US geo-block,
+# and writes its durable output to GCS. Top-level [txmix] section (not
+# under [gcp] — like [fleet], it is a project-specific toolkit, not a
+# role). Env vars override (TXMIX_BUCKET, TXMIX_RUN_AS_SA, ...).
+#
+# bucket  GCS bucket for tx-mix run artifacts. REUSES the existing fleet
+#         results bucket (no new bucket is provisioned): the Tokyo job
+#         writes a small payload to the us-central1 fleet bucket under a
+#         `txmix/` prefix — cross-region write is fine (tiny payload,
+#         negligible cost). Accepts a gs:// URI or a bare bucket name;
+#         config.py / cloud-txmix.sh normalize either form.
+#         Default-when-unset: gs://<defaults.project>-bench-fleet-runs.
+
+[txmix]
+bucket = "gs://kunal-scratch-bench-fleet-runs"
+# run_as_sa            = "lighter-prover-agent@kunal-scratch.iam.gserviceaccount.com"
+# impersonate_sa       = "lighter-prover-agent@kunal-scratch.iam.gserviceaccount.com"
