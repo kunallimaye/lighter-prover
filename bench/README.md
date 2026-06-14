@@ -41,6 +41,13 @@ For L3 (`BlockPreExecutionCircuit`, one-shot) the `chunk_idx` and
 `chunk_total` fields are explicitly `null`. For L1/L2 (per-chunk) they
 are non-null `0..chunk_total`.
 
+The `chunk_proven` (stream mode) and `layer_prove` events additionally
+carry an optional `witness_fetch_ms` (`Option<u64>`) — the measured
+witness-acquisition wall when the chunk is resolved through the conductor
+witness plane (issue #61 / ADR-0008 §2.2; see the conductor section below).
+It is omitted/`null` when the chunk was proven without going through the
+witness plane.
+
 `cpu_ms`, `rss_mb_peak`, `rss_mb_after`, `peak_rss_mb`, and
 `total_cpu_ms` are Linux-only (parsed from `/proc/self/status` /
 `getrusage`). On non-Linux platforms they serialize as `null`. `ts`
@@ -65,6 +72,41 @@ fields by name are transparently unaffected.
 Example with attribution on:
 ```
 BENCH_EVENT {"event":"layer_prove","layer":1,"name":"BlockTxCircuit","chunk_idx":0,"chunk_total":500,"tx_per_proof":1,"wall_ms":616,"cpu_ms":10094,"rss_mb_peak":1192,"rss_mb_after":1192,"ts":"2026-06-14T07:22:52Z","tx_types":[15],"chunk_tx_type_homogeneous":15}
+```
+
+### Conductor witness plane + `witness_fetch_ms` (issue #61 / ADR-0008)
+
+The MINIMUM distributed-prover conductor (issue #75, local slice) lives in
+`bench/src/conductor/` — a plonky2-free, host-testable distribution layer
+that reuses the `--stream` closure-injection + bounded-queue pattern:
+
+- **OUTER tier** (`conductor::queue`): a `BlockQueue` trait + in-memory
+  `LocalBlockQueue` (the ADR-0006 §1.1 competing-pull block-dispatch layer;
+  a real Pub/Sub adapter drops in behind the trait, no GCP today).
+- **INNER tier + pool** (`conductor::dispatch`): a `Coordinator` SPLITs a
+  block into `k=ceil(tx/S)` chunks and fans the chunk **references** out to a
+  HORIZONTAL `CoordinatorPool` of cells (ADR-0006 §1.2/§2; #113 horizontal
+  lever only — no per-coordinator concurrency).
+- **Witness plane** (`conductor::witness`): `{height, witness_index}`
+  addressing (ADR-0008 §1.1) + a k=1 `MountedCorpus` local indexed-lookup
+  resolver (ADR-0008 §1.4 — the `bench_test.json` whole-block mount is the
+  k=1 case). Dispatch carries witness **references, not bytes** (ADR-0008
+  §1.2).
+
+The `--stream` mode wires this in: each chunk resolves its witness reference
+through the witness plane, and the resolve-and-read wall is emitted as
+`witness_fetch_ms` (`Option<u64>`) on the `chunk_proven` event (ADR-0008 §2.1
+/ §2.2). This is the **local-resolve FLOOR** — a real measured number
+(`null`/omitted on the legacy recycled-witness path that does not resolve a
+reference), **not** the distributed `witness_move` term, which stays
+UNMODELED until ADR-0008 §3's gated fleet study (ADR-0008 §2.3; ADR-0004
+§3.1/§3.2). The field is additive and consumer-safe (matches the `cpu_ms` /
+#157 optional-field convention).
+
+Example `chunk_proven` line carrying a real measured `witness_fetch_ms`
+(k=1 mounted-corpus local resolve; sub-millisecond → `0`):
+```
+BENCH_EVENT {"event":"chunk_proven","layer":1,"name":"BlockTxCircuit","chunk_idx":0,"chunk_total":10,"tx_per_proof":4,"wall_ms":2672,"cpu_ms":44235,"rss_mb_peak":2676,"rss_mb_after":2525,"height":260138266,"lag_ms":3068,"queue_depth":124,"ts":"2026-06-14T08:23:03Z","witness_fetch_ms":0}
 ```
 
 ### Example events
