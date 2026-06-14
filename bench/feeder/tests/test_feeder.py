@@ -349,5 +349,73 @@ class TestDurationParsing(unittest.TestCase):
         self.assertEqual(feeder.parse_duration("1h"), 3600.0)
 
 
+class TestTxMixHelpers(unittest.TestCase):
+    """Pure tx-type-mix helpers (issue #128 tx-type gap). Offline only."""
+
+    def test_tx_type_name_known_and_unknown(self):
+        self.assertEqual(feeder.tx_type_name(15), "cancel")
+        self.assertEqual(feeder.tx_type_name(14), "create")
+        self.assertEqual(feeder.tx_type_name(17), "modify")
+        self.assertEqual(feeder.tx_type_name(21), "claim")
+        # unknown types are carried through, never dropped/renamed silently
+        self.assertEqual(feeder.tx_type_name(99), "type_99")
+
+    def test_count_tx_types_and_skips_malformed(self):
+        txs = [{"tx_type": 15}, {"tx_type": 15}, {"tx_type": 17},
+               {"no_type": 1}, {"tx_type": None}]
+        counts, skipped = feeder.count_tx_types(txs)
+        self.assertEqual(counts, {15: 2, 17: 1})
+        self.assertEqual(skipped, 2)
+
+    def test_merge_tx_counts_accumulates(self):
+        a = {15: 2, 17: 1}
+        feeder.merge_tx_counts(a, {15: 3, 21: 4})
+        self.assertEqual(a, {15: 5, 17: 1, 21: 4})
+
+    def test_proportions_sorted_and_normalized(self):
+        rows = feeder.tx_mix_proportions({15: 1, 17: 2, 21: 2})
+        # descending count, then ascending tx_type for the 17/21 tie
+        self.assertEqual([(tt, name, c) for tt, name, c, _ in rows],
+                         [(17, "modify", 2), (21, "claim", 2),
+                          (15, "cancel", 1)])
+        self.assertAlmostEqual(sum(f for *_, f in rows), 1.0)
+
+    def test_extract_block_txs_shape_tolerant(self):
+        # bare list
+        self.assertEqual(
+            feeder._extract_block_txs([{"tx_type": 15}]), [{"tx_type": 15}])
+        # common wrapper keys
+        for key in ("txs", "transactions", "data"):
+            self.assertEqual(
+                feeder._extract_block_txs({key: [{"tx_type": 17}]}),
+                [{"tx_type": 17}])
+        # nested block object
+        self.assertEqual(
+            feeder._extract_block_txs({"block": {"txs": [{"tx_type": 21}]}}),
+            [{"tx_type": 21}])
+        with self.assertRaises(ValueError):
+            feeder._extract_block_txs({"unexpected": 1})
+
+    def test_render_tx_mix_includes_label_and_counts(self):
+        text = feeder.render_tx_mix(
+            {15: 3, 17: 1}, blocks=1, source="x", label="sample-size-1")
+        self.assertIn("sample-size-1", text)
+        self.assertIn("cancel", text)
+        self.assertIn("75.00%", text)  # 3/4
+
+    def test_sample_block_cli_offline(self):
+        # The in-repo sample block is the only real tx_type data available
+        # offline. It is honestly labeled sample-size-1, never "the mix".
+        sample = Path(__file__).resolve().parents[3] / "bench" / \
+            "bench_test.json"
+        if not sample.exists():
+            self.skipTest("sample block not present")
+        rc, lines = run_cli(["tx-mix", "--sample-block", str(sample)])
+        self.assertEqual(rc, 0)
+        text = "\n".join(lines)
+        self.assertIn("sample-size-1", text)
+        self.assertIn("TX-TYPE MIX", text)
+
+
 if __name__ == "__main__":
     unittest.main()

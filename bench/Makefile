@@ -15,13 +15,19 @@ build-and-run: build run
 # Trace producer for the streaming bench. Contract: trace-format.md.
 # stream-record / stream-replay live emission need network or a trace;
 # feeder-test is fully offline (<1 min, no network, no sleeps).
-.PHONY: stream-record stream-replay stream-peak feeder-test
+.PHONY: stream-record stream-replay stream-peak stream-tx-mix feeder-test
 
 FEEDER := python3 feeder/feeder.py
 
 stream-record: ## Record live trace (network): OUT=trace.jsonl [DURATION=15m]
 	@test -n "$(OUT)" || { echo "error: OUT=<trace.jsonl> required"; exit 1; }
 	$(FEEDER) record --out $(OUT) $(if $(DURATION),--duration $(DURATION),)
+
+stream-tx-mix: ## Capture mainnet tx-type mix (#128): [BLOCKS=N | HEIGHTS="LO HI"] | SAMPLE=1
+	$(FEEDER) tx-mix \
+	  $(if $(SAMPLE),--sample-block,) \
+	  $(if $(BLOCKS),--blocks $(BLOCKS),) \
+	  $(if $(HEIGHTS),--heights $(HEIGHTS),)
 
 stream-replay: ## Replay a trace: TRACE=... [SPEED=N | RATE=TXS] [DURATION=15m]
 	@test -n "$(TRACE)" || { echo "error: TRACE=<trace.jsonl> required"; exit 1; }
