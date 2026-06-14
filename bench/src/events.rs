@@ -53,6 +53,26 @@ pub enum BenchEvent<'a> {
         rss_mb_peak: Option<u64>,
         rss_mb_after: Option<u64>,
         ts: String,
+        /// Issue #157 (spike): per-chunk tx-type attribution. `Some(vec)`
+        /// only when the bench is run with `--attribute-tx-type` or its
+        /// implier `--group-by-tx-type` (or any future caller that opts
+        /// in); the vec lists each tx's `tx_type` in chunk order (length
+        /// = `tx_per_proof` for per-chunk layers). `None` (skipped from
+        /// JSON) otherwise -- default behavior is byte-identical to
+        /// pre-#157.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tx_types: Option<Vec<u8>>,
+        /// Issue #157 (spike): `Some(t)` when every tx in the chunk shares
+        /// `tx_type == t` (the per-type cost-attribution signal). `None`
+        /// is emitted in two distinct cases that downstream readers should
+        /// distinguish via the companion `tx_types` field: (a) when
+        /// `tx_types` is also `None`, the caller did not opt in to
+        /// attribution at all (pre-#157 default); (b) when `tx_types` is
+        /// `Some(vec)` with more than one distinct value, the chunk is a
+        /// "mixed" boundary chunk and the per-type analysis should drop
+        /// it. Default behavior is byte-identical to pre-#157.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chunk_tx_type_homogeneous: Option<u8>,
     },
     /// A `*::define(...) + builder.build()` measurement.
     CircuitDefine {
@@ -479,6 +499,81 @@ mod tests {
         assert!(json.contains("\"nodes\":8"));
         assert!(json.contains("\"workers\":4"));
         assert!(json.contains("\"level_wall_ms\":512"));
+    }
+
+    #[test]
+    fn layer_prove_tx_type_attribution_default_off() {
+        // Issue #157: by default (caller passes None for both new fields),
+        // the JSON shape must be byte-identical to pre-#157 -- no
+        // `tx_types` or `chunk_tx_type_homogeneous` keys at all.
+        let ev = BenchEvent::LayerProve {
+            layer: 1,
+            name: "BlockTxCircuit",
+            chunk_idx: Some(0),
+            chunk_total: Some(120),
+            tx_per_proof: 4,
+            wall_ms: 2310,
+            cpu_ms: Some(18432),
+            rss_mb_peak: Some(2920),
+            rss_mb_after: Some(2900),
+            ts: "2026-06-14T07:14:22Z".into(),
+            tx_types: None,
+            chunk_tx_type_homogeneous: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"event\":\"layer_prove\""));
+        assert!(
+            !json.contains("tx_types"),
+            "default-off must skip the tx_types key (pre-#157 byte-identity): {json}"
+        );
+        assert!(
+            !json.contains("chunk_tx_type_homogeneous"),
+            "default-off must skip the chunk_tx_type_homogeneous key (pre-#157 byte-identity): {json}"
+        );
+    }
+
+    #[test]
+    fn layer_prove_tx_type_attribution_on() {
+        // Issue #157: opted-in callers (e.g. `bench --group-by-tx-type`)
+        // emit both the per-tx vec and the homogeneity tag.
+        let homogeneous = BenchEvent::LayerProve {
+            layer: 1,
+            name: "BlockTxCircuit",
+            chunk_idx: Some(3),
+            chunk_total: Some(11),
+            tx_per_proof: 4,
+            wall_ms: 2410,
+            cpu_ms: Some(18800),
+            rss_mb_peak: Some(2925),
+            rss_mb_after: Some(2910),
+            ts: "2026-06-14T07:14:24Z".into(),
+            tx_types: Some(vec![14, 14, 14, 14]),
+            chunk_tx_type_homogeneous: Some(14),
+        };
+        let json = serde_json::to_string(&homogeneous).unwrap();
+        assert!(json.contains("\"tx_types\":[14,14,14,14]"));
+        assert!(json.contains("\"chunk_tx_type_homogeneous\":14"));
+
+        let mixed = BenchEvent::LayerProve {
+            layer: 1,
+            name: "BlockTxCircuit",
+            chunk_idx: Some(2),
+            chunk_total: Some(11),
+            tx_per_proof: 4,
+            wall_ms: 2380,
+            cpu_ms: Some(18700),
+            rss_mb_peak: Some(2925),
+            rss_mb_after: Some(2910),
+            ts: "2026-06-14T07:14:25Z".into(),
+            tx_types: Some(vec![14, 14, 15, 15]),
+            chunk_tx_type_homogeneous: None,
+        };
+        let json = serde_json::to_string(&mixed).unwrap();
+        assert!(json.contains("\"tx_types\":[14,14,15,15]"));
+        assert!(
+            !json.contains("chunk_tx_type_homogeneous"),
+            "mixed chunks must skip the homogeneity tag, not emit a sentinel: {json}"
+        );
     }
 
     #[test]

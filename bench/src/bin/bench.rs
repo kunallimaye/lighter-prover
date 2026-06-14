@@ -241,6 +241,34 @@ struct Args {
     /// versioned hash.
     #[arg(long, default_value = bench::kzg::DEFAULT_TRUSTED_SETUP_PATH)]
     trusted_setup_path: String,
+
+    /// Issue #157 (spike): emit per-chunk tx-type attribution
+    /// (`tx_types`, `chunk_tx_type_homogeneous`) on the L1/L2
+    /// `layer_prove` events. Tx order is NOT changed -- this just
+    /// annotates the existing arrival-order chunks. When the sample
+    /// happens to produce homogeneous chunks for a type (always true
+    /// at `--tx-per-proof 1`; opportunistic at larger chunk sizes),
+    /// the per-type cost can be isolated by filtering events on the
+    /// homogeneity tag without breaking witness consistency. Default
+    /// `false` keeps the JSON shape byte-identical to pre-#157.
+    /// Serial-fold batch path only. Implied by `--group-by-tx-type`.
+    #[arg(long, default_value_t = false)]
+    attribute_tx_type: bool,
+
+    /// Issue #157 (spike): stable-sort `block.txs` by `tx_type` before
+    /// chunking. Implies `--attribute-tx-type`. With this flag, chunks
+    /// become type-homogeneous (modulo boundary chunks that straddle
+    /// two types). WARNING: re-ordering txs breaks chain-validity --
+    /// the L1 witness for some tx types asserts cross-tx state
+    /// (Merkle-touch / register-stack constraints) that the unsorted
+    /// chain established, so prove can panic with a partition-set
+    /// conflict on certain types/positions (see issue #159 for the
+    /// root-cause investigation). When the fixture does support
+    /// sorting, this is the cleanest per-type isolation. Default
+    /// `false` keeps arrival order and produces JSON byte-identical
+    /// to pre-#157. Serial-fold batch path only.
+    #[arg(long, default_value_t = false)]
+    group_by_tx_type: bool,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -499,7 +527,31 @@ fn main() {
         return;
     }
 
-    let block = get_test_block_json_file("bench_test.json");
+    let mut block = get_test_block_json_file("bench_test.json");
+
+    // Issue #157 (spike): re-group the block's existing real txs by
+    // `tx_type` so each per-chunk L1/L2 prove operates on a
+    // type-homogeneous chunk (modulo boundary chunks where the sort
+    // straddles two types). Stable sort preserves arrival order within
+    // a type so the per-type wall measurement is comparable to the
+    // pre-#157 arrival-order baseline at the limit of a 1-type batch.
+    //
+    // SAFETY NOTE: the unsorted serial fold relies on `block.txs` being
+    // in chain-valid order so the running state (assets, account roots,
+    // ...) threaded through `BlockTx::*_before` matches each chunk's
+    // pre-state. Sorting BREAKS that chain-validity: the L1 prove is
+    // independent per-chunk and may or may not panic depending on which
+    // circuit constraints reference cross-tx state; the L2 chain prove
+    // will likely fail to verify (state mismatch) but its wall-clock
+    // measurement is still informative because the work IS performed
+    // before the verifier rejects. The spike accepts this risk -- the
+    // verdict needs L1 wall per type, not chain validity. If L1 itself
+    // panics on this fixture, the bench will crash and the spike will
+    // fall back to the homogeneous-span approach (see issue #157).
+    if args.group_by_tx_type {
+        block.txs.sort_by_key(|t| t.tx_type);
+    }
+    let block = block;
 
     // Issue #78: the L5 segment scheduler builds its own L1..L4 pipeline and
     // multi-block fixture, so it branches off here (like --stream) before the
@@ -640,6 +692,8 @@ fn main() {
         rss_mb_peak: peak_rss_mb(),
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
+        tx_types: None,
+        chunk_tx_type_homogeneous: None,
     });
 
     let pre_exec_witness =
@@ -744,6 +798,17 @@ fn main() {
             panic!("Failed to prove tx chunk #{}. err = {:?}", index, err);
         }
 
+        // Issue #157 (spike): per-chunk tx-type attribution -- only when
+        // the caller opted in via `--attribute-tx-type` or its implier
+        // `--group-by-tx-type`. `None` keeps the pre-#157 JSON shape
+        // byte-identical.
+        let (tx_types_attr, homogeneous_attr) =
+            if args.attribute_tx_type || args.group_by_tx_type {
+                chunk_tx_type_attribution(tx)
+            } else {
+                (None, None)
+            };
+
         events::emit(&BenchEvent::LayerProve {
             layer: 1,
             name: "BlockTxCircuit",
@@ -755,6 +820,8 @@ fn main() {
             rss_mb_peak: peak_rss_mb(),
             rss_mb_after: current_rss_mb(),
             ts: now_iso8601(),
+            tx_types: tx_types_attr.clone(),
+            chunk_tx_type_homogeneous: homogeneous_attr,
         });
 
         info!(
@@ -802,6 +869,11 @@ fn main() {
             rss_mb_peak: peak_rss_mb(),
             rss_mb_after: current_rss_mb(),
             ts: now_iso8601(),
+            // Issue #157 (spike): same per-chunk tx-type attribution as
+            // the L1 emit just above; the L2 chain prove operates on the
+            // same chunk, so it gets the same attribution.
+            tx_types: tx_types_attr,
+            chunk_tx_type_homogeneous: homogeneous_attr,
         });
 
         chain_prove_total += chain_dt;
@@ -1000,6 +1072,8 @@ fn run_stream(args: &Args) {
         rss_mb_peak: peak_rss_mb(),
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
+        tx_types: None,
+        chunk_tx_type_homogeneous: None,
     });
 
     let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
@@ -1172,6 +1246,8 @@ fn run_stream(args: &Args) {
             rss_mb_peak: peak_rss_mb(),
             rss_mb_after: current_rss_mb(),
             ts: now_iso8601(),
+            tx_types: None,
+            chunk_tx_type_homogeneous: None,
         });
     };
     let mut l3_opt: Option<&mut dyn FnMut()> = if args.l3_every.is_some() {
@@ -1365,6 +1441,12 @@ fn run_tree_fold(
             rss_mb_peak: peak_rss_mb(),
             rss_mb_after: current_rss_mb(),
             ts: now_iso8601(),
+            // Issue #157: tree-fold path does not (yet) participate in
+            // the per-tx-type cost spike; pass None to preserve pre-#157
+            // JSON shape. Wiring this path requires plumbing the chunk's
+            // `Tx` slice into the tree-fold scheduler -- deferred.
+            tx_types: None,
+            chunk_tx_type_homogeneous: None,
         });
         info!(
             "tx chunk #{index}/{} BlockTxCircuit::prove time: {:?}",
@@ -1663,6 +1745,10 @@ fn run_tree_fold(
                         rss_mb_peak: peak_rss_mb(),
                         rss_mb_after: current_rss_mb(),
                         ts: now_iso8601(),
+                        // Issue #157: merge nodes aggregate multiple
+                        // chunks -- no single tx-type attribution applies.
+                        tx_types: None,
+                        chunk_tx_type_homogeneous: None,
                     });
                     info!(
                         "merge pair #{i}/{pair_count} (level {depth}) \
@@ -1974,6 +2060,10 @@ fn prove_leaf(
         rss_mb_peak: peak_rss_mb(),
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
+        // Issue #157: tree-fold leaf path -- attribution deferred (see
+        // L1 site above).
+        tx_types: None,
+        chunk_tx_type_homogeneous: None,
     });
     info!(
         "tx chunk #{index}/{} leaf BlockTxChainCircuit::prove time (incl. base proof): {:?}",
@@ -2077,6 +2167,9 @@ fn run_l4_check(
         rss_mb_peak: peak_rss_mb(),
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
+        // Issue #157: L4 is a block-level aggregate, not per-tx-chunk.
+        tx_types: None,
+        chunk_tx_type_homogeneous: None,
     });
     // Issue #102 (additive): build / prove / verify split for the
     // calibration suite's objective-4 constants (per-machine L4_WALL).
@@ -3470,6 +3563,26 @@ fn batch_public_inputs(batch: &Batch<F>) -> Vec<F> {
             .map(|&b| F::from_canonical_u8(b)),
     );
     pis
+}
+
+/// Issue #157 (spike): per-chunk tx-type attribution. Returns
+/// `(Some(tx_types), homogeneous)` where `tx_types` lists each tx's
+/// `tx_type` in chunk order, and `homogeneous = Some(t)` iff every tx
+/// in the chunk shares `tx_type == t`. Only invoked when the caller
+/// opts in via `--group-by-tx-type`; the default path returns
+/// `(None, None)` upstream and keeps the JSON shape pre-#157 identical.
+fn chunk_tx_type_attribution(chunk: &[tx::Tx<F>]) -> (Option<Vec<u8>>, Option<u8>) {
+    if chunk.is_empty() {
+        return (Some(Vec::new()), None);
+    }
+    let types: Vec<u8> = chunk.iter().map(|t| t.tx_type).collect();
+    let first = types[0];
+    let homogeneous = if types.iter().all(|&t| t == first) {
+        Some(first)
+    } else {
+        None
+    };
+    (Some(types), homogeneous)
 }
 
 /// Compute the delta between two CPU-time samples. Returns `None` if
