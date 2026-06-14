@@ -6,13 +6,19 @@ cloud spend, no infrastructure.
 
 It answers the three load questions the trace format *can* answer:
 
-1. **Block-size distribution** — count, non-null mean/median, p50/p90/p95/p99,
-   min/max, null fraction.
+1. **Block-size distribution** — count, non-null mean/median,
+   p50/p75/p90/p95/p99/p99.9, min/max, null fraction, plus **size bands**
+   (=1 / 2-49 / 50-99 / 100-249 / 250-399 / 400-499 / =500-cap) — the bands
+   surface the bimodal mass that percentiles collapse against the cap.
 2. **Outlier (large-block) frequency** — fraction of blocks at the 500-tx chain
    cap (`BLOCK_TX_CAP`), and any `> cap` anomalies (spec violations).
-3. **Arrival-rate / burst distribution** — inter-block gap median/p95/max,
-   height-jump count + Δ histogram (bursts where Δ > 1), and aggregate tx/s
-   under the feeder's P1 mean-fill policy.
+3. **Arrival-rate / burst distribution** — inter-block gap
+   median/p95/p99/p99.9/max, height-jump count + Δ histogram (bursts where
+   Δ > 1), aggregate tx/s under the feeder's P1 mean-fill policy, **blocks/s
+   distribution in 1-second wall buckets (mean / p50 / p90 / p95 / p99 / p99.9
+   / max, height-expansion-aware)**, and **peak rolling-window block counts**
+   for 1/3/5/10 s windows — the burst signal the conductor (#75) is sized
+   against (ADR-0004: `>=5 blocks/s`, `lag_p50<=20s`, `lag_p99<=40s`).
 
 > ## ⚠️ Data-limitation caveat — the trace format has NO tx types
 >
@@ -127,6 +133,8 @@ so importing the module for its pure helpers needs **stdlib only**.
 | `jumps` / `delta_histogram` | Height discontinuities (Δ > 1) — coalesced pushes / brief feed gaps; the burst signal. |
 | `skipped_heights` | Total heights skipped across all jumps (Σ(Δ−1)). |
 | `aggregate_tx_per_s_p1` | Throughput after the full P2→P1→P4 pipeline — the number the fleet (#75) is sized against. |
+| `blocks_per_s_*` | Blocks-per-second distribution in 1-s wall buckets, height-expansion-aware (jumps attributed to their announcing second) — what the conductor's per-second admission/lag sizing reads. |
+| `bursts.peak_blocks_in_Ws` | Peak block count in any rolling W-second window — the burst-window characterization for lag-SLO sizing (ADR-0004). |
 
 ## Self-check / test
 

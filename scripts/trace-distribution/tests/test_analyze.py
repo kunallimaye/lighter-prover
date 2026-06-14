@@ -70,6 +70,49 @@ def test_self_check_passes():
     assert analyze.self_check() == 0
 
 
+def test_size_bands_sum_to_non_null():
+    # The size-band counts must partition the non-null block set exactly —
+    # no double-counting, no gaps. (Bands extension, issue #128.)
+    bs = _report()["block_size"]
+    bands = bs["bands"]
+    assert sum(bands.values()) == bs["non_null_blocks"]
+    # Cap band == outliers.at_cap_blocks (cross-check).
+    assert bands["eq_500"] == _report()["outliers"]["at_cap_blocks"]
+
+
+def test_p99_9_and_p75_present():
+    # New tail percentiles emitted alongside the existing p50/p90/p95/p99.
+    bs = _report()["block_size"]
+    assert bs["p75"] is not None
+    assert bs["p99_9"] is not None
+    # On the bimodal fixture the cap dominates the upper half; p99.9 == 500.
+    assert bs["p99_9"] == 500
+
+
+def test_arrival_burst_fields_present():
+    # Burst characterization is the conductor-sizing signal (ADR-0004).
+    ar = _report()["arrival_rate"]
+    assert "bursts" in ar and ar["bursts"]
+    for w in (1, 3, 5, 10):
+        assert f"peak_blocks_in_{w}s" in ar["bursts"]
+    assert ar["blocks_per_s_max"] >= ar["blocks_per_s_p50"]
+    assert ar["gap_p99_9_ms"] >= ar["gap_p99_ms"] >= ar["gap_p95_ms"]
+
+
+def test_percentile_supports_fractional_p():
+    # The percentile helper must accept fractional p (99.9 etc.) — the
+    # original integer ceil division silently rounded these down to 99.
+    # Use N=10000 to dodge float-rounding edge cases on round-decimal p.
+    srt = list(range(1, 10001))  # 1..10000
+    assert analyze.percentile(srt, 50) == 5000
+    assert analyze.percentile(srt, 99) == 9900
+    # nearest-rank on N=10000 at p=99.9: ceil(0.999*10000)=9990
+    assert analyze.percentile(srt, 99.9) == 9990
+    # Edge bounds.
+    assert analyze.percentile(srt, 0) == 1
+    assert analyze.percentile(srt, 100) == 10000
+
+
 if __name__ == "__main__":
     # Allow running without pytest installed (e.g. bare make local-test envs).
     funcs = [v for k, v in sorted(globals().items())
