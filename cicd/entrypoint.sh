@@ -4,12 +4,17 @@
 # Roles:
 #   worker        Run ./bench once (or LIGHTER_BENCH_REPEAT times) against
 #                 LIGHTER_BENCH_INPUT, streaming all timing output to
-#                 stdout. The bench binary's own log lines
-#                 ("TOTAL ... time: ...", "AVERAGE ... time: ...") are the
-#                 parseable contract.
-#   orchestrator  Spawn LIGHTER_WORKERS sibling worker containers, collect
-#                 their stdout, compute mean / p50 / p95 / stdev across
-#                 the timing fields. Implemented in /app/orchestrator.py.
+#                 stdout. The bench binary's structured BENCH_EVENT JSONL
+#                 lines (see bench/src/events.rs) are the parseable
+#                 contract; the legacy "TOTAL/AVERAGE" INFO lines are also
+#                 still emitted for human readers.
+#
+# This image ships ONLY the worker role. Fan-out / aggregation is an
+# orchestration concern that runs on the host (scripts/container.sh
+# fanout -> cicd/orchestrator.py) or the build/orchestration role, never
+# inside the runtime container — per the three-role topology
+# (docs/decisions/ADR-0001-container-topology.md). The in-container
+# "orchestrator" role was removed in #21.
 #
 # Phase 1 ships embarrassingly-parallel fan-out: every worker runs the
 # full ./bench pipeline against the same fixture. True work-sharding
@@ -33,8 +38,9 @@ BENCH_JSONL_PATH="/tmp/bench.jsonl"
 BENCH_DONE_PATH="/tmp/DONE"
 
 emit_header() {
-  # Single banner line consumed by the orchestrator to bind a run's
-  # stdout to its container identity. Cheap, parseable, idempotent.
+  # Single banner line consumed by the host orchestrator
+  # (cicd/orchestrator.py) to bind a run's stdout to its container
+  # identity. Cheap, parseable, idempotent.
   printf '### LIGHTER_BENCH_RUN role=%s input=%s repeat=%s tx_per_proof=%s tx_limit=%s ref=%s target_cpu=%s native=%s host=%s ts=%s\n' \
     "${ROLE}" \
     "${INPUT}" \
@@ -137,11 +143,6 @@ upload_results_to_gcs() {
   echo "### UPLOAD_DONE upload_status=${upload_status} bench_exit_code=${exit_code}"
 }
 
-run_orchestrator() {
-  emit_header
-  exec python3 /app/orchestrator.py "$@"
-}
-
 case "${ROLE}" in
   worker)
     # Forward any extra args after `--` to the bench binary. Today the
@@ -205,11 +206,8 @@ case "${ROLE}" in
       fi
     fi
     ;;
-  orchestrator)
-    run_orchestrator "$@"
-    ;;
   *)
-    echo "ERROR: unknown LIGHTER_ROLE='${ROLE}' (expected: worker | orchestrator)" >&2
+    echo "ERROR: unknown LIGHTER_ROLE='${ROLE}' (expected: worker)" >&2
     exit 2
     ;;
 esac

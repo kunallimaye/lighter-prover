@@ -12,8 +12,9 @@
 #      e2/n2d/c3 x86 only), and a QEMU-emulated Rust compile is 10-20×
 #      slower than cross-compilation. See ADR-0001 addendum (#33).
 #   2. runtime — debian:stable-slim for the TARGET platform with the
-#      bench binary, bench_test.json fixture, entrypoint (worker /
-#      orchestrator), google-cloud-cli (GCS uploads, #25), and tini as
+#      bench binary, bench_test.json fixture, entrypoint (worker role
+#      only — fan-out runs from the host, #21), google-cloud-cli (GCS
+#      uploads, #25), and tini as
 #      PID 1. The arm64 runtime stage is the ONLY thing that runs under
 #      QEMU during a multi-platform build — it is apt installs only
 #      (minutes, not hours) and its layers are shared by every arm64
@@ -115,16 +116,20 @@ FROM debian:stable-slim AS runtime
 # shares it across all per-microarch variants of the same platform —
 # the QEMU-emulated arm64 apt install runs ONCE per build session.
 #
-# tini = PID 1 with proper signal handling. python3 = orchestrator role.
+# tini = PID 1 with proper signal handling.
 # google-cloud-cli ships `gcloud storage`, which the worker entrypoint
 # uses to upload results to GCS when BENCH_BUCKET is set (see #25).
 # Google publishes arm64 debs for google-cloud-cli, so the same recipe
 # works for both platforms.
+#
+# NOTE (#21): python3 / python3-pip were previously installed for the
+# in-container "orchestrator" role (orchestrator.py). That role was
+# removed — fan-out now runs only from the host — so they are no longer
+# installed explicitly. (google-cloud-cli may still pull a python3
+# runtime in transitively; that is its own dependency, not ours.)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
-      python3 \
-      python3-pip \
       ca-certificates \
       curl \
       gnupg \
@@ -154,8 +159,7 @@ WORKDIR /app
 COPY --from=builder /out/bench /app/bench
 COPY --from=builder /src/bench/bench_test.json /app/bench_test.json
 COPY cicd/entrypoint.sh /app/entrypoint.sh
-COPY cicd/orchestrator.py /app/orchestrator.py
-RUN chmod +x /app/entrypoint.sh /app/orchestrator.py \
+RUN chmod +x /app/entrypoint.sh \
  && chown -R bench:bench /app
 
 USER bench
