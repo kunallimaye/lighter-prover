@@ -47,18 +47,20 @@ resource_labels = {
 # arm64). One cell saturates a whole 64-vCPU box (ADR-0003). Scale-Out
 # Autopilot class selects Axion (arm64) nodes.
 cell_replicas       = 9
-cell_compute_class  = "Scale-Out"
+cell_compute_class  = "Performance" # Autopilot: Performance+c4a = real Axion; Scale-Out=t2a/neoverse-n1 SIGILLs the neoverse-v2 binary (live finding)
+cell_machine_family = "c4a"
 cell_arch           = "arm64"
-cell_cpu_request    = "62"    # whole c4a-highcpu-64 minus Autopilot system reservation
-cell_memory_request = "16Gi"  # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L4/L5 keys + headroom
+cell_cpu_request    = "43"   # whole c4a-highcpu-64 minus Autopilot system reservation
+cell_memory_request = "44Gi" # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L4/L5 keys + headroom
 # DEPENDENCY: replace with the REAL arm64 prover image tag
 # (<sha>-neoverse-v2) emitted by cicd/cloudbuild.yaml. Placeholder until built.
-cell_image   = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+cell_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
 cell_command = [
   "/usr/local/bin/prover", "--mode", "cell",
   "--project", "PROJECT",
   "--chunk-subscription", "lighter-prover-scale-0p5pct-chunk-sub",
   "--results-topic", "lighter-prover-scale-0p5pct-results",
+  "--tx-per-proof", "9",
   "--poll-interval-s", "2",
 ]
 
@@ -70,18 +72,20 @@ cell_command = [
 # NOT scaled below 1 (operational floor + the mandatory eviction
 # mitigation). Intentionally FLAT at 1 across all three tiers.
 coordinator_replicas       = 1
-coordinator_compute_class  = "Scale-Out"
+coordinator_compute_class  = "Performance"
+coordinator_machine_family = "c4a"
 coordinator_arch           = "arm64"
-coordinator_cpu_request    = "62"    # whole box; coordinator-specific profile UNMODELED (#113) — proxy
-coordinator_memory_request = "16Gi"  # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
+coordinator_cpu_request    = "43"   # whole box; coordinator-specific profile UNMODELED (#113) — proxy
+coordinator_memory_request = "44Gi" # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
 # DEPENDENCY: same real arm64 prover image tag from cicd/cloudbuild.yaml.
-coordinator_image   = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+coordinator_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
 coordinator_command = [
   "/usr/local/bin/prover", "--mode", "coordinator",
   "--project", "PROJECT",
   "--dispatch-subscription", "lighter-prover-scale-0p5pct-dispatch-sub",
   "--chunk-topic", "lighter-prover-scale-0p5pct-chunk",
   "--results-subscription", "lighter-prover-scale-0p5pct-results-sub",
+  "--tx-per-proof", "9",
   "--poll-interval-s", "2",
 ]
 

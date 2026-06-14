@@ -189,7 +189,8 @@ resource "kubernetes_deployment" "cells" {
       spec {
         node_selector = merge(
           { "kubernetes.io/arch" = var.cell_arch },
-          var.cell_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.cell_compute_class }
+          var.cell_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.cell_compute_class },
+          var.cell_machine_family == "" ? {} : { "cloud.google.com/machine-family" = var.cell_machine_family }
         )
 
         container {
@@ -257,7 +258,8 @@ resource "kubernetes_deployment" "coordinator" {
       spec {
         node_selector = merge(
           { "kubernetes.io/arch" = var.coordinator_arch },
-          var.coordinator_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.coordinator_compute_class }
+          var.coordinator_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.coordinator_compute_class },
+          var.coordinator_machine_family == "" ? {} : { "cloud.google.com/machine-family" = var.coordinator_machine_family }
         )
 
         container {
