@@ -1,4 +1,4 @@
-# Full-scale fleet sizing + scaled validation ladder (1% / 3% / 5%)
+# Full-scale fleet sizing + scaled validation ladder (0.2% / 0.3% / 0.5%)
 
 > Refs #95 #144 #75 #113. **Non-closing.** This is the *idealized* (k=1
 > single-machine lower bound) sizing projection (#95) plus the scaled GKE
@@ -163,34 +163,55 @@ Machine class: **c4a-highcpu-64** (Axion / neoverse-v2, arm64), Autopilot
 reservation); cell_memory_request sized to the 5.1 GiB RSS + L4/L5 keys +
 headroom.
 
-## 4. Scaled validation ladder (1% / 3% / 5% of full scale)
+## 4. Scaled validation ladder (0.2% / 0.3% / 0.5% of full scale)
 
-Percentages applied to the **steady (11.08/s) full-scale** counts, then
-`ceil`. Coordinators ceil to **at least 1** (the pool may never be empty).
+Percentages applied to the **steady (11.08/s) full-scale** counts. **Cells**
+use **round-half-up** to the nearest integer. **Coordinators** are
+**floored at 1** for every tier (see the decision below).
 
-| Tier | Cells = ceil(1894·p) | Coordinators = ceil(51·p) | PDB minAvailable |
-|---|---|---|---|
-| **1%** | **19** | **1** | 1 |
-| **3%** | **57** | **2** | 1 |
-| **5%** | **95** | **3** | 2 |
+| Tier | Cells = round(1894·p) | math | Coordinators (strict 51·p) | PDB minAvailable |
+|---|---|---|---|---|
+| **0.2%** | **4** | 1894·0.002 = 3.788 → 4 | **1** (floored; strict 0.102) | 1 |
+| **0.3%** | **6** | 1894·0.003 = 5.682 → 6 | **1** (floored; strict 0.153) | 1 |
+| **0.5%** | **9** | 1894·0.005 = 9.470 → 9 | **1** (floored; strict 0.255) | 1 |
 
-PDB `minAvailable` = `max(1, coordinators - 1)` so a bin-pack/eviction can
-never take the *last* in-flight, key-resident coordinator while still
-allowing one-at-a-time rolling headroom (at 1% with a single coordinator,
-minAvailable=1 pins it entirely un-evictable — the strictest form of the
-NON-NEGOTIABLE mitigation).
+> **Cell rounding note.** `round-half-up` to the nearest integer (a change
+> from the prior `ceil`-based ladder). 0.5% → 9.470 rounds to **9**, not 10
+> (0.470 < 0.5). 0.2% → 3.788 → 4; 0.3% → 5.682 → 6.
+
+### Coordinator class floored at 1 — DELIBERATE, STATED DECISION
+
+At these tiny percentages the strict coordinator count is below 1 for **all
+three** tiers (0.2%·51 = 0.102, 0.3%·51 = 0.153, 0.5%·51 = 0.255). The
+coordinator class is **NOT scaled below 1 by design** — it is intentionally
+**FLAT at 1** across the whole ladder, with `coordinator_pdb_min_available =
+1` on every tier. Two non-negotiable reasons:
+
+1. **Operational floor.** A zero-coordinator fold service cannot prove
+   anything — the L2 merge tree + L4 block-prove has no home. The pool may
+   never be empty.
+2. **The mandatory eviction mitigation.** The HARD safe-to-evict=false +
+   PodDisruptionBudget mitigation (ADR-0003 amendment §3) requires at least
+   one coordinator to protect; `minAvailable = 1` pins the single coordinator
+   entirely un-evictable — the strictest form of the NON-NEGOTIABLE
+   mitigation, so a bin-pack/eviction never takes the in-flight,
+   key-resident coordinator.
+
+This is a **deliberate, stated choice, not an oversight**: the ladder scales
+the *cell* class down through 4/6/9 while holding the coordinator class at
+its operational floor of 1.
 
 ### 4.1 Matching synthetic load per tier (the pacer drive level)
 
 Load scales with the **same percentage** as the fleet (keep-pace is the
-ratio test: a 1% fleet must keep pace with 1% of the real arrival). From the
-real load (mean 11.08, p99 25, peak 41 blk/s):
+ratio test: a 0.2% fleet must keep pace with 0.2% of the real arrival). From
+the real load (mean 11.08, p99 25, peak 41 blk/s):
 
 | Tier | mean (blk/s) | p99 (blk/s) | peak (blk/s) | math |
 |---|---|---|---|---|
-| 1% | **0.1108** | 0.25 | 0.41 | 11.08·0.01 / 25·0.01 / 41·0.01 |
-| 3% | **0.3324** | 0.75 | 1.23 | 11.08·0.03 / 25·0.03 / 41·0.03 |
-| 5% | **0.5540** | 1.25 | 2.05 | 11.08·0.05 / 25·0.05 / 41·0.05 |
+| 0.2% | **0.02216** | 0.050 | 0.082 | 11.08·0.002 / 25·0.002 / 41·0.002 |
+| 0.3% | **0.03324** | 0.075 | 0.123 | 11.08·0.003 / 25·0.003 / 41·0.003 |
+| 0.5% | **0.05540** | 0.125 | 0.205 | 11.08·0.005 / 25·0.005 / 41·0.005 |
 
 **Keep-pace predicate** the benchmark verifies per tier: at the tier's mean
 drive rate, with the tier's cell+coordinator counts, the measured block
@@ -227,27 +248,29 @@ contention + G2 realism is what turns it from *idealized* into *confident*
 > against a placeholder ref and will not prove. `project_id` / `region`
 > are passed on the CLI (no secrets in the tfvars).
 
-For `N in {1, 3, 5}`:
+For `T in {0p2pct, 0p3pct, 0p5pct}` (files `scale-0p2pct.tfvars`,
+`scale-0p3pct.tfvars`, `scale-0p5pct.tfvars`):
 
 1. **Apply** (impersonate the deployer SA — no human-key spend):
    ```
    terraform -chdir=cicd/terraform/gke apply \
-     -var-file=scale-Npct.tfvars \
+     -var-file=scale-Tpct.tfvars \
      -var project_id=kunal-scratch -var region=us-central1 \
+     # e.g. -var-file=scale-0p2pct.tfvars
      # gcloud config set auth/impersonate_service_account \
      #   lighter-prover-agent@kunal-scratch.iam.gserviceaccount.com
    ```
 2. **Publish scaled load** to the dispatch topic (`<cluster>-dispatch`) at
-   the tier's **mean** drive rate (1%=0.1108, 3%=0.3324, 5%=0.5540 blk/s),
-   then ramp to the tier **peak** (0.41 / 1.23 / 2.05 blk/s) to exercise the
-   HPA against `hpa_backlog_target`.
+   the tier's **mean** drive rate (0.2%=0.02216, 0.3%=0.03324,
+   0.5%=0.05540 blk/s), then ramp to the tier **peak** (0.082 / 0.123 /
+   0.205 blk/s) to exercise the HPA against `hpa_backlog_target`.
 3. **Measure** block lag p50/p99, Pub/Sub backlog trend, per-pool
    contention (cells + coordinators sized SEPARATELY — verify neither pool
    is the bottleneck), and coordinator utilization (**the G4/#113 unknown**).
 4. **Verify keep-pace** against §4.1: lag p50<=20 s, p99<=40 s, backlog
    stable, observed throughput >= drive rate. Record the idealized-vs-real
    gap into the #95 model as the G4 contention coefficient (feeds G5).
-5. **Teardown**: `terraform -chdir=... destroy -var-file=scale-Npct.tfvars`
+5. **Teardown**: `terraform -chdir=... destroy -var-file=scale-Tpct.tfvars`
    (`deletion_protection=false` on every scaled config makes this clean);
    confirm no leftover Pub/Sub topics/subs via the `resource_labels`.
 
