@@ -34,7 +34,8 @@
   fleet-collect fleet-publish fleet-teardown \
   stream-fetch-trace stream-record stream-replay stream-bench \
   stream-test stream-smoke stream-sweep \
-  s-calibrate s-calibrate-fleet calibration-check
+  s-calibrate s-calibrate-fleet calibration-check \
+  fleet-size fleet-size-test
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -260,6 +261,18 @@ calibration-check: ## Staleness guard: WARN when calibration/ predates circuit/s
 
 s-calibrate-fleet: ## Cloud calibration on machines-calibrate.tsv shapes (interactive cost gate; SHAPES=, REF=, CAL_L4=1)
 	@$(FLEET) calibrate $(if $(SHAPES),--machines "$(SHAPES)",) $(if $(REF),--ref $(REF),) $(if $(filter 1,$(CAL_L4)),--cal-l4,)
+
+# ─── Parametric fleet-sizing model (#95) ─────────────────────────────
+# Consumes the MEASURED calibration/*.json constants and emits machines +
+# topology (SIZE + SHAPE). Cost is a non-gating overlay only (Discussion
+# #77). Pass-through args via ARGS=, e.g.:
+#   make fleet-size ARGS="--shape c4a-highcpu-64 --s 9 --blocks-per-s 5 --tx-per-block 9000"
+#   make fleet-size ARGS="--self-check"
+fleet-size: ## Parametric fleet sizing from measured constants (ARGS="--shape ... --s ... --blocks-per-s ... --tx-per-block ..."; --json; --self-check; --cost-overlay PRICE)
+	@python3 scripts/fleet-size.py $(ARGS)
+
+fleet-size-test: ## Golden test for the fleet-sizing model (#95)
+	@bash scripts/bench-fleet/tests/test-fleet-size.sh
 
 # ─── Operator notes ──────────────────────────────────────────────────
 # - ORCH_FORCE_RESTART=1 on any admin-cloud-* / cloud-* target invalidates

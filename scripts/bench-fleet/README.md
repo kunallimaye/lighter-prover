@@ -288,12 +288,15 @@ scripts/bench-fleet/
     ├── fixtures/
     ├── test-parser.sh           parser regression test
     ├── test-render.sh           renderer well-formedness test
-    └── test-calibrate.sh        calibration objective-math golden test (#85)
+    ├── test-calibrate.sh        calibration objective-math golden test (#85)
+    └── test-fleet-size.sh       fleet-sizing model golden test (#95)
 ```
 
-Run `bash tests/test-parser.sh`, `bash tests/test-render.sh`, and
-`bash tests/test-calibrate.sh` from `scripts/bench-fleet/` to validate
-the parser + renderer + calibration math locally before shipping changes.
+Run `bash tests/test-parser.sh`, `bash tests/test-render.sh`,
+`bash tests/test-calibrate.sh`, and `bash tests/test-fleet-size.sh` from
+`scripts/bench-fleet/` to validate the parser + renderer + calibration
+math + the fleet-sizing model locally before shipping changes
+(`test-fleet-size.sh` is also wired to `make fleet-size-test`).
 
 ## What this toolkit is NOT
 
