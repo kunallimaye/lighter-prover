@@ -13,6 +13,7 @@ pub mod events;
 pub mod kzg;
 pub mod l5segment;
 pub mod l6drive;
+pub mod prestate;
 pub mod seed;
 pub mod stream;
 pub mod trace;
