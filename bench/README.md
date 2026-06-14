@@ -46,6 +46,27 @@ are non-null `0..chunk_total`.
 `getrusage`). On non-Linux platforms they serialize as `null`. `ts`
 is UTC in `YYYY-MM-DDTHH:MM:SSZ` form.
 
+### Per-chunk tx-type attribution (issue #157)
+
+Two additive flags annotate L1/L2 `layer_prove` events with per-chunk
+tx-type information so the per-type cost shape can be filtered out of
+the existing JSONL stream without rewriting the bench:
+
+| Flag | Effect |
+|------|--------|
+| `--attribute-tx-type` | Adds two optional fields to L1/L2 `layer_prove`: `tx_types` (the `tx_type` of each tx in the chunk, in chunk order) and `chunk_tx_type_homogeneous` (`Some(t)` when every tx in the chunk shares `tx_type == t`, otherwise omitted). Tx order is not changed; chunks are homogeneous opportunistically (always true at `--tx-per-proof 1`). |
+| `--group-by-tx-type` | Stable-sort `block.txs` by `tx_type` before chunking, then emit attribution (implies `--attribute-tx-type`). Produces type-homogeneous chunks except at type boundaries. **Caveat:** re-ordering txs breaks chain-validity; the L1 witness for some tx types asserts cross-tx state that the unsorted chain established, so prove can panic on `bench_test.json` (see issue #159 for the root-cause investigation). For that fixture, prefer `--attribute-tx-type --tx-per-proof 1` to isolate per-type cost without sorting. |
+
+Both flags are off by default and the pre-#157 JSON shape is preserved
+when neither is set (the new fields use `#[serde(skip_serializing_if =
+"Option::is_none")]`). Consumers (fleet parser, calibration) that select
+fields by name are transparently unaffected.
+
+Example with attribution on:
+```
+BENCH_EVENT {"event":"layer_prove","layer":1,"name":"BlockTxCircuit","chunk_idx":0,"chunk_total":500,"tx_per_proof":1,"wall_ms":616,"cpu_ms":10094,"rss_mb_peak":1192,"rss_mb_after":1192,"ts":"2026-06-14T07:22:52Z","tx_types":[15],"chunk_tx_type_homogeneous":15}
+```
+
 ### Example events
 
 ```jsonl
