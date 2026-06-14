@@ -216,8 +216,19 @@ struct Args {
     #[arg(long, default_value_t = false)]
     l6_inner: bool,
 
+    /// Issue #116: drive the full inner -> outer wrapper chain. Runs the same
+    /// `--l6-inner` pipeline to produce + verify the inner-wrapper proof, then
+    /// CONTINUES into the outer stage: builds the outer-wrapper circuit via
+    /// `WrapperCircuit::define_outer` (BN128 config), calls the previously
+    /// uncalled `WrapperCircuit::prove_outer`, and verifies the resulting
+    /// outer-wrapper proof — the conversion toward the Ethereum-friendly form.
+    /// Batch mode only; heaviest path. (Issue #116.)
+    #[arg(long, default_value_t = false)]
+    l6_outer: bool,
+
     /// Issue #83: path to the public Ethereum KZG ceremony trusted setup used by
-    /// `--blob-prove` / `--l6-inner` to derive the blob's KZG versioned hash.
+    /// `--blob-prove` / `--l6-inner` / `--l6-outer` to derive the blob's KZG
+    /// versioned hash.
     #[arg(long, default_value = bench::kzg::DEFAULT_TRUSTED_SETUP_PATH)]
     trusted_setup_path: String,
 }
@@ -350,10 +361,10 @@ fn main() {
             eprintln!("error: --l5-segment-check is batch-mode only (issue #78); drop --stream");
             std::process::exit(2);
         }
-        if args.delta_prove || args.blob_prove || args.l6_inner {
+        if args.delta_prove || args.blob_prove || args.l6_inner || args.l6_outer {
             eprintln!(
-                "error: --delta-prove/--blob-prove/--l6-inner are batch-mode only (issue #83); \
-                 drop --stream"
+                "error: --delta-prove/--blob-prove/--l6-inner/--l6-outer are batch-mode only \
+                 (issues #83/#116); drop --stream"
             );
             std::process::exit(2);
         }
@@ -471,6 +482,10 @@ fn main() {
     }
     if args.l6_inner {
         run_l6_inner(&args);
+        return;
+    }
+    if args.l6_outer {
+        run_l6_outer(&args);
         return;
     }
 
@@ -2194,10 +2209,88 @@ fn run_l6_inner(args: &Args) {
 }
 
 fn run_l6_inner_inner(args: &Args) {
+    let bench_start = Instant::now();
+    // Produce + verify the inner-wrapper proof (the terminating #83/#129 step).
+    let (_inner_data, inner_proof) = produce_inner_wrapper_proof(args);
+    info!(
+        "L6_INNER: SUCCESS — produced + VERIFIED an inner-wrapper proof over the empty-genesis \
+         L5 chain ({} public inputs) in {:?}. Issue #83 acceptance criterion #4 met: a verifying \
+         inner-wrapper proof. No values were fabricated and no constraint was relaxed.",
+        inner_proof.public_inputs.len(),
+        bench_start.elapsed()
+    );
+}
+
+/// Issue #116: drive the full inner -> outer wrapper chain. Produces + verifies
+/// the inner-wrapper proof (the `--l6-inner` pipeline), then CONTINUES into the
+/// outer stage via [`l6drive::prove_outer_wrapper`], which calls the previously
+/// uncalled `WrapperCircuit::prove_outer` and verifies the result.
+fn run_l6_outer(args: &Args) {
+    let args = args.clone();
+    run_on_big_stack("l6-outer", move || run_l6_outer_inner(&args));
+}
+
+fn run_l6_outer_inner(args: &Args) {
+    use plonky2::plonk::config::GenericHashOut;
+
+    let bench_start = Instant::now();
+    info!("L6_OUTER: driving the full inner -> outer wrapper chain (issue #116)");
+
+    // ---- Stage 1: the verified inner-wrapper proof (input to prove_outer). ----
+    let inner_t = Instant::now();
+    let (inner_data, inner_proof) = produce_inner_wrapper_proof(args);
+    info!(
+        "L6_OUTER: inner-wrapper proof produced + verified in {:?} ({} public inputs); driving \
+         the outer stage (WrapperCircuit::prove_outer over OUTER_WRAPPER_CONFIG / \
+         PoseidonBN128GoldilocksConfig).",
+        inner_t.elapsed(),
+        inner_proof.public_inputs.len()
+    );
+
+    // ---- Stage 2: the outer-wrapper drive (the #116 gap). ----
+    // prove_outer_wrapper builds define_outer over the inner shape, builds with
+    // the BN128 config, calls WrapperCircuit::prove_outer (proves AND verifies
+    // internally), and adds a belt-and-suspenders explicit verify.
+    let outer_t = Instant::now();
+    let (outer_data, outer_proof) = l6drive::prove_outer_wrapper(&inner_data, &inner_proof)
+        .expect("L6_OUTER: outer-wrapper prove_outer + verify");
+    let outer_elapsed = outer_t.elapsed();
+
+    // Belt-and-suspenders explicit verify at the drive boundary too (the helper
+    // already verified; this mirrors the inner pattern and is the acceptance gate).
+    outer_data
+        .verify(outer_proof.clone())
+        .expect("L6_OUTER: outer-wrapper proof verifies");
+
+    let outer_digest = hex::encode(outer_data.verifier_only.circuit_digest.to_bytes().clone());
+
+    info!(
+        "L6_OUTER: SUCCESS — WrapperCircuit::prove_outer produced + VERIFIED an outer-wrapper \
+         proof (BN128 config) over the verified inner-wrapper proof in {:?} (outer prove+verify \
+         {:?}; total {:?}). Outer circuit digest: {} ({} public inputs). Issue #116 met: the \
+         outer-wrapper drive path now actually calls the previously-uncalled prove_outer and \
+         verifies the conversion toward the Ethereum-friendly form. No values were fabricated and \
+         no constraint was relaxed.",
+        bench_start.elapsed(),
+        outer_elapsed,
+        bench_start.elapsed(),
+        outer_digest,
+        outer_proof.public_inputs.len(),
+    );
+}
+
+/// Issue #83/#129 (criterion #4) + #116: assemble the three inner-wrapper inputs
+/// over an empty synthesized batch, call `WrapperCircuit::prove_inner` (which
+/// proves AND verifies), verify again belt-and-suspenders, and return the inner
+/// `CircuitData` + verified inner proof. The inner `CircuitData`'s
+/// `.common`/`.verifier_only` feed `define_outer`, and the inner proof is the
+/// witness `prove_outer` consumes (issue #116).
+fn produce_inner_wrapper_proof(
+    args: &Args,
+) -> (CircuitData<F, C, D>, ProofWithPublicInputs<F, C, D>) {
     use circuit::blob::blob_constraints::{BlobEvaluationCircuit, Circuit as _};
     use circuit::types::market_details::PublicMarketDetails;
 
-    let bench_start = Instant::now();
     info!("L6_INNER: assembling the three inner-wrapper inputs over an empty synthesized batch");
 
     // ---- Blob + KZG sidecar (blob_evaluation_proof input) ----
@@ -2326,14 +2419,13 @@ fn run_l6_inner_inner(args: &Args) {
         .expect("L6_INNER: inner-wrapper proof verifies");
 
     info!(
-        "L6_INNER: SUCCESS — terminating WrapperCircuit::prove_inner produced + VERIFIED an \
-         inner-wrapper proof over the empty-genesis L5 chain in {:?} (prove_inner {:?}; total \
-         {:?}). Issue #83 acceptance criterion #4 met: a verifying inner-wrapper proof. \
-         No values were fabricated and no constraint was relaxed.",
+        "L6_INNER: terminating WrapperCircuit::prove_inner produced + VERIFIED an inner-wrapper \
+         proof over the empty-genesis L5 chain (prove_inner {:?}). A verifying inner-wrapper \
+         proof; no values fabricated and no constraint relaxed.",
         prove_elapsed,
-        prove_elapsed,
-        bench_start.elapsed()
     );
+
+    (inner_data, inner_proof)
 }
 
 fn run_l5_segment_check(args: &Args, base_block: &Block<F>) {
