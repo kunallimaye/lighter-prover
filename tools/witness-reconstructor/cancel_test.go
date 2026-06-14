@@ -69,6 +69,37 @@ func TestCancelOrderBookPathDeltaConserves(t *testing.T) {
 	}
 }
 
+// TestCancelAccountOrdersAfterRootRemovesLeaf verifies the account_orders
+// sub-tree transition for a real cancel: the BEFORE root (non-empty account_order
+// leaf) matches a stored aor (Phase-0 invariant), and the AFTER root (emptied
+// leaf folded through the SAME proof) both (a) is well-formed and (b) differs from
+// the before root — i.e. the cancel actually removed the order from the sub-tree.
+func TestCancelAccountOrdersAfterRootRemovesLeaf(t *testing.T) {
+	b := haveFixture(t)
+	tx := &b.Txs[67]
+	beforeRoot, ok := cancelAccountOrdersBeforeRoot(tx)
+	if !ok {
+		t.Fatal("tx[67] missing account_orders proof")
+	}
+	matchedSlot := false
+	for _, a := range tx.AccountsBefore {
+		if equalHash(beforeRoot, toHashOut(a.AccountOrdersRoot)) {
+			matchedSlot = true
+			break
+		}
+	}
+	if !matchedSlot {
+		t.Fatalf("account_orders before-root %v matched no stored aor", limbsOf(beforeRoot))
+	}
+	afterRoot, ok := cancelAccountOrdersAfterRoot(tx)
+	if !ok {
+		t.Fatal("cancelAccountOrdersAfterRoot returned not-ok")
+	}
+	if equalHash(afterRoot, beforeRoot) {
+		t.Fatalf("account_orders after-root unchanged for a real cancel (leaf not removed): %v", limbsOf(afterRoot))
+	}
+}
+
 // TestCancelAllRealChainableBitForBit is the strongest Phase-1 invariant: EVERY
 // real, chainable cancel in the block reproduces the next-same-market tx's
 // before order_book_root AND full market leaf, bit-for-bit. A single divergence
