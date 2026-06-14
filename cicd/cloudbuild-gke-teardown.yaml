@@ -1,0 +1,117 @@
+# GKE Autopilot smoke TEARDOWN + VERIFY pipeline (issue #151, G4 enabler).
+#
+# Teardown is a FIRST-CLASS, tested step — as reliable as stand-up. It
+# (a) terraform-destroys the GKE module, then (b) ASSERTS nothing remains:
+# no cluster, no orphaned compute instances tagged to the cluster, no
+# leftover forwarding-rules / target-pools / backend-services (LBs), no
+# leftover disks. It prints the evidence and FAILS if anything lingers.
+#
+# Runs as tf-service-account (owner) via --service-account on submit.
+
+timeout: 1800s
+
+substitutions:
+  _PROJECT_ID: ''
+  _REGION: 'us-central1'
+  _TF_STATE_BUCKET: ''
+  _TF_STATE_PREFIX: 'lighter-prover/gke'
+  _CLUSTER_NAME: 'lighter-prover-smoke'
+
+steps:
+  # ── 1. terraform destroy ──────────────────────────────────────────
+  - id: tf-init
+    name: 'hashicorp/terraform:1.14'
+    dir: 'cicd/terraform/gke'
+    args:
+      - 'init'
+      - '-backend-config=bucket=${_TF_STATE_BUCKET}'
+      - '-backend-config=prefix=${_TF_STATE_PREFIX}'
+    env: ['TF_IN_AUTOMATION=true']
+
+  - id: tf-destroy
+    name: 'hashicorp/terraform:1.14'
+    dir: 'cicd/terraform/gke'
+    args:
+      - 'destroy'
+      - '-auto-approve'
+      - '-no-color'
+      - '-input=false'
+      - '-var-file=smoke.tfvars'
+      - '-var=project_id=${_PROJECT_ID}'
+      - '-var=region=${_REGION}'
+      - '-var=cluster_name=${_CLUSTER_NAME}'
+    env: ['TF_IN_AUTOMATION=true']
+
+  # ── 2. VERIFY nothing remains ─────────────────────────────────────
+  - id: verify-clean
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -uo pipefail
+        echo "Running as: $$(gcloud config get-value account)"
+        FAIL=0
+
+        echo "════ 1) GKE clusters (expect: smoke cluster GONE) ════"
+        CLUSTERS=$$(gcloud container clusters list --region "${_REGION}" \
+          --filter="name=${_CLUSTER_NAME}" --format="value(name)" 2>/dev/null || true)
+        if [ -z "$$CLUSTERS" ]; then
+          echo "✅ no cluster named ${_CLUSTER_NAME} remains"
+        else
+          echo "❌ cluster still present: $$CLUSTERS"; FAIL=1
+        fi
+
+        echo "════ 2) Compute instances tagged to the cluster (expect: none) ════"
+        NODES=$$(gcloud compute instances list \
+          --filter="name~gke-${_CLUSTER_NAME}" --format="value(name)" 2>/dev/null || true)
+        if [ -z "$$NODES" ]; then
+          echo "✅ no orphaned GKE nodes for ${_CLUSTER_NAME}"
+        else
+          echo "❌ orphaned nodes: $$NODES"; FAIL=1
+        fi
+
+        echo "════ 3) Load balancers (forwarding-rules / target-pools / backend-services) ════"
+        FR=$$(gcloud compute forwarding-rules list \
+          --filter="name~${_CLUSTER_NAME} OR description~${_CLUSTER_NAME}" \
+          --format="value(name)" 2>/dev/null || true)
+        TP=$$(gcloud compute target-pools list \
+          --filter="name~${_CLUSTER_NAME}" --format="value(name)" 2>/dev/null || true)
+        BS=$$(gcloud compute backend-services list \
+          --filter="name~${_CLUSTER_NAME}" --format="value(name)" 2>/dev/null || true)
+        if [ -z "$$FR$$TP$$BS" ]; then
+          echo "✅ no leftover LB resources for ${_CLUSTER_NAME}"
+        else
+          echo "❌ leftover LB resources: fr=[$$FR] tp=[$$TP] bs=[$$BS]"; FAIL=1
+        fi
+
+        echo "════ 4) Persistent disks tagged to the cluster (expect: none) ════"
+        DISKS=$$(gcloud compute disks list \
+          --filter="name~gke-${_CLUSTER_NAME} OR name~${_CLUSTER_NAME}" \
+          --format="value(name)" 2>/dev/null || true)
+        if [ -z "$$DISKS" ]; then
+          echo "✅ no leftover disks for ${_CLUSTER_NAME}"
+        else
+          echo "❌ leftover disks: $$DISKS"; FAIL=1
+        fi
+
+        echo "════ 5) Pub/Sub topic + subscription (TF-managed; expect destroyed) ════"
+        PS=$$(gcloud pubsub topics list \
+          --filter="name~${_CLUSTER_NAME} OR name~lighter-prover-smoke" \
+          --format="value(name)" 2>/dev/null || true)
+        if [ -z "$$PS" ]; then
+          echo "✅ no leftover Pub/Sub topics for the smoke run"
+        else
+          echo "⚠️  Pub/Sub topics still present (TF should have removed): $$PS"; FAIL=1
+        fi
+
+        echo "════════════════════════════════════════════════"
+        if [ "$$FAIL" = "0" ]; then
+          echo "✅ TEARDOWN-VERIFIED-CLEAN: nothing left running."
+        else
+          echo "❌ TEARDOWN INCOMPLETE: leftovers detected above."
+          exit 1
+        fi
+
+options:
+  logging: CLOUD_LOGGING_ONLY

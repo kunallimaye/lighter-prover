@@ -1,0 +1,64 @@
+# ─────────────────────────────────────────────────────────────────────
+# PRODUCTION-shape config (EXAMPLE — placeholder sizes, DO NOT APPLY).
+#
+# Same variable surface as smoke.tfvars — NO structural change. The sizes
+# below are PLACEHOLDERS filled from the sizing model (#95) once it lands;
+# the parameterised RUN against real data is gated on G2 + sizing and is
+# OUT OF SCOPE for the #151 automation-validation work.
+#
+#   # filled from the sizing model (#95) — placeholder sizes, do not apply
+#
+# This file exists to PROVE the module accepts production sizes without a
+# redesign. It is a `.example` so CI never applies it by accident.
+# ─────────────────────────────────────────────────────────────────────
+
+cluster_name        = "lighter-prover-prod"
+release_channel     = "REGULAR"
+deletion_protection = true
+
+# ── Machine CLASS 1: chunk-prover CELLS ──
+# CPU-saturating whole-machine pods on c4a-highcpu-64 (Axion / neoverse-v2
+# arm64). One cell saturates a whole 64-vCPU box. Large count. The cell
+# image is the arm64 prover tag emitted by cicd/cloudbuild.yaml.
+#
+# # filled from the sizing model (#95) — placeholder sizes, do not apply
+cell_replicas      = 80    # placeholder: sized from #95 (e.g. ~70-80 cells at peak, ADR-0003 Consequences)
+cell_compute_class = "Scale-Out" # Autopilot Scale-Out class ⇒ Axion (arm64) nodes
+cell_arch          = "arm64"
+cell_cpu_request   = "62"  # placeholder: whole c4a-highcpu-64 minus Autopilot system reservation
+cell_memory_request = "100Gi" # placeholder: cell RSS (~9.4 GB L1/L2 + L4/L5 keys) + headroom; sized from #95
+cell_image         = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2" # arm64/Axion image
+cell_command       = ["/usr/local/bin/prover", "--mode", "cell"] # placeholder: real prover cell entrypoint
+
+# ── Machine CLASS 2: COORDINATORS (~1% of the cell fleet) ──
+# A DISTINCT compute class (fold L2 merge tree + prove L4). Sized
+# SEPARATELY and NEVER summed with the cell class. Coordinator sizing is
+# f(block rate, per-coordinator concurrency) — ADR-0006 §2; the exact
+# CPU/mem profile is undetermined pending a real utilization measurement
+# (#113).
+#
+# # filled from the sizing model (#95) — placeholder sizes, do not apply
+coordinator_replicas       = 1   # placeholder: ~1% of cells; e.g. ~30 coordinators at scale (ADR-0006 §2)
+coordinator_compute_class  = "Scale-Out"
+coordinator_arch           = "arm64"
+coordinator_cpu_request    = "30"   # placeholder: sized from #113 utilization profile
+coordinator_memory_request = "64Gi" # placeholder: resident L4/L5 proving keys + fold working set
+coordinator_image          = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+coordinator_command        = ["/usr/local/bin/prover", "--mode", "coordinator"]
+
+# ── HARD DAY-1 mitigation (NON-NEGOTIABLE — applies at every scale) ──
+# Keep at least most coordinators un-disruptable so a bin-pack/eviction
+# never takes an in-flight, key-resident coordinator. Tune to the pool
+# size from #95.
+coordinator_pdb_min_available = 1 # placeholder: e.g. coordinator_replicas - 1 for rolling headroom
+
+# ── Autoscaling on Pub/Sub backlog ──
+pubsub_topic        = "lighter-prover-prod-dispatch"
+pubsub_subscription = "lighter-prover-prod-dispatch-sub"
+hpa_target_class    = "cells"
+hpa_min_replicas    = 10  # placeholder
+hpa_max_replicas    = 200 # placeholder: sized from peak cadence + #95
+hpa_backlog_target  = 100 # placeholder: undelivered messages per replica at steady state
+
+enable_workloads        = true
+metrics_adapter_enabled = true
