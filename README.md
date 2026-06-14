@@ -214,9 +214,7 @@ for the rationale.
 │   ├── cloudbuild-plan.yaml        # TF plan via Cloud Build
 │   ├── cloudbuild-apply.yaml       # TF apply via Cloud Build
 │   └── terraform/                  # AR repo + IAM (Phase 1 scope)
-├── docs/decisions/
-│   ├── ADR-0001-container-topology.md
-│   └── ADR-template-cloud-topology.md
+├── docs/decisions/                 # Architecture Decision Records (ADR-NNNN-*.md) + template
 ├── scripts/                        # Modular shell + Python helpers
 │   ├── common.sh                   # Shared helpers + Tier-2 detached orchestration
 │   ├── local.sh                    # Host cargo flows
