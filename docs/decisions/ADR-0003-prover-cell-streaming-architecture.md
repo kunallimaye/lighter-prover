@@ -200,7 +200,7 @@ so that Autopilot will not evict an in-flight, key-resident coordinator for bin-
 
 #134 §2 re-tested the three §D7 MIG-over-GKE arguments and found they were **correctly scoped to the benchmarking-phase fleet** (ADR-0001's regime), but change shape in production:
 
-- **Whole-node billing** (Argument A): in production this is **Autopilot-specific** and bites only the **CPU-saturating cell tier** (cells are whole-machine pods). It is **refuted for the coordinator tier**, which is measured at ~⅔-idle with a ~1 s all-core burst per block — not whole-machine — so Autopilot per-request billing is structurally cheaper there.
+- **Whole-node billing** (Argument A): in production this is **Autopilot-specific** and bites only the **CPU-saturating cell tier** (cells are whole-machine pods). It is **untested on the coordinator tier** — **no measurement of coordinator CPU utilization exists** — so Argument A **neither bites nor is refuted there**, pending such a measurement. The coordinator-tier cost is therefore **undetermined pending a real utilization measurement** (the build-time profile called for in #113).
 - **Kubelet/runtime overhead** (Argument B): **moot in production** — production isn't a cross-shape benchmark, so the comparability concern disappears; it reduces to a bounded **~5–10% effective-CPU tax** on the cell wall, to be sized into #95's fleet model.
 - **Ops idiom** (Argument C): a **real one-time GKE learning cost**, which **partly cancels** against MIG's own-the-scheduler toil at production scale.
 
@@ -210,8 +210,14 @@ The platform seam recorded in §D7 itself — "All platform-specific logic is qu
 
 ### 6. Cost note (NON-GATING)
 
-Per Discussion #77's standing norm — "cost is final-validation-only, never a design constraint or gate" — cost is recorded here **only** as a non-gating affordability note and is reconciled at final validation, not now: Autopilot is **premium on the whole-box cell tier** but **cheapest on the coordinator and small-service tiers** (#134 §3.3). This does **not** gate the decision.
+Per Discussion #77's standing norm — "cost is final-validation-only, never a design constraint or gate" — cost is recorded here **only** as a non-gating affordability note and is reconciled at final validation, not now: Autopilot is **premium on the whole-box cell tier** and **cheapest on the small-service tier** (#134 §3.3). The **coordinator-tier cost is undetermined pending a real utilization measurement** (see the Correction below) — the earlier "cheapest on the coordinator tier" claim rested on a retracted ⅓-of-the-box derivation. This does **not** gate the decision (cost is non-gating regardless).
 
 ### 7. Scope guard (this records a decision; it does not start a build)
 
 This amendment **RECORDS** the platform decision; it does **not** trigger any build or provisioning. **#75** (the conductor build) remains **design-gated** — and gated on sizing (#128/#121/#95) plus the design review. GKE implementation happens **later**, behind those gates, against this recorded decision.
+
+### Correction (2026-06-14)
+
+An earlier version of §4 (Argument A) and §6 (cost note) above cited a coordinator-utilization measurement — *"refuted for the coordinator tier, which is **measured** at ~⅔-idle with a ~1 s all-core burst per block — not whole-machine — so Autopilot per-request billing is structurally cheaper there"*, and the matching §6 claim that Autopilot is *"cheapest on the coordinator … tier"* — that **never existed**. There is no run, BENCH-LEDGER row, spike report, or calibration file (`calibration/coordinator-utilization-c4a-highcpu-64.json`) anywhere in git history; the path and the numbers were fabricated and propagated from #134 / PR #114 (see the forensic trace on **#137**, "World B"). The retracted "measured" verdict has been honestly reframed above: Argument A is **untested on the coordinator tier** and therefore **neither bites nor is refuted there**, and coordinator-tier cost is **undetermined pending a real utilization measurement**.
+
+**This correction retracts a supporting cost argument only; the platform decision is unchanged and is NOT reopened — it stands on toil-avoidance + operational-rigour + the non-gating-cost norm (see #137 trace §3).** The §1 ranking (GKE Autopilot › GKE Standard › MIG) and the §3 mandatory Autopilot mitigation requirement are **untouched** by this correction.
