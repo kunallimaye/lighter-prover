@@ -50,8 +50,18 @@ cell_cpu_request    = "62"    # whole c4a-highcpu-64 minus Autopilot system rese
 cell_memory_request = "16Gi"  # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L4/L5 keys + headroom
 # DEPENDENCY: replace with the REAL arm64 prover image tag
 # (<sha>-neoverse-v2) emitted by cicd/cloudbuild.yaml. Placeholder until built.
-cell_image   = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
-cell_command = ["/usr/local/bin/prover", "--mode", "cell"]
+cell_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+# /usr/local/bin/prover is the bench binary, symlinked in cicd/Containerfile
+# (#172). The cell pulls chunk refs and publishes results over the inner
+# planes; the Pub/Sub config is passed as flags (the binary also accepts the
+# equivalent LIGHTER_* env vars). Replace PROJECT with the real project id.
+cell_command = [
+  "/usr/local/bin/prover", "--mode", "cell",
+  "--project", "PROJECT",
+  "--chunk-subscription", "lighter-prover-scale-0p2pct-chunk-sub",
+  "--results-topic", "lighter-prover-scale-0p2pct-results",
+  "--poll-interval-s", "2",
+]
 
 # ── Machine CLASS 2: COORDINATORS (ADR-0006 §1.1, §2) — DISTINCT class ──
 # Fold L2 merge tree + prove L4. Sized SEPARATELY, NEVER summed with cells.
@@ -66,8 +76,17 @@ coordinator_arch           = "arm64"
 coordinator_cpu_request    = "62"    # whole box; coordinator-specific profile UNMODELED (#113) — proxy
 coordinator_memory_request = "16Gi"  # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
 # DEPENDENCY: same real arm64 prover image tag from cicd/cloudbuild.yaml.
-coordinator_image   = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
-coordinator_command = ["/usr/local/bin/prover", "--mode", "coordinator"]
+coordinator_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+# The coordinator pulls blocks from the dispatch subscription, fans chunk refs
+# to the chunk topic, and gathers results from the results subscription (#172).
+coordinator_command = [
+  "/usr/local/bin/prover", "--mode", "coordinator",
+  "--project", "PROJECT",
+  "--dispatch-subscription", "lighter-prover-scale-0p2pct-dispatch-sub",
+  "--chunk-topic", "lighter-prover-scale-0p2pct-chunk",
+  "--results-subscription", "lighter-prover-scale-0p2pct-results-sub",
+  "--poll-interval-s", "2",
+]
 
 # ── HARD DAY-1 mitigation (NON-NEGOTIABLE at EVERY scale) ──
 # safe-to-evict=false + the PDB are hardwired in main.tf; this var only
@@ -75,6 +94,16 @@ coordinator_command = ["/usr/local/bin/prover", "--mode", "coordinator"]
 # minAvailable=1 pins it fully un-evictable so a bin-pack/eviction never
 # takes an in-flight, key-resident coordinator.
 coordinator_pdb_min_available = 1
+
+# ── Inner chunk-dispatch + results planes (#172, the real coordination) ──
+# Beyond the outer block-dispatch backlog signal, the distributed run needs
+# the chunk plane (coordinator -> cells) and the results plane (cells ->
+# coordinator). enable_chunk_plane creates both topic/subscription pairs.
+enable_chunk_plane   = true
+chunk_topic          = "lighter-prover-scale-0p2pct-chunk"
+chunk_subscription   = "lighter-prover-scale-0p2pct-chunk-sub"
+results_topic        = "lighter-prover-scale-0p2pct-results"
+results_subscription = "lighter-prover-scale-0p2pct-results-sub"
 
 # ── Autoscaling on Pub/Sub backlog ──
 pubsub_topic        = "lighter-prover-scale-0p2pct-dispatch"

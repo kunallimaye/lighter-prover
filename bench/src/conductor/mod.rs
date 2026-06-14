@@ -39,10 +39,20 @@
 //!   a k=1 LOCAL mounted-corpus resolver, and the real `witness_fetch_ms`
 //!   measurement seam (ADR-0008 §1.1/§1.4/§2.1).
 //!
-//! ## What this local slice is NOT (out of scope, this milestone)
+//! ## Cloud transport (issue #172 — the real Pub/Sub drop-in)
 //!
-//! - **No cloud.** No GKE, no Pub/Sub, no MIG, nothing provisioned. The
-//!   real Pub/Sub adapter is a future drop-in behind [`queue::BlockQueue`].
+//! - **REAL Pub/Sub** ([`pubsub`]): the cloud drop-in the bullet below once
+//!   named as "future" now EXISTS — [`pubsub::GcloudPubSub`] implements the
+//!   same [`queue::BlockQueue`] trait over real Pub/Sub (via the `gcloud` CLI
+//!   already in the runtime image), and adds the chunk-dispatch + results
+//!   planes the live coordinator/cell pods use. The in-memory
+//!   [`queue::LocalBlockQueue`] stays for host tests. See
+//!   `docs/distributed-prover-runtime.md` and `bench --mode coordinator|cell`.
+//!
+//! ## What this conductor slice is NOT (still out of scope)
+//!
+//! - **No MIG, no provisioning here.** The GKE topology + Pub/Sub resources
+//!   live in `cicd/terraform/gke/`. This crate only speaks the protocol.
 //! - **No per-coordinator vertical concurrency** (#113 SECONDARY lever —
 //!   deferred). The pool is HORIZONTAL only.
 //! - **No matching engine** (#125, closed).
@@ -52,9 +62,13 @@
 //!   on a fleet over varied (G2) witnesses. No fetch-cost number is invented.
 
 pub mod dispatch;
+pub mod pubsub;
 pub mod queue;
 pub mod witness;
 
 pub use dispatch::{Coordinator, CoordinatorPool, InnerDispatchOutcome};
+pub use pubsub::{
+    BlockMessage, ChunkMessage, ChunkResultMessage, GcloudPubSub, PubSubConfig, PulledMessage,
+};
 pub use queue::{BlockJob, BlockQueue, LocalBlockQueue};
 pub use witness::{MountedCorpus, ResolvedWitness, WitnessKey, WitnessResolver, WitnessSlice};

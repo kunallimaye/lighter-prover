@@ -9,17 +9,30 @@
 #                 contract; the legacy "TOTAL/AVERAGE" INFO lines are also
 #                 still emitted for human readers.
 #
-# This image ships ONLY the worker role. Fan-out / aggregation is an
-# orchestration concern that runs on the host (scripts/container.sh
-# fanout -> cicd/orchestrator.py) or the build/orchestration role, never
-# inside the runtime container — per the three-role topology
-# (docs/decisions/ADR-0001-container-topology.md). The in-container
-# "orchestrator" role was removed in #21.
+#   coordinator   GENUINE distributed coordinator (issue #172). Runs
+#                 `/app/bench --mode coordinator`: pulls block jobs from a
+#                 real Pub/Sub dispatch subscription, SPLITs each block into
+#                 chunks, fans chunk references out to cell pods over a
+#                 chunk-dispatch topic, collects results, and emits per-block
+#                 completion + lag BENCH_EVENTs (ADR-0006 §1.1/§1.2).
 #
-# Phase 1 ships embarrassingly-parallel fan-out: every worker runs the
-# full ./bench pipeline against the same fixture. True work-sharding
-# (layer-1 partitioning across workers) is deferred to Phase 2 and
-# requires Rust changes.
+#   cell          GENUINE distributed leaf prover (issue #172). Runs
+#                 `/app/bench --mode cell`: pulls chunk references from the
+#                 chunk subscription, resolves the witness slice from the
+#                 mounted corpus, runs the REAL L1+L2 prove, and reports the
+#                 result back over the results topic (ADR-0006 §2 / ADR-0008).
+#
+# The coordinator / cell roles coordinate over the network as SEPARATE PODS —
+# this is the real distributed prover, not the embarrassingly-parallel worker
+# fan-out. The bench binary is also installed as /usr/local/bin/prover so the
+# GKE tfvars can invoke `["/usr/local/bin/prover","--mode","cell"]` directly;
+# this entrypoint's role dispatch is the alternative env-driven path. See
+# docs/distributed-prover-runtime.md.
+#
+# The worker role remains UNCHANGED (additive). Fan-out / aggregation for the
+# worker role is still a host concern (scripts/container.sh fanout ->
+# cicd/orchestrator.py), per the three-role topology
+# (docs/decisions/ADR-0001-container-topology.md).
 set -euo pipefail
 
 ROLE="${LIGHTER_ROLE:-worker}"
@@ -206,8 +219,23 @@ case "${ROLE}" in
       fi
     fi
     ;;
+  coordinator)
+    # GENUINE distributed coordinator (issue #172). All Pub/Sub config is
+    # passed via env (LIGHTER_PROJECT, LIGHTER_DISPATCH_SUBSCRIPTION,
+    # LIGHTER_CHUNK_TOPIC, LIGHTER_RESULTS_SUBSCRIPTION, ...) which the bench
+    # binary reads directly via clap `env`. Any extra args after `--` are
+    # forwarded. The binary emits BENCH_EVENT JSONL to stdout.
+    emit_header
+    exec /app/bench --mode coordinator "$@"
+    ;;
+  cell)
+    # GENUINE distributed leaf prover (issue #172). Pub/Sub config via env
+    # (LIGHTER_PROJECT, LIGHTER_CHUNK_SUBSCRIPTION, LIGHTER_RESULTS_TOPIC, ...).
+    emit_header
+    exec /app/bench --mode cell "$@"
+    ;;
   *)
-    echo "ERROR: unknown LIGHTER_ROLE='${ROLE}' (expected: worker)" >&2
+    echo "ERROR: unknown LIGHTER_ROLE='${ROLE}' (expected: worker | coordinator | cell)" >&2
     exit 2
     ;;
 esac

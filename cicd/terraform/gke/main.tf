@@ -86,6 +86,56 @@ resource "google_pubsub_subscription" "dispatch" {
   ack_deadline_seconds = 600
 }
 
+# ─── 2b. Pub/Sub: the INNER chunk-dispatch plane (issue #172) ────────
+# ADR-0006 §1.2 inner tier: the coordinator SPLITs each block into chunks
+# and fans the chunk REFERENCES out to the cell pods over this topic. Cells
+# competing-pull the chunk subscription. References only — the witness bytes
+# never travel the bus (ADR-0008 §1.2). Created only when
+# `enable_chunk_plane = true` so the smoke automation (which only validates
+# the topology + backlog HPA) is unchanged by default.
+
+resource "google_pubsub_topic" "chunk" {
+  count   = var.enable_chunk_plane ? 1 : 0
+  name    = var.chunk_topic
+  project = var.project_id
+  labels  = var.resource_labels
+}
+
+resource "google_pubsub_subscription" "chunk" {
+  count   = var.enable_chunk_plane ? 1 : 0
+  name    = var.chunk_subscription
+  topic   = google_pubsub_topic.chunk[0].id
+  project = var.project_id
+  labels  = var.resource_labels
+
+  # A chunk's L1+L2 prove is multi-second; give cells ample ack headroom so
+  # an in-flight chunk is not redelivered mid-prove. A future native
+  # manual-ack cell client would ack after the proof is emitted.
+  ack_deadline_seconds = var.chunk_ack_deadline_seconds
+}
+
+# ─── 2c. Pub/Sub: the chunk-RESULTS plane (issue #172) ───────────────
+# Cells report each proven chunk's result (prove_ms, witness_fetch_ms, ok)
+# back to the coordinator over this topic; the coordinator pulls the results
+# subscription to GATHER/FOLD per block (ADR-0006 §1.2 GATHER).
+
+resource "google_pubsub_topic" "results" {
+  count   = var.enable_chunk_plane ? 1 : 0
+  name    = var.results_topic
+  project = var.project_id
+  labels  = var.resource_labels
+}
+
+resource "google_pubsub_subscription" "results" {
+  count   = var.enable_chunk_plane ? 1 : 0
+  name    = var.results_subscription
+  topic   = google_pubsub_topic.results[0].id
+  project = var.project_id
+  labels  = var.resource_labels
+
+  ack_deadline_seconds = 60
+}
+
 # ─── 3. Workload Identity for the metrics adapter ────────────────────
 # The custom-metrics-stackdriver-adapter reads Cloud Monitoring. On
 # Autopilot it runs under Workload Identity; bind its KSA

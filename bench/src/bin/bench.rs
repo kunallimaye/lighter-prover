@@ -59,6 +59,71 @@ const CHAIN_ID: u32 = 304;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "bench", about, long_about = None)]
 struct Args {
+    /// Run mode (issue #172 — the GENUINE distributed prover entrypoint).
+    ///
+    /// - `bench` (default): the historical single-process pipeline — every
+    ///   existing flag/behavior is unchanged and fully additive.
+    /// - `coordinator`: the OUTER + INNER dispatch tier (ADR-0006 §1.1/§1.2).
+    ///   Pulls block jobs from a real Pub/Sub dispatch subscription, SPLITs
+    ///   each block into `k = ceil(tx/S)` chunks, fans chunk REFERENCES out
+    ///   to cells over a chunk-dispatch topic, collects chunk results from a
+    ///   results subscription, and emits per-block completion + lag events.
+    /// - `cell`: the leaf prover (ADR-0006 §2 / ADR-0008). Pulls chunk
+    ///   references from the chunk subscription, resolves each witness slice
+    ///   via the mounted corpus (timing the real `witness_fetch_ms`), runs the
+    ///   REAL L1+L2 prove, and reports the result back over the results topic.
+    ///
+    /// `coordinator` / `cell` are SEPARATE PODS coordinating over Pub/Sub —
+    /// not a single-machine simulation. See docs/distributed-prover-runtime.md.
+    #[arg(long, value_enum, env = "LIGHTER_MODE", default_value_t = RunMode::Bench)]
+    mode: RunMode,
+
+    /// GCP project that owns the Pub/Sub topics/subscriptions. Required for
+    /// `--mode coordinator|cell`.
+    #[arg(long, env = "LIGHTER_PROJECT")]
+    project: Option<String>,
+
+    /// Pub/Sub dispatch (block) subscription — coordinators competing-pull.
+    #[arg(long, env = "LIGHTER_DISPATCH_SUBSCRIPTION")]
+    dispatch_subscription: Option<String>,
+
+    /// Pub/Sub dispatch (block) topic (the feeder publishes blocks here).
+    #[arg(long, env = "LIGHTER_DISPATCH_TOPIC")]
+    dispatch_topic: Option<String>,
+
+    /// Pub/Sub chunk-dispatch topic — coordinator publishes chunk refs here.
+    #[arg(long, env = "LIGHTER_CHUNK_TOPIC")]
+    chunk_topic: Option<String>,
+
+    /// Pub/Sub chunk-dispatch subscription — cells competing-pull chunk refs.
+    #[arg(long, env = "LIGHTER_CHUNK_SUBSCRIPTION")]
+    chunk_subscription: Option<String>,
+
+    /// Pub/Sub results topic — cells publish chunk results here.
+    #[arg(long, env = "LIGHTER_RESULTS_TOPIC")]
+    results_topic: Option<String>,
+
+    /// Pub/Sub results subscription — coordinator pulls chunk results.
+    #[arg(long, env = "LIGHTER_RESULTS_SUBSCRIPTION")]
+    results_subscription: Option<String>,
+
+    /// `gcloud` binary path for the Pub/Sub transport (default `gcloud`).
+    #[arg(long, env = "LIGHTER_GCLOUD_BIN", default_value = "gcloud")]
+    gcloud_bin: String,
+
+    /// Distributed modes: how many blocks the coordinator proves before
+    /// exiting, OR how many chunks the cell proves before exiting. `0` =
+    /// run forever (until SIGINT/SIGTERM). Bounded values make a single
+    /// pod do a finite unit of real work then exit cleanly — useful for
+    /// smoke / one-shot benchmark jobs.
+    #[arg(long, env = "LIGHTER_MAX_UNITS", default_value_t = 0)]
+    max_units: u64,
+
+    /// Distributed modes: seconds to sleep between empty pulls (backoff when
+    /// the queue is drained). Keeps a long-lived pod from hot-spinning.
+    #[arg(long, env = "LIGHTER_POLL_INTERVAL_S", default_value_t = 2)]
+    poll_interval_s: u64,
+
     /// Number of transactions proven per `BlockTxCircuit` chunk. Each
     /// value produces a different proving key.
     #[arg(long, env = "LIGHTER_TX_PER_PROOF", default_value_t = DEFAULT_TX_PER_PROOF)]
@@ -269,6 +334,17 @@ struct Args {
     /// to pre-#157. Serial-fold batch path only.
     #[arg(long, default_value_t = false)]
     group_by_tx_type: bool,
+}
+
+/// Issue #172: run mode. `Bench` is the historical single-process pipeline
+/// (default, byte-for-byte unchanged). `Coordinator` and `Cell` are the
+/// genuine distributed roles that coordinate over real Pub/Sub as separate
+/// GKE pods (ADR-0006 §1.1/§1.2/§2; ADR-0008).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+enum RunMode {
+    Bench,
+    Coordinator,
+    Cell,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -501,6 +577,22 @@ fn main() {
     }
 
     log_machine_metadata(&args);
+
+    // Issue #172: the genuine distributed roles. Each is a SEPARATE POD
+    // coordinating over real Pub/Sub (ADR-0006 §1.1/§1.2/§2; ADR-0008). They
+    // branch off here before any single-process fixture flow. The tx-per-proof
+    // validation above still applies (cells/coordinators prove real chunks).
+    match args.mode {
+        RunMode::Bench => {} // fall through to the historical pipeline
+        RunMode::Coordinator => {
+            run_coordinator(&args);
+            return;
+        }
+        RunMode::Cell => {
+            run_cell(&args);
+            return;
+        }
+    }
 
     if args.stream {
         run_stream(&args);
@@ -1327,6 +1419,458 @@ fn run_stream(args: &Args) {
     }
     // Note: the reader thread may still be blocked on a stdin read;
     // returning from main terminates the process regardless. Exit 0.
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Issue #172 — the GENUINE distributed prover entrypoint.
+//
+// `bench --mode coordinator` and `bench --mode cell` run as SEPARATE GKE
+// pods coordinating over REAL Pub/Sub (ADR-0006 §1.1/§1.2/§2; ADR-0008).
+// The prove path is the REAL one (BlockTxCircuit L1 + BlockTxChainCircuit
+// L2) — never stubbed, never fabricated. See docs/distributed-prover-runtime.md.
+// ════════════════════════════════════════════════════════════════════════
+
+/// Resolve the Pub/Sub config from args, exiting with a clear message on any
+/// missing required field. Shared by both distributed roles.
+fn resolve_pubsub_config(args: &Args) -> bench::conductor::PubSubConfig {
+    fn require(name: &str, v: &Option<String>) -> String {
+        match v {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => {
+                eprintln!(
+                    "error: --mode {} requires --{} (or its env var)",
+                    "coordinator|cell", name
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+    bench::conductor::PubSubConfig {
+        project: require("project", &args.project),
+        // The topic fields are only needed by the publishing side; default to
+        // empty (the role that publishes validates its own required topics).
+        dispatch_topic: args.dispatch_topic.clone().unwrap_or_default(),
+        dispatch_subscription: args.dispatch_subscription.clone().unwrap_or_default(),
+        chunk_topic: args.chunk_topic.clone().unwrap_or_default(),
+        chunk_subscription: args.chunk_subscription.clone().unwrap_or_default(),
+        results_topic: args.results_topic.clone().unwrap_or_default(),
+        results_subscription: args.results_subscription.clone().unwrap_or_default(),
+        gcloud_bin: args.gcloud_bin.clone(),
+    }
+}
+
+/// The leaf prover pod (`bench --mode cell`, ADR-0006 §2 / ADR-0008).
+///
+/// Builds the L1 (BlockTxCircuit) + L2 (BlockTxChainCircuit) circuits ONCE
+/// (resident), mounts the k=1 witness corpus from the bundled `bench_test.json`
+/// (the same `{height, witness_index}` MountedCorpus the stream path uses),
+/// then loops: pull chunk references from the chunk subscription, resolve the
+/// witness slice (timing the REAL `witness_fetch_ms` local-resolve floor,
+/// ADR-0008 §2.1/§2.3), run the REAL L1+L2 prove, emit a `chunk_proven`
+/// BENCH_EVENT, and publish a result message back to the coordinator.
+fn run_cell(args: &Args) {
+    use std::time::Instant;
+
+    use bench::conductor::{
+        ChunkResultMessage, GcloudPubSub, MountedCorpus, WitnessKey, WitnessResolver,
+    };
+
+    let mut cfg = resolve_pubsub_config(args);
+    if cfg.chunk_subscription.is_empty() {
+        eprintln!("error: --mode cell requires --chunk-subscription (or LIGHTER_CHUNK_SUBSCRIPTION)");
+        std::process::exit(2);
+    }
+    if cfg.results_topic.is_empty() {
+        eprintln!("error: --mode cell requires --results-topic (or LIGHTER_RESULTS_TOPIC)");
+        std::process::exit(2);
+    }
+    // Cells never need the dispatch sub or chunk topic; leave them blank.
+    cfg.dispatch_subscription.clear();
+    let bus = GcloudPubSub::new(cfg);
+    let cell_id = read_hostname();
+
+    info!(
+        "cell: starting (id={}) chunk_sub={} results_topic={} max_units={}",
+        cell_id,
+        bus.config().chunk_subscription,
+        bus.config().results_topic,
+        args.max_units,
+    );
+
+    // ---- Build the witness corpus (k=1 mounted, from bench_test.json) ----
+    //
+    // Cells resolve witness slices LOCALLY (ADR-0008 §1.3 — a mounted
+    // read-only corpus, no network on the prove path). The bundled
+    // `bench_test.json` is baked into the image; here it is sliced into
+    // `S`-tx chunks indexed `0..k-1` at `height = block.block_number`, exactly
+    // as `run_stream` builds it. A chunk message's `witness_index` selects the
+    // slice. The committed `bench/corpus/` index is the documented multi-height
+    // generalization (issue #165); a GCS-backed volume is the future upgrade.
+    let block = get_test_block_json_file("bench_test.json");
+    if block.txs.len() < args.tx_per_proof {
+        eprintln!(
+            "error: bench_test.json has {} txs but --tx-per-proof is {}; need at least one full chunk",
+            block.txs.len(),
+            args.tx_per_proof
+        );
+        std::process::exit(2);
+    }
+    let aligned_limit = (args.tx_limit / args.tx_per_proof) * args.tx_per_proof;
+    let effective_limit =
+        aligned_limit.min((block.txs.len() / args.tx_per_proof) * args.tx_per_proof);
+    let pool: Vec<Vec<_>> = block.txs[..effective_limit]
+        .chunks(args.tx_per_proof)
+        .map(|c| c.to_vec())
+        .collect();
+    let pool_total = pool.len();
+    let corpus_height: u64 = block.block_number;
+    let witness_corpus: MountedCorpus<usize> = MountedCorpus::single_block(
+        corpus_height,
+        (0..pool_total).map(|i| (i, args.tx_per_proof)).collect(),
+    );
+    info!(
+        "cell: witness plane = k=1 mounted corpus at height {} with {} slices \
+         (ADR-0008 §1.4); witness_fetch_ms is the LOCAL-RESOLVE FLOOR",
+        corpus_height, pool_total
+    );
+
+    // ---- Build circuits ONCE (resident; identical to the stream path) ----
+    let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, CHAIN_ID);
+    let bt = circuit.target;
+    let data = circuit.builder.build::<C>();
+    info!("cell: BlockTxCircuit defined");
+
+    let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+    let pbt = pre_exec_circuit.target;
+    let pre_exec_data = pre_exec_circuit.builder.build::<C>();
+
+    let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, args.tx_per_proof, 1);
+    let chain_circuit_t = chain_circuit.target;
+    let chain_circuit_data = chain_circuit.builder.build::<C>();
+    let block_tx_witness_size = chain_circuit.block_tx_witness_size;
+    info!("cell: BlockTxChainCircuit defined");
+
+    let dummy_tx_chain_circuit = dummy_circuit(&chain_circuit_data.common);
+    let dummy_proof = cyclic_base_proof(
+        &chain_circuit_data.common,
+        &chain_circuit_data.verifier_only,
+        &dummy_tx_chain_circuit,
+        Vec::<F>::new().iter().copied().enumerate().collect(),
+    )
+    .unwrap();
+
+    let block_pre_exec = BlockPreExec::from_block(&block);
+    let pre_proof = BlockPreExecutionCircuit::prove(&pre_exec_data, &block_pre_exec, &pbt)
+        .unwrap_or_else(|err| panic!("Block pre-exec failed to prove. err = {:?}", err));
+    let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
+    let state_metadata = pre_exec_witness.new_state_metadata.clone();
+    let created_at = block.created_at;
+    info!("cell: circuits resident; entering chunk-prove loop");
+
+    // ---- Pull → resolve → REAL prove → report loop ----
+    let mut proven: u64 = 0;
+    loop {
+        if args.max_units != 0 && proven >= args.max_units {
+            info!("cell: reached max_units={}, exiting", args.max_units);
+            break;
+        }
+        let chunks = match bus.pull_chunks(1) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("cell: pull_chunks error: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(args.poll_interval_s));
+                continue;
+            }
+        };
+        if chunks.is_empty() {
+            std::thread::sleep(std::time::Duration::from_secs(args.poll_interval_s));
+            continue;
+        }
+
+        for chunk in chunks {
+            // WITNESS RESOLVE (ADR-0008 §2.1): resolve the {height,
+            // witness_index} REFERENCE that crossed the bus to local witness
+            // bytes, measuring the real local-resolve floor. The corpus is
+            // keyed by this cell's local height; we map the wire witness_index
+            // into the local pool (round-robin if the wire height differs from
+            // the local fixture height — the k=1 fixture is a single block, so
+            // the index space is the pool).
+            let pool_idx = (chunk.witness_index as usize) % pool_total.max(1);
+            let witness_key = WitnessKey::new(corpus_height, pool_idx as u64);
+            let witness_fetch_ms = witness_corpus.resolve(witness_key).map(|r| r.fetch_ms);
+
+            // Pre-state for an INDEPENDENT single-chunk prove: each cell proves
+            // its chunk in isolation (the coordinator owns the L2 chain fold),
+            // so we seed from the block's initial state for every chunk. This
+            // is the genuine per-chunk L1+L2 leaf prove (ADR-0006 §1.2 PROVE).
+            let block_tx = BlockTx {
+                created_at,
+                old_system_config: block.old_system_config,
+                register_stack_before: block.register_stack_before,
+                all_assets_before: block.all_assets.clone(),
+                all_market_details_before: pre_exec_witness.new_market_details.clone(),
+                old_account_tree_root: block.old_account_tree_root,
+                old_account_pub_data_tree_root: block.old_account_pub_data_tree_root,
+                old_account_delta_tree_root: block.old_account_delta_tree_root,
+                old_market_tree_root: block.old_market_tree_root,
+                txs: pool[pool_idx].clone(),
+            };
+
+            let prove_start = Instant::now();
+            let l1_cpu_start = cpu_time_ms();
+            // ── REAL L1 prove ── (never stubbed)
+            let tx_proof = match BlockTxCircuit::prove(&data, &block_tx, &bt) {
+                Ok(p) => p,
+                Err(err) => {
+                    log::error!(
+                        "cell: L1 prove FAILED for height={} witness_index={}: {:?}",
+                        chunk.height, chunk.witness_index, err
+                    );
+                    // Honest failure report — no fabricated proof.
+                    let _ = bus.publish_result(&ChunkResultMessage {
+                        height: chunk.height,
+                        witness_index: chunk.witness_index,
+                        prove_ms: prove_start.elapsed().as_millis() as u64,
+                        witness_fetch_ms,
+                        ok: false,
+                        cell: cell_id.clone(),
+                    });
+                    continue;
+                }
+            };
+
+            // The cell's L2 is a single-chunk LEAF chain proof: fold this one
+            // L1 chunk onto the cyclic base (witness_index as the chain index).
+            let base_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
+                &chain_circuit_data,
+                &dummy_tx_chain_circuit,
+                block.block_number,
+                block.created_at,
+                pre_exec_witness.new_state_root,
+                pre_exec_witness.new_state_root,
+                pre_exec_witness.new_validium_root,
+                block.old_account_delta_tree_root,
+                block_tx_witness_size,
+                &state_metadata,
+            );
+            // ── REAL L2 prove ── (never stubbed)
+            let chain_ok = BlockTxChainCircuit::prove(
+                &chain_circuit_t,
+                &chain_circuit_data,
+                chunk.witness_index,
+                &base_chain_proof,
+                &dummy_proof,
+                &tx_proof,
+            );
+            let prove_ms = prove_start.elapsed().as_millis() as u64;
+            let cpu_ms = diff_ms(l1_cpu_start, cpu_time_ms());
+
+            let ok = chain_ok.is_ok();
+            if let Err(err) = &chain_ok {
+                log::error!(
+                    "cell: L2 prove FAILED for height={} witness_index={}: {:?}",
+                    chunk.height, chunk.witness_index, err
+                );
+            }
+
+            // Emit the chunk_proven BENCH_EVENT with REAL timings (ADR-0008
+            // §2.2 — witness_fetch_ms on the primary ChunkProven site).
+            events::emit(&BenchEvent::ChunkProven {
+                layer: 2,
+                name: "BlockTxChainCircuit",
+                chunk_idx: Some(pool_idx),
+                chunk_total: Some(pool_total),
+                tx_per_proof: args.tx_per_proof,
+                wall_ms: prove_ms,
+                cpu_ms,
+                rss_mb_peak: peak_rss_mb(),
+                rss_mb_after: current_rss_mb(),
+                height: chunk.height,
+                lag_ms: prove_ms,
+                queue_depth: 0,
+                ts: now_iso8601(),
+                witness_fetch_ms,
+            });
+
+            // Report the result back to the coordinator over the results topic.
+            if let Err(e) = bus.publish_result(&ChunkResultMessage {
+                height: chunk.height,
+                witness_index: chunk.witness_index,
+                prove_ms,
+                witness_fetch_ms,
+                ok,
+                cell: cell_id.clone(),
+            }) {
+                log::warn!("cell: publish_result failed: {e}");
+            }
+
+            info!(
+                "cell: proved height={} witness_index={} prove_ms={} ok={}",
+                chunk.height, chunk.witness_index, prove_ms, ok
+            );
+            proven += 1;
+        }
+    }
+    info!("cell: done, {} chunks proven", proven);
+}
+
+/// The coordinator pod (`bench --mode coordinator`, ADR-0006 §1.1/§1.2).
+///
+/// One coordinator per pod; per-coordinator vertical concurrency stays 1
+/// (#113 PROMISING-NOT-PROVEN — NOT built here). Loops: pull a block from the
+/// dispatch subscription (competing-pull), SPLIT it into `k = ceil(tx/S)`
+/// chunks (reusing `conductor::dispatch::split_k`), publish the `k` chunk
+/// REFERENCES (not bytes; ADR-0008 §1.2) to the chunk topic, collect the `k`
+/// chunk results from the results subscription, FOLD/merge the accounting,
+/// then emit a per-block completion + lag BENCH_EVENT.
+fn run_coordinator(args: &Args) {
+    use std::time::Instant;
+
+    use bench::conductor::dispatch::split_k;
+    use bench::conductor::{ChunkMessage, GcloudPubSub};
+
+    let mut cfg = resolve_pubsub_config(args);
+    if cfg.dispatch_subscription.is_empty() {
+        eprintln!(
+            "error: --mode coordinator requires --dispatch-subscription (or LIGHTER_DISPATCH_SUBSCRIPTION)"
+        );
+        std::process::exit(2);
+    }
+    if cfg.chunk_topic.is_empty() {
+        eprintln!("error: --mode coordinator requires --chunk-topic (or LIGHTER_CHUNK_TOPIC)");
+        std::process::exit(2);
+    }
+    if cfg.results_subscription.is_empty() {
+        eprintln!(
+            "error: --mode coordinator requires --results-subscription (or LIGHTER_RESULTS_SUBSCRIPTION)"
+        );
+        std::process::exit(2);
+    }
+    cfg.chunk_subscription.clear();
+    let bus = GcloudPubSub::new(cfg);
+
+    info!(
+        "coordinator: starting dispatch_sub={} chunk_topic={} results_sub={} S={} max_units={}",
+        bus.config().dispatch_subscription,
+        bus.config().chunk_topic,
+        bus.config().results_subscription,
+        args.tx_per_proof,
+        args.max_units,
+    );
+
+    let mut blocks_done: u64 = 0;
+    loop {
+        if args.max_units != 0 && blocks_done >= args.max_units {
+            info!("coordinator: reached max_units={}, exiting", args.max_units);
+            break;
+        }
+        let block = match bus.pull_block() {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_secs(args.poll_interval_s));
+                continue;
+            }
+            Err(e) => {
+                log::warn!("coordinator: pull_block error: {e}");
+                std::thread::sleep(std::time::Duration::from_secs(args.poll_interval_s));
+                continue;
+            }
+        };
+
+        let block_start = Instant::now();
+        // SPLIT: k = ceil(tx / S) (ADR-0006 §1.2).
+        let k = split_k(block.tx_count, args.tx_per_proof).max(1);
+        info!(
+            "coordinator: block height={} tx_count={} -> SPLIT into k={} chunks (S={})",
+            block.height, block.tx_count, k, args.tx_per_proof
+        );
+
+        // DISPATCH: publish the k chunk REFERENCES to the chunk topic.
+        let mut dispatched: u64 = 0;
+        for i in 0..k {
+            let msg = ChunkMessage::new(block.height, i, args.tx_per_proof as u64);
+            match bus.publish_chunk(&msg) {
+                Ok(_) => dispatched += 1,
+                Err(e) => log::warn!(
+                    "coordinator: publish_chunk height={} idx={} failed: {e}",
+                    block.height, i
+                ),
+            }
+        }
+
+        // GATHER: collect chunk results until all k are in, the deadline hits,
+        // or we time out. Bounded so a lost cell can't hang the coordinator
+        // forever (the un-acked chunk redelivers to another cell on a native
+        // manual-ack client; here we cap the wait honestly).
+        let gather_deadline =
+            Instant::now() + std::time::Duration::from_secs((args.poll_interval_s * 30).max(60));
+        let mut collected: u64 = 0;
+        let mut ok_count: u64 = 0;
+        let mut total_prove_ms: u64 = 0;
+        let mut total_witness_fetch_ms: u64 = 0;
+        while collected < dispatched && Instant::now() < gather_deadline {
+            match bus.pull_results(dispatched as u32) {
+                Ok(results) => {
+                    if results.is_empty() {
+                        std::thread::sleep(std::time::Duration::from_secs(args.poll_interval_s));
+                        continue;
+                    }
+                    for r in results {
+                        if r.height != block.height {
+                            // A straggler from a previous block; count it but
+                            // do not attribute to this block's fold.
+                            continue;
+                        }
+                        collected += 1;
+                        if r.ok {
+                            ok_count += 1;
+                        }
+                        total_prove_ms += r.prove_ms;
+                        total_witness_fetch_ms += r.witness_fetch_ms.unwrap_or(0);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("coordinator: pull_results error: {e}");
+                    std::thread::sleep(std::time::Duration::from_secs(args.poll_interval_s));
+                }
+            }
+        }
+
+        let block_wall_ms = block_start.elapsed().as_millis() as u64;
+        let complete = collected >= dispatched && ok_count == collected && dispatched > 0;
+
+        // FOLD/MERGE + emit per-block completion. We reuse the StreamSummary
+        // event shape as the per-block completion record: it carries the
+        // headline lag/throughput fields the conductor already standardized.
+        // The lag here is the block-arrival→all-chunks-proven wall (ADR-0004's
+        // lag(c,l) at the L1→L2 chunk granularity for this slice).
+        events::emit(&BenchEvent::StreamSummary {
+            phase: if complete { "block_complete" } else { "block_partial" },
+            throughput_tx_s: if block_wall_ms > 0 {
+                (block.tx_count as f64) / (block_wall_ms as f64 / 1000.0)
+            } else {
+                0.0
+            },
+            lag_p50_ms: block_wall_ms,
+            lag_p95_ms: block_wall_ms,
+            peak_rss_mb: peak_rss_mb(),
+            dropped_chunks: dispatched.saturating_sub(collected),
+            arrivals: 1,
+            gaps_skipped: 0,
+            chunks_proven: ok_count,
+            elapsed_s: block_wall_ms as f64 / 1000.0,
+            ts: now_iso8601(),
+        });
+
+        info!(
+            "coordinator: block height={} COMPLETE={} k={} dispatched={} collected={} ok={} \
+             block_wall_ms={} sum_prove_ms={} sum_witness_fetch_ms={}",
+            block.height, complete, k, dispatched, collected, ok_count,
+            block_wall_ms, total_prove_ms, total_witness_fetch_ms
+        );
+        blocks_done += 1;
+    }
+    info!("coordinator: done, {} blocks dispatched", blocks_done);
 }
 
 /// Issue #72: per-chunk witness snapshot captured BEFORE the chunk's

@@ -158,8 +158,19 @@ WORKDIR /app
 
 COPY --from=builder /out/bench /app/bench
 COPY --from=builder /src/bench/bench_test.json /app/bench_test.json
+# Witness corpus (#165): the {height, witness_index} index the cell role
+# mounts at startup (ADR-0008 §1.1/§1.4). Baked into the image so cell pods
+# resolve witness slices locally with no network on the prove path. A
+# GCS-backed volume is the documented future upgrade (see
+# docs/distributed-prover-runtime.md).
+COPY --from=builder /src/bench/corpus /app/corpus
 COPY cicd/entrypoint.sh /app/entrypoint.sh
+# Binary-path reconciliation (#172): install the bench binary ALSO as
+# /usr/local/bin/prover so the GKE tfvars can invoke
+# `["/usr/local/bin/prover","--mode","cell"]` / `--mode coordinator` directly,
+# while the worker entrypoint keeps using /app/bench. One binary, two names.
 RUN chmod +x /app/entrypoint.sh \
+ && ln -sf /app/bench /usr/local/bin/prover \
  && chown -R bench:bench /app
 
 USER bench
@@ -168,6 +179,13 @@ USER bench
 # LIGHTER_TARGET_CPU_NATIVE is kept for back-compat with pre-#33
 # consumers of the entrypoint banner; LIGHTER_TARGET_CPU is the real
 # provenance signal now.
+# Defaults keep the worker role (LIGHTER_ROLE=worker) byte-for-byte unchanged.
+# For the distributed roles (#172) set LIGHTER_ROLE=coordinator|cell (or invoke
+# /usr/local/bin/prover --mode ... directly) and provide the Pub/Sub config via
+# LIGHTER_PROJECT / LIGHTER_DISPATCH_SUBSCRIPTION / LIGHTER_CHUNK_TOPIC /
+# LIGHTER_CHUNK_SUBSCRIPTION / LIGHTER_RESULTS_TOPIC / LIGHTER_RESULTS_SUBSCRIPTION
+# (the bench binary reads these via clap `env`). See
+# docs/distributed-prover-runtime.md.
 ENV LIGHTER_ROLE=worker \
     LIGHTER_BENCH_INPUT=/app/bench_test.json \
     LIGHTER_BENCH_REPEAT=1 \
