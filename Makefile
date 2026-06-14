@@ -30,6 +30,7 @@
   cloud-app-promote cloud-app-undeploy cloud-clean \
   cloud-txmix-build cloud-txmix-deploy cloud-txmix-smoke \
   cloud-txmix-capture cloud-txmix-results cloud-txmix-post \
+  gke-smoke-up gke-smoke-validate gke-smoke-down \
   cloud-status cloud-recover \
   logs-list logs-last logs-clean \
   fleet-quota-check fleet-run fleet-run-dry fleet-status \
@@ -160,6 +161,29 @@ cloud-txmix-results: ## Print the latest tx-mix GCS artifact (meta + mix + DONE)
 
 cloud-txmix-post: ## Post the cited tx-mix summary (from GCS) to issue #128
 	@bash scripts/cloud-txmix.sh post
+
+# ─── GKE Autopilot deployment automation (issue #151, G4 enabler) ────
+# Parametrised GKE-Autopilot deployment of the ADR-0006 two-machine-class
+# topology (chunk-prover cells + coordinators) with the ADR-0003-amendment
+# HARD DAY-1 eviction mitigation (coordinator safe-to-evict=false + PDB)
+# and autoscaling on Pub/Sub backlog. Runs via Cloud Build as a GKE-capable
+# service account (set GKE_BUILD_SA). The smoke config (smoke.tfvars) is a
+# tiny, trivial-workload validation of the AUTOMATION — NOT real proving
+# load (gated on G2) and NOT production sizes (gated on sizing #95). Feed
+# production sizes via production.tfvars (same variable surface) later.
+#
+# Knobs: GKE_PROJECT=, GKE_REGION= (default us-central1, must support
+# c4a/Axion), GKE_CLUSTER=, GKE_BUILD_SA= (GKE-capable SA), GKE_TF_BUCKET=,
+# GKE_BACKLOG_MSGS= (HPA test backlog size).
+
+gke-smoke-up: ## Stand up + validate the GKE Autopilot smoke topology (cluster, both classes, eviction mitigation, HPA-on-backlog)
+	@bash scripts/gke-smoke.sh up
+
+gke-smoke-validate: ## Alias of gke-smoke-up (the up pipeline includes the live validation)
+	@bash scripts/gke-smoke.sh validate
+
+gke-smoke-down: ## Tear down the GKE smoke topology + verify nothing remains (no cluster/nodes/LBs/disks)
+	@bash scripts/gke-smoke.sh down
 
 # ─── Detached Orchestration ──────────────────────────────────────────
 

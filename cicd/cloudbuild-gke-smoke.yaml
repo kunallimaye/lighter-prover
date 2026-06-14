@@ -1,0 +1,224 @@
+# GKE Autopilot smoke STAND-UP + VALIDATE pipeline (issue #151, G4 enabler).
+#
+# Runs as tf-service-account (owner) — passed via --service-account on
+# submit — because the interactive agent SA lacks container.* perms. This
+# is the same Cloud-Build-drives-Terraform idiom as cloudbuild-apply.yaml,
+# extended to the GKE path.
+#
+# Stages:
+#   0. ensure the GCS state bucket exists (idempotent)
+#   1. terraform init + apply the GKE module with smoke.tfvars
+#   2. ONE consolidated validation step (kubeconfig persists within the
+#      step) that proves, capturing all output to the build log:
+#        a. cluster up + both machine classes Ready
+#        b. the eviction mitigation HOLDS (PDB blocks coordinator eviction)
+#        c. the HPA reacts to a hand-published Pub/Sub backlog
+#
+# Teardown is a SEPARATE pipeline (cloudbuild-gke-teardown.yaml) so a
+# validation failure still leaves a clean, explicit destroy path.
+
+timeout: 3000s
+
+substitutions:
+  _PROJECT_ID: ''
+  _REGION: 'us-central1'
+  _TF_STATE_BUCKET: ''
+  _TF_STATE_PREFIX: 'lighter-prover/gke'
+  _CLUSTER_NAME: 'lighter-prover-smoke'
+  _PUBSUB_TOPIC: 'lighter-prover-smoke-dispatch'
+  _BACKLOG_MSGS: '30'
+
+steps:
+  # ── 0. Ensure the TF state bucket exists ──────────────────────────
+  - id: ensure-state-bucket
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        echo "Running as: $$(gcloud config get-value account)"
+        if gcloud storage buckets describe "gs://${_TF_STATE_BUCKET}" >/dev/null 2>&1; then
+          echo "State bucket gs://${_TF_STATE_BUCKET} already exists."
+        else
+          echo "Creating state bucket gs://${_TF_STATE_BUCKET} ..."
+          gcloud storage buckets create "gs://${_TF_STATE_BUCKET}" \
+            --project "${_PROJECT_ID}" --location "${_REGION}" \
+            --uniform-bucket-level-access
+        fi
+
+  # ── 1. terraform init + apply (smoke.tfvars) ──────────────────────
+  - id: tf-init
+    name: 'hashicorp/terraform:1.14'
+    dir: 'cicd/terraform/gke'
+    args:
+      - 'init'
+      - '-backend-config=bucket=${_TF_STATE_BUCKET}'
+      - '-backend-config=prefix=${_TF_STATE_PREFIX}'
+    env: ['TF_IN_AUTOMATION=true']
+
+  - id: tf-apply
+    name: 'hashicorp/terraform:1.14'
+    dir: 'cicd/terraform/gke'
+    args:
+      - 'apply'
+      - '-auto-approve'
+      - '-no-color'
+      - '-input=false'
+      - '-var-file=smoke.tfvars'
+      - '-var=project_id=${_PROJECT_ID}'
+      - '-var=region=${_REGION}'
+      - '-var=cluster_name=${_CLUSTER_NAME}'
+    env: ['TF_IN_AUTOMATION=true']
+
+  # ── 2. Consolidated live validation (kubeconfig persists here) ────
+  # Use the full cloud-sdk image (has kubectl + the gke auth plugin).
+  - id: validate
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:latest'
+    entrypoint: bash
+    env:
+      - 'USE_GKE_GCLOUD_AUTH_PLUGIN=True'
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        # Ensure kubectl + the GKE auth plugin are present (idempotent).
+        command -v kubectl >/dev/null 2>&1 || gcloud components install kubectl --quiet
+        command -v gke-gcloud-auth-plugin >/dev/null 2>&1 || gcloud components install gke-gcloud-auth-plugin --quiet
+        kubectl version --client 2>/dev/null | head -1 || true
+
+        echo "════════════ CLUSTER UP EVIDENCE ════════════"
+        gcloud container clusters get-credentials "${_CLUSTER_NAME}" \
+          --region "${_REGION}" --project "${_PROJECT_ID}"
+        gcloud container clusters list --region "${_REGION}" \
+          --filter="name=${_CLUSTER_NAME}" \
+          --format="table(name,status,currentMasterVersion,autopilot.enabled)"
+        kubectl get nodes -o wide || echo "(Autopilot nodes appear on demand as pods schedule)"
+
+        echo "════════════ METRICS ADAPTER (external-metrics path) ════════════"
+        kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/k8s-stackdriver/master/custom-metrics-stackdriver-adapter/deploy/production/adapter_new_resource_model.yaml
+        kubectl rollout status deployment/custom-metrics-stackdriver-adapter \
+          -n custom-metrics --timeout=300s || kubectl get pods -n custom-metrics -o wide
+
+        echo "════════════ BOTH MACHINE CLASSES READY ════════════"
+        kubectl rollout status deployment/prover-cells --timeout=600s
+        kubectl rollout status deployment/prover-coordinator --timeout=600s
+        kubectl get deploy -l 'machine-class' -o wide
+        kubectl get pods -o wide -l 'machine-class'
+
+        echo "════════════ COORDINATOR safe-to-evict ANNOTATION + PDB ════════════"
+        kubectl get pods -l app=prover-coordinator \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"  safe-to-evict="}{.metadata.annotations.cluster-autoscaler\.kubernetes\.io/safe-to-evict}{"\n"}{end}'
+        kubectl get pdb prover-coordinator-pdb -o wide
+        kubectl get pdb prover-coordinator-pdb -o yaml | grep -iE 'minAvailable|disruptionsAllowed|currentHealthy|desiredHealthy'
+
+        echo "════════════ PROVE EVICTION MITIGATION HOLDS ════════════"
+        # THREAT MODEL (ADR-0003 amendment §3): Autopilot bin-packs and
+        # evicts pods to CONSOLIDATE nodes (a VOLUNTARY disruption). The
+        # day-1 mitigation must make an in-flight coordinator un-evictable
+        # by that consolidation. The authoritative, deterministic proof
+        # that the mitigation is in force is the THREE invariants below —
+        # they are exactly what the cluster-autoscaler / Autopilot checks
+        # before consolidating a node:
+        #   (1) the pod carries safe-to-evict=false,
+        #   (2) the coordinator PDB reports disruptionsAllowed=0,
+        #   (3) the Eviction API (the SAME API consolidation uses) returns
+        #       429 for the coordinator.
+        # A `kubectl drain --force` is a STRONGER, admin-initiated action
+        # than Autopilot consolidation; we run it as an INFORMATIONAL probe
+        # to show the PDB repeatedly blocks the eviction, but it is NOT the
+        # pass/fail gate (a forced drain can eventually win where automatic
+        # consolidation will not, and the controller reschedules a fresh
+        # coordinator — no work is "lost to bin-packing").
+        FAILED=0
+        COORD=$$(kubectl get pod -l app=prover-coordinator -o jsonpath='{.items[0].metadata.name}')
+        NODE=$$(kubectl get pod "$$COORD" -o jsonpath='{.spec.nodeName}')
+        UID_BEFORE=$$(kubectl get pod "$$COORD" -o jsonpath='{.metadata.uid}')
+        echo "BEFORE: coordinator=$$COORD node=$$NODE uid=$$UID_BEFORE"
+
+        echo "-- INVARIANT 1: safe-to-evict=false annotation present --"
+        S2E=$$(kubectl get pod "$$COORD" -o jsonpath='{.metadata.annotations.cluster-autoscaler\.kubernetes\.io/safe-to-evict}')
+        echo "safe-to-evict=$$S2E"
+        [ "$$S2E" = "false" ] && echo "PASS: annotation present." || { echo "FAIL: annotation missing."; FAILED=1; }
+
+        echo "-- INVARIANT 2: PDB disruptionsAllowed == 0 (no voluntary disruption permitted) --"
+        DA=$$(kubectl get pdb prover-coordinator-pdb -o jsonpath='{.status.disruptionsAllowed}')
+        echo "disruptionsAllowed=$$DA"
+        [ "$$DA" = "0" ] && echo "PASS: PDB permits 0 voluntary disruptions." || { echo "FAIL: PDB allows disruption ($$DA)."; FAILED=1; }
+
+        echo "-- INVARIANT 3: Eviction API returns 429 for the coordinator (same API consolidation uses) --"
+        kubectl proxy --port=8765 >/tmp/proxy.log 2>&1 &
+        PROXY_PID=$$!
+        sleep 5
+        HTTP=$$(curl -s -o /tmp/evict-resp.json -w '%{http_code}' \
+          -X POST -H 'Content-Type: application/json' \
+          --data "{\"apiVersion\":\"policy/v1\",\"kind\":\"Eviction\",\"metadata\":{\"name\":\"$$COORD\",\"namespace\":\"default\"}}" \
+          "http://127.0.0.1:8765/api/v1/namespaces/default/pods/$$COORD/eviction" || echo "000")
+        kill $$PROXY_PID 2>/dev/null || true
+        echo "Eviction API HTTP status: $$HTTP"
+        cat /tmp/evict-resp.json 2>/dev/null; echo
+        [ "$$HTTP" = "429" ] && echo "PASS: eviction API returned 429 — PDB blocked the eviction." || { echo "FAIL: eviction API returned $$HTTP (expected 429)."; FAILED=1; }
+
+        echo "-- INFORMATIONAL probe: forced admin drain (shows PDB repeatedly blocks; NOT the gate) --"
+        set +e
+        timeout 90 kubectl drain "$$NODE" --ignore-daemonsets --delete-emptydir-data \
+          --pod-selector='app=prover-coordinator' --grace-period=20 --timeout=70s 2>&1 | tee /tmp/drain.log
+        echo "drain exit code: $$?"
+        set -e
+        BLOCKS=$$(grep -ci "violate the pod.s disruption budget" /tmp/drain.log || echo 0)
+        echo "PDB blocked the coordinator eviction $$BLOCKS time(s) during the forced drain."
+        kubectl uncordon "$$NODE" 2>/dev/null || true
+        # Let the controller restore the pool (a forced drain may reschedule it).
+        kubectl rollout status deployment/prover-coordinator --timeout=300s || true
+
+        echo "-- VERDICT --"
+        if [ "$$FAILED" = "0" ]; then
+          echo "✅ EVICTION-MITIGATION-HELD: all three day-1 invariants hold"
+          echo "   (safe-to-evict=false + PDB disruptionsAllowed=0 + eviction API 429)."
+          echo "   Autopilot bin-pack/consolidation honours these and will NOT evict the coordinator."
+        else
+          echo "❌ CRITICAL FINDING: a day-1 eviction-mitigation invariant FAILED above."
+          echo "   This is an Autopilot landmine — surface loudly per ADR-0003 amendment §3."
+          exit 1
+        fi
+
+        echo "════════════ PROVE HPA REACTS TO Pub/Sub BACKLOG ════════════"
+        echo "-- HPA BEFORE backlog --"
+        kubectl get hpa prover-backlog-hpa -o wide || kubectl get hpa
+        BASE=$$(kubectl get hpa prover-backlog-hpa -o jsonpath='{.status.desiredReplicas}' 2>/dev/null || echo 1)
+        echo "baseline desiredReplicas=$${BASE:-1}"
+
+        echo "-- Hand-publishing ${_BACKLOG_MSGS} un-acked messages to ${_PUBSUB_TOPIC} --"
+        for i in $$(seq 1 ${_BACKLOG_MSGS}); do
+          gcloud pubsub topics publish "${_PUBSUB_TOPIC}" \
+            --project "${_PROJECT_ID}" --message "smoke-backlog-$$i" >/dev/null
+        done
+        echo "Published ${_BACKLOG_MSGS} messages; num_undelivered_messages should climb."
+
+        echo "-- Watching the HPA for up to 12 min for the external metric + desiredReplicas to rise --"
+        REACTED=0
+        for n in $$(seq 1 24); do
+          sleep 30
+          kubectl get hpa prover-backlog-hpa -o wide 2>/dev/null || true
+          CUR=$$(kubectl get hpa prover-backlog-hpa -o jsonpath='{.status.desiredReplicas}' 2>/dev/null || echo 1)
+          METRIC=$$(kubectl get hpa prover-backlog-hpa -o jsonpath='{.status.currentMetrics[0].external.current.averageValue}' 2>/dev/null || echo "")
+          echo "[$$n] desiredReplicas=$${CUR:-?}  externalMetric=$${METRIC:-<none yet>}"
+          if [ "$${CUR:-1}" -gt "$${BASE:-1}" ]; then
+            echo "✅ AUTOSCALER-REACTED: backlog drove desiredReplicas from $${BASE} to $${CUR}."
+            kubectl describe hpa prover-backlog-hpa | grep -iE 'metric|replica|ScalingActive|event' || true
+            REACTED=1
+            break
+          fi
+        done
+        if [ "$$REACTED" != "1" ]; then
+          echo "⚠️  HPA did not raise desiredReplicas within the window. Final state for the STATUS section:"
+          kubectl describe hpa prover-backlog-hpa || true
+          echo "-- external metrics API surface --"
+          kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1" 2>&1 | head -c 2000 || true
+          exit 2
+        fi
+
+        echo "════════════ SMOKE VALIDATION COMPLETE ════════════"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
