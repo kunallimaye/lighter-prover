@@ -145,6 +145,53 @@ func orderBookInternalHash(askBase, askQuote, bidBase, bidQuote int64) HashOut {
 	return HashOut{fncI64(askBase), fncI64(askQuote), fncI64(bidBase), fncI64(bidQuote)}
 }
 
+// orderBookPathBits builds the depth-80 Merkle helper bits for the order-book
+// tree exactly as order_book_tree_helpers.rs:17-31 order_indexes_to_merkle_path:
+// nonce_index split_le (48 bits) CHAINED with price_index split_le (32 bits),
+// nonce-level first. helpers[i] is the swap bit at level i (== child key bit).
+func orderBookPathBits(priceIndex, nonceIndex int64) []uint64 {
+	bits := make([]uint64, 0, orderBookDepth)
+	for i := 0; i < orderNonceBits; i++ {
+		bits = append(bits, (uint64(nonceIndex)>>uint(i))&1)
+	}
+	for i := 0; i < orderPriceBits; i++ {
+		bits = append(bits, (uint64(priceIndex)>>uint(i))&1)
+	}
+	return bits
+}
+
+// orderBookFold re-derives an order-book tree root from a leaf hash, the proof
+// path, and the swap bits, exactly as order_book_tree_helpers.rs:51-66
+// recalculate_order_book_tree_root:
+//
+//	state = leaf
+//	for i in 0..80:
+//	  sibling = hash_two_to_one_swap(state, proofs[i].sibling_child_hash, helper[i])
+//	    helper==0 -> twoToOne(state, sibling_child_hash)
+//	    helper==1 -> twoToOne(sibling_child_hash, state)
+//	  internal = proofs[i].internal_hash()  // [ab,aq,bb,bq] as raw limbs
+//	  state = hash_two_to_one(sibling, internal)  // swap=false: (sibling, internal)
+//	return state
+//
+// len(path) must equal len(bits) == orderBookDepth.
+func orderBookFold(leaf HashOut, path []OrderBookNode, bits []uint64) HashOut {
+	state := leaf
+	for i := 0; i < len(path); i++ {
+		var sibling HashOut
+		if bits[i] == 0 {
+			sibling = twoToOne(state, hashFromLimbs(path[i].SiblingHash))
+		} else {
+			sibling = twoToOne(hashFromLimbs(path[i].SiblingHash), state)
+		}
+		internal := orderBookInternalHash(
+			path[i].AskBaseSum, path[i].AskQuoteSum,
+			path[i].BidBaseSum, path[i].BidQuoteSum,
+		)
+		state = twoToOne(sibling, internal)
+	}
+	return state
+}
+
 // accountOrderLeafHash implements account_order.rs:134-157 (16 elements).
 // is_empty() (account_order.rs:115-132) is true when oi,coi,iba,p,n,rba,a,t,
 // tif,ro,tp,e,ts,ttoi0,ttoi1,tcoi0 are all zero. The cited field encodings:

@@ -1,21 +1,27 @@
-# Go Witness Reconstructor — Phase 0 (replay/validation harness)
+# Go Witness Reconstructor — Phase 0 (replay harness) + Phase 1 (Cancel)
 
-Issue: [#122](../../README.md) (Phase 0 of epic #121). Design:
+Issues: [#122](../../README.md) (Phase 0) and #123 (Phase 1: Cancel) of epic
+#121. Design:
 [`docs/design/go-witness-reconstructor.md`](../../docs/design/go-witness-reconstructor.md).
 Feasibility: #120.
 
 ## What this is
 
-A **read-only** Go harness that REPLAYS the bundled 500-tx block fixture
+A Go harness that REPLAYS the bundled 500-tx block fixture
 `bench/bench_test.json` and VALIDATES reconstructed Merkle sub-tree / tree roots
-**bit-for-bit** against the JSON's stored ground-truth roots. It re-derives each
-root from the supplied before-leaves + Merkle proofs and confirms they reproduce
-the recorded roots. It does **not** generate novel blocks and does **not** mutate
-state — that is Phase 1+.
+**bit-for-bit** against the JSON's stored ground-truth roots.
 
-This proves the hashing + Merkle-fold machinery is faithful before any later
-phase builds on it. It is a separate Go program with its own module
-(`go.mod`) so it does **not** perturb the repo-root `go.mod` or `make local-test`.
+- **Phase 0 (read-only)**: re-derive each root from the supplied before-leaves +
+  Merkle proofs; confirm they reproduce the recorded roots. No state mutation.
+- **Phase 1 (Cancel, tx_type 15)**: apply the Cancel state transition (empty the
+  order leaf + `get_order_book_path_delta` aggregation recompute; empty the
+  account_order leaf; market `total_order_count`-1) and validate the
+  reconstructed AFTER roots bit-for-bit against ground truth.
+
+This proves the hashing + Merkle-fold machinery and the Cancel state transition
+are faithful before later phases build on them. It is a separate Go program with
+its own module (`go.mod`) so it does **not** perturb the repo-root `go.mod` or
+`make local-test`, and it does **not** touch `bench/src/` Rust circuit code.
 
 ## Crypto foundation
 
@@ -51,12 +57,61 @@ Verified Merkle rules (circuit `merkle_helpers.rs:84/134`, `hash_utils.rs:88`):
 ```sh
 cd tools/witness-reconstructor
 go build ./...
-go run . -json ../../bench/bench_test.json -v     # -v prints first-match evidence
-go test ./...                                      # locks in bit-for-bit invariants
+go run . -json ../../bench/bench_test.json          # Phase 0 + Phase 1 summary
+go run . -json ../../bench/bench_test.json -evidence # one worked Cancel example
+go test ./...                                        # locks in bit-for-bit invariants
 ```
 
 Flags: `-json <path>` (default `bench/bench_test.json`), `-limit N` (first N txs),
-`-v` (print evidence limbs for tx[0]).
+`-v` (print Phase-0 evidence limbs for tx[0]), `-evidence` (print one worked
+Cancel expected-vs-got example and exit).
+
+## Phase 1 — Cancel (tx_type 15) reconstruction (#123)
+
+Cancel is the simplest tx (no matching engine, `l2_cancel_order.rs:173-233`). Its
+`apply()` empties the order-book order leaf and the account_order leaf, recomputes
+the order-book aggregation path (`get_order_book_path_delta`,
+`matching_engine.rs:42-130`), decrements the owner/market order counts, and (for
+spot+limit) the locked balance; the api_key nonce auto-increments on every L2 tx.
+
+**Ground-truth strategy (no fabrication).** `bench_test.json` stores only sparse
+per-tx **before**-leaves + proofs — there are no per-tx after-roots. State chains
+tx-to-tx (`block_tx_constraints.rs:426-462`), so a cancel's reconstructed AFTER
+`order_book_root` is validated against the **next tx that touches the same
+market** (its `mmb.r` before-root). The `order_book_root` is a block-level-chained
+root carried inside the market leaf, so reproducing it is a genuine end-to-end
+Cancel validation, not a self-referential check.
+
+| Quantity | Coverage |
+|---|---|
+| `order_book_root` BEFORE (fold sanity vs `mmb.r`) | **96/96 bit-for-bit** |
+| account_orders BEFORE (vs stored `aor`) | **96/96 bit-for-bit** |
+| `order_book_root` AFTER (vs next-same-market `mmb.r`) | **81/81 bit-for-bit** ← the goal |
+| market leaf AFTER (`r`:=after, `toc`-1, vs next) | **81/81 bit-for-bit** |
+
+- **118** total cancels; **96** are *real* (the loaded order has a non-zero
+  aggregation sum and actually mutates the book — an empty-order cancel has
+  `success==false` and changes no root, `l2_cancel_order.rs:129`).
+- **81** of the 96 real cancels are *chainable* (a later tx touches the same
+  market, providing the after-root ground truth). All 81 validate bit-for-bit.
+- The remaining 15 real cancels are the LAST tx to touch their market in the
+  500-tx block, so the sample carries no later before-root to chain against
+  (their `order_book_root` rolls into the block's final `nsr`, which needs the
+  full account-tree reconstruction — Phase 4 scope).
+
+**Spot+limit locked-balance note.** The cancel `apply()` also decrements the
+owner's locked asset balance for spot + limit orders
+(`decrement_locked_balance_for_order`). In this fixture **all 96 real cancels are
+perps** (market_type != spot) with order_type 0, so the spot+limit locked-balance
+branch is never exercised and has **no ground truth to validate against** here. It
+is documented as a cancel effect but intentionally not asserted (validating an
+unexercised branch would be fabrication); it is covered structurally by the
+order-count decrement and re-checked when a spot cancel appears in a future
+fixture.
+
+**Scope (strict):** Cancel (tx_type 15) only. Modify (#124), the order-book
+aggregation *insert* path, the matching engine, Claim, and Create (#125) are out
+of scope and untouched. No `bench/src/` Rust code is modified.
 
 ## What it validates (and current coverage)
 
