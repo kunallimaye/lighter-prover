@@ -32,6 +32,8 @@ const (
 
 	ownerAccountID      = 0  // OWNER_ACCOUNT_ID == TAKER_ACCOUNT_ID (constants.rs:466)
 	txTypeL2CancelOrder = 15 // TX_TYPE_L2_CANCEL_ORDER
+	txTypeL2ModifyOrder = 17 // TX_TYPE_L2_MODIFY_ORDER
+	txTypeEmpty         = 0  // TX_TYPE_EMPTY
 )
 
 // Block is the top-level bench_test.json document (only fields we use).
@@ -74,6 +76,22 @@ type Tx struct {
 	Cancel        *CancelPayload  `json:"2co"`     // L2CancelOrderTx (l2_cancel_order.rs:26-40)
 	OrderInfoBefr OrderInfo       `json:"obinfob"` // order-book Order leaf BEFORE (order.rs:22-40)
 	OrderBookPath []OrderBookNode `json:"obpb"`    // [80] order-book proof path (order_book_node.rs:18-33)
+
+	// --- modify-specific (tx_type 17, key 2mo) ---
+	// The order-book Order leaf before + path (obinfob/obpb) are SHARED with
+	// cancel above. Only the 2mo payload is modify-specific.
+	Modify *ModifyPayload `json:"2mo"` // L2ModifyOrderTx (l2_modify_order.rs:34-57)
+}
+
+// ModifyPayload models the 2mo tx payload (l2_modify_order.rs:34-57).
+type ModifyPayload struct {
+	AccountIndex int64  `json:"ai"` // owner account index (48 bits)
+	ApiKeyIndex  uint8  `json:"ki"` // api key index (8 bits)
+	MarketIndex  uint16 `json:"m"`  // market index (defaults 0 via serde(default))
+	Index        int64  `json:"i"`  // cloindex or oindex (56 bits)
+	BaseAmount   int64  `json:"b"`  // new base amount (64 bits, may be 0)
+	Price        uint32 `json:"p"`  // new price (32 bits)
+	TriggerPrice uint32 `json:"tp"` // new trigger price (32 bits)
 }
 
 // CancelPayload models the 2co tx payload (l2_cancel_order.rs:26-40).

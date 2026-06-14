@@ -1,7 +1,8 @@
-# Go Witness Reconstructor — Phase 0 (replay harness) + Phase 1 (Cancel)
+# Go Witness Reconstructor — Phase 0 (replay harness) + Phase 1 (Cancel) + Phase 2 (Modify)
 
-Issues: [#122](../../README.md) (Phase 0) and #123 (Phase 1: Cancel) of epic
-#121. Design:
+Issues: [#122](../../README.md) (Phase 0), #123 (Phase 1: Cancel), and #124
+(Phase 2: order-book aggregation tree + non-crossing Modify) of epic #121.
+Design:
 [`docs/design/go-witness-reconstructor.md`](../../docs/design/go-witness-reconstructor.md).
 Feasibility: #120.
 
@@ -17,6 +18,10 @@ A Go harness that REPLAYS the bundled 500-tx block fixture
   order leaf + `get_order_book_path_delta` aggregation recompute; empty the
   account_order leaf; market `total_order_count`-1) and validate the
   reconstructed AFTER roots bit-for-bit against ground truth.
+- **Phase 2 (order-book aggregation tree + Modify, tx_type 17)**: reconstruct the
+  depth-80 order-book aggregation tree (internal nodes carry 4 aggregated sums)
+  and the NON-CROSSING Modify after `order_book_root`, validated bit-for-bit
+  against ground truth.
 
 This proves the hashing + Merkle-fold machinery and the Cancel state transition
 are faithful before later phases build on them. It is a separate Go program with
@@ -57,14 +62,16 @@ Verified Merkle rules (circuit `merkle_helpers.rs:84/134`, `hash_utils.rs:88`):
 ```sh
 cd tools/witness-reconstructor
 go build ./...
-go run . -json ../../bench/bench_test.json          # Phase 0 + Phase 1 summary
-go run . -json ../../bench/bench_test.json -evidence # one worked Cancel example
-go test ./...                                        # locks in bit-for-bit invariants
+go run . -json ../../bench/bench_test.json                 # Phase 0+1+2 summary
+go run . -json ../../bench/bench_test.json -evidence        # one worked Cancel example
+go run . -json ../../bench/bench_test.json -modify-evidence # one worked Modify example
+go test ./...                                               # locks in bit-for-bit invariants
 ```
 
 Flags: `-json <path>` (default `bench/bench_test.json`), `-limit N` (first N txs),
 `-v` (print Phase-0 evidence limbs for tx[0]), `-evidence` (print one worked
-Cancel expected-vs-got example and exit).
+Cancel expected-vs-got example and exit), `-modify-evidence` (print one worked
+Modify expected-vs-got example and exit).
 
 ## Phase 1 — Cancel (tx_type 15) reconstruction (#123)
 
@@ -109,9 +116,62 @@ unexercised branch would be fabrication); it is covered structurally by the
 order-count decrement and re-checked when a spot cancel appears in a future
 fixture.
 
-**Scope (strict):** Cancel (tx_type 15) only. Modify (#124), the order-book
-aggregation *insert* path, the matching engine, Claim, and Create (#125) are out
-of scope and untouched. No `bench/src/` Rust code is modified.
+**Scope (strict):** Cancel (tx_type 15) only. The order-book aggregation *insert*
+path, the matching engine, Claim, and Create (#125) are out of scope and
+untouched. No `bench/src/` Rust code is modified.
+
+## Phase 2 — order-book aggregation tree + Modify (tx_type 17) non-crossing (#124)
+
+**The order-book aggregation tree (#124 goal a, the trickiest structure).** The
+order-book tree is depth 80 (`ORDER_PRICE_BITS`32 + `ORDER_NONCE_BITS`48,
+`constants.rs:35,37`). Unlike a plain Merkle tree, every internal node carries
+FOUR aggregated sums (ask/bid base/quote) summed over its whole subtree
+(`order_book_node.rs:18-57`), and an internal node's hash is *literally* those 4
+sums as the 4 HashOut limbs — not a Poseidon permutation (`order_book_node.rs:47`).
+A leaf update mutates the leaf hash AND every aggregation node on its path:
+`get_order_book_path_delta` (`matching_engine.rs:42-130`) recomputes the path,
+`recalculate_order_book_tree_root` (`order_book_tree_helpers.rs:51-66`) folds it.
+Phase 1 implemented this fold for Cancel; Phase 2 reuses + validates it for Modify.
+
+**Why the modify order-book delta is a removal along the loaded path
+(EMPIRICALLY CONFIRMED).** The circuit derives ONE order path helper per tx,
+fixed from the LOADED order's position (`tx_constraints.rs:551-555`), and computes
+the final `order_book_root` ONCE along that path
+(`tx_constraints.rs:1934-1946`). For a non-crossing modify, `apply()` empties the
+loaded order (`l2_modify_order.rs:528-561`) and `execute_matching` re-inserts the
+new resting order at a NEW `(price, nonce)` (`get_order_from_register`,
+`matching_engine.rs:1773-1775`) — a different leaf position than the verified path
+covers. So the net `order_book_root` delta along the single verified path IS the
+removal of the loaded order, structurally identical to a Cancel. Confirmed
+bit-for-bit: every real modify's removal-only reconstructed after root equals the
+next-same-market tx's before root.
+
+**Ground-truth strategy (no fabrication).** Same chaining as Cancel: the modify's
+reconstructed AFTER `order_book_root` is validated bit-for-bit against the next tx
+that touches the same market (its `mmb.r` before-root).
+
+| Quantity | Coverage |
+|---|---|
+| `order_book_root` BEFORE (aggregation fold vs `mmb.r`) | **167/167 bit-for-bit** |
+| `order_book_root` AFTER (vs next-same-market `mmb.r`) | **167/167 bit-for-bit** ← #124 exit |
+
+- **168** total modifies; **167** are *real* (the loaded order has a non-zero
+  aggregation sum). The 1 non-real modify loads an empty order → `success==false`
+  (`l2_modify_order.rs:278-281`), no `order_book_root` change.
+- All 167 real modifies are chainable (a later tx touches the same market) and
+  validate bit-for-bit on both before and after `order_book_root`.
+
+**Honest scope boundary (recorded, not hidden).** The full market LEAF after a
+modify does NOT equal the next-same-market tx's market leaf, because the modify
+re-inserts the order at a new nonce — incrementing `market.ask_nonce` or
+`bid_nonce` (`l2_modify_order.rs:498-521`, observed in 167/167) — and the
+next-same-market tx in this sample is itself a tx_type-21 claim that touches the
+market. The `order_book_root` (the #124 exit criterion) is what Phase 2
+reproduces and validates; the nonce/full-leaf chaining and the new-position
+re-insert are Phase-3 matching-engine scope (#125).
+
+**Scope (strict):** Modify (17) NON-CROSSING order-book root only. No matching
+engine, no fills/trades (crossing path #125), no `bench/src/` Rust code touched.
 
 ## What it validates (and current coverage)
 

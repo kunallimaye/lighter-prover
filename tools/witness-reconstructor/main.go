@@ -105,6 +105,7 @@ func main() {
 	limit := flag.Int("limit", 0, "validate only the first N txs (0 = all)")
 	verbose := flag.Bool("v", false, "print first matched limbs per tree as evidence")
 	evidence := flag.Bool("evidence", false, "print one worked Cancel expected-vs-got example and exit")
+	modifyEvidence := flag.Bool("modify-evidence", false, "print one worked Modify expected-vs-got example and exit")
 	flag.Parse()
 
 	block, err := loadBlock(*jsonPath)
@@ -115,6 +116,10 @@ func main() {
 
 	if *evidence {
 		printCancelEvidence(block)
+		os.Exit(0)
+	}
+	if *modifyEvidence {
+		printModifyEvidence(block)
 		os.Exit(0)
 	}
 
@@ -151,6 +156,9 @@ func main() {
 
 	// --- Phase 1: Cancel (tx_type 15) end-to-end reconstruction (#123) ---
 	cancelResult := validateCancels(block, n)
+
+	// --- Phase 2: Modify (tx_type 17) non-crossing reconstruction (#124) ---
+	modifyResult := validateModifies(block, n)
 
 	results := []*result{apiKey, accOrders, asset, market}
 	hardDivergence := false
@@ -202,14 +210,23 @@ func main() {
 		hardDivergence = true
 	}
 
+	// --- Phase-2 Modify (tx_type 17) non-crossing reconstruction (#124) ---
+	fmt.Println()
+	fmt.Println("--- Phase-2 Modify (tx_type 17) order-book aggregation tree + non-crossing (#124) ---")
+	printModifyResult(modifyResult)
+	if len(modifyResult.divergences) > 0 {
+		hardDivergence = true
+	}
+
 	if hardDivergence {
 		fmt.Println("\nRESULT: hard divergence(s) found (the harness did its job — see exact limbs above).")
 		os.Exit(1)
 	}
 	fmt.Println("\nRESULT: Phase-0 first-touch reconstructions reproduce JSON-stored ground-truth")
-	fmt.Println("roots BIT-FOR-BIT, and every real, chainable Phase-1 Cancel reproduces the")
-	fmt.Println("next-same-market tx's before order_book_root (its after-root) BIT-FOR-BIT.")
-	fmt.Println("No encoding/state-transition divergence detected.")
+	fmt.Println("roots BIT-FOR-BIT; every real, chainable Phase-1 Cancel (15) and Phase-2")
+	fmt.Println("non-crossing Modify (17) reproduces the next-same-market tx's before")
+	fmt.Println("order_book_root (its after-root) BIT-FOR-BIT via the depth-80 order-book")
+	fmt.Println("aggregation tree. No encoding/state-transition divergence detected.")
 	os.Exit(0)
 }
 
