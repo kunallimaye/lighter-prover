@@ -45,17 +45,40 @@ source "${SCRIPT_DIR}/common.sh" 2>/dev/null || true
 
 # ── Resolve project / region / image / bucket (env > config > default) ──
 PROJECT="${TXMIX_PROJECT:-${BUILD_PROJECT:-${GCP_PROJECT:-kunal-scratch}}}"
+# Job region STAYS in Tokyo (asia-northeast1): the egress geo-block
+# workaround depends on a Tokyo-presented IP. Do NOT change this.
 REGION="${TXMIX_JOB_REGION:-asia-northeast1}"                 # Tokyo
 AR_LOCATION="${TXMIX_AR_LOCATION:-asia-northeast1}"
 AR_REPO_TXMIX="${TXMIX_AR_REPO:-lighter-prover-txmix}"
 IMAGE="${TXMIX_IMAGE:-${AR_LOCATION}-docker.pkg.dev/${PROJECT}/${AR_REPO_TXMIX}/txmix}"
 IMAGE_TAG="${TXMIX_IMAGE_TAG:-latest}"
 JOB_NAME="${TXMIX_JOB_NAME:-lighter-txmix}"
-BUCKET="${TXMIX_BUCKET:-${PROJECT}-lighter-txmix}"           # durable output
+# Durable output bucket. We REUSE the existing shared fleet results
+# bucket (gs://<project>-bench-fleet-runs, us-central1, created by
+# admin-cloud-init) rather than provisioning a new txmix-only bucket —
+# the Tokyo job writes a tiny payload under a txmix/ prefix; a
+# cross-region write to a us-central1 bucket is fine. The value flows
+# from config.toml ([txmix].bucket) via config.py as a BARE name; env
+# TXMIX_BUCKET overrides. Default-when-unset mirrors the fleet default.
+BUCKET="${TXMIX_BUCKET:-${PROJECT}-bench-fleet-runs}"
+# Belt-and-suspenders: strip a stray gs:// in case TXMIX_BUCKET was set
+# by hand to a full URI (config.py already emits a bare name).
+BUCKET="${BUCKET#gs://}"; BUCKET="${BUCKET%/}"
 TASK_TIMEOUT="${TXMIX_TASK_TIMEOUT:-86400s}"                  # 24h — big windows
 MAX_RETRIES_JOB="${TXMIX_JOB_MAX_RETRIES:-0}"                 # don't auto-rerun a capture
 MEMORY="${TXMIX_MEMORY:-512Mi}"
 CPU="${TXMIX_CPU:-1}"
+
+# ── Identity model (single SA for control-plane + job runtime) ─────────
+# The Cloud Run control-plane calls (create/update/execute/describe) run
+# AS the project agent SA via IMPERSONATION; the active runtime identity
+# holds roles/iam.serviceAccountTokenCreator + serviceAccountUser on it.
+# The JOB itself ALSO runs as that agent SA (--service-account), whose
+# project-level storage.objects.* lets the running job write to the
+# fleet bucket. Both are configurable; default to the agent SA. An empty
+# value disables impersonation (use the active gcloud account directly).
+RUN_AS_SA="${TXMIX_RUN_AS_SA:-lighter-prover-agent@${PROJECT}.iam.gserviceaccount.com}"
+IMPERSONATE_SA="${TXMIX_IMPERSONATE_SA:-${RUN_AS_SA}}"
 
 # Capture knobs forwarded to the container (all overridable per execution).
 MAX_RPM="${TXMIX_MAX_RPM:-80}"
@@ -71,11 +94,13 @@ usage() {
 
 Resolved configuration:
   project        ${PROJECT}
-  job region     ${REGION}   (Tokyo)
+  job region     ${REGION}   (Tokyo — fixed; egress geo-block workaround)
   image          ${IMAGE}:${IMAGE_TAG}
   job name       ${JOB_NAME}
-  output bucket  gs://${BUCKET}
+  output bucket  gs://${BUCKET}   (shared fleet bucket, txmix/ prefix)
   task timeout   ${TASK_TIMEOUT}
+  run-as SA      ${RUN_AS_SA}
+  impersonate    ${IMPERSONATE_SA:-<none — active gcloud account>}
 
 Usage: $(basename "$0") <build|deploy|smoke|capture|run|results|post|all-smoke> [args]
 
@@ -89,42 +114,47 @@ EOF
 log() { echo -e "\033[0;34m[txmix]\033[0m $*"; }
 die() { echo -e "\033[0;31m[txmix:ERROR]\033[0m $*" >&2; exit 1; }
 
-# ── Ensure the durable output bucket exists (asia-northeast1) ──────────
-# The Job only needs storage.objects.* on the bucket; CREATING a bucket
-# needs storage.buckets.create (owner/admin-tier). If the bucket is
-# missing and we lack create permission, we WARN with the exact remedy
-# rather than hard-failing cryptically — an operator (or
-# `make admin-cloud-init`) provisions it once. The Job itself writes
-# objects, which the deployer SA already has.
-ensure_bucket() {
-  if gcloud storage buckets describe "gs://${BUCKET}" --project "${PROJECT}" \
+# ── gcloud wrapper: impersonate the agent SA for control-plane calls ───
+# Adds --impersonate-service-account ONLY when IMPERSONATE_SA is set
+# (default: the agent SA). The active runtime identity has been granted
+# serviceAccountTokenCreator + serviceAccountUser on it. Set
+# TXMIX_IMPERSONATE_SA="" to run as the active gcloud account instead.
+gcloud_imp() {
+  if [[ -n "${IMPERSONATE_SA}" ]]; then
+    gcloud --impersonate-service-account="${IMPERSONATE_SA}" "$@"
+  else
+    gcloud "$@"
+  fi
+}
+
+# ── Verify the durable output bucket EXISTS (read-only; never creates) ──
+# We REUSE the shared fleet results bucket; it is provisioned once by
+# `make admin-cloud-init` (Owner-tier). This script must NOT attempt to
+# create a bucket (no storage.buckets.create is required of the agent SA).
+# A read-only describe gives a crisp error if the configured bucket is
+# missing, instead of a cryptic write failure inside the Job hours later.
+verify_bucket() {
+  if gcloud_imp storage buckets describe "gs://${BUCKET}" --project "${PROJECT}" \
        >/dev/null 2>&1; then
-    log "bucket gs://${BUCKET} exists"
+    log "output bucket gs://${BUCKET} exists (reusing shared fleet bucket)"
     return 0
   fi
-  log "bucket gs://${BUCKET} missing — attempting to create in ${REGION}"
-  if gcloud storage buckets create "gs://${BUCKET}" \
-       --project "${PROJECT}" --location "${REGION}" \
-       --uniform-bucket-level-access 2>/tmp/txmix-bucket.err; then
-    log "created gs://${BUCKET}"
-    return 0
-  fi
-  cat /tmp/txmix-bucket.err >&2 || true
-  die "could not create gs://${BUCKET} (need storage.buckets.create, owner-tier).
-  Fix (one-time, by an operator/owner):
-    gcloud storage buckets create gs://${BUCKET} \\
-      --project ${PROJECT} --location ${REGION} --uniform-bucket-level-access
-  Or set TXMIX_BUCKET to an EXISTING bucket the deployer SA can write objects to."
+  die "output bucket gs://${BUCKET} not found.
+  This script REUSES an existing bucket (the shared fleet results bucket);
+  it does NOT create one. Provision it once (Owner-tier), e.g.:
+    make admin-cloud-init        # creates gs://${PROJECT}-bench-fleet-runs
+  Or set TXMIX_BUCKET / config.toml [txmix].bucket to an EXISTING bucket
+  the run-as SA (${RUN_AS_SA}) can write objects to."
 }
 
 # ── Ensure the asia-northeast1 AR repo exists for the txmix image ──────
 ensure_ar_repo() {
-  if gcloud artifacts repositories describe "${AR_REPO_TXMIX}" \
+  if gcloud_imp artifacts repositories describe "${AR_REPO_TXMIX}" \
        --project "${PROJECT}" --location "${AR_LOCATION}" >/dev/null 2>&1; then
     log "AR repo ${AR_REPO_TXMIX} (${AR_LOCATION}) exists"
   else
     log "creating AR repo ${AR_REPO_TXMIX} in ${AR_LOCATION}"
-    gcloud artifacts repositories create "${AR_REPO_TXMIX}" \
+    gcloud_imp artifacts repositories create "${AR_REPO_TXMIX}" \
       --project "${PROJECT}" --location "${AR_LOCATION}" \
       --repository-format=docker \
       --description="tx-mix capture image (issue #128)"
@@ -136,7 +166,7 @@ cmd_build() {
   local sha
   sha="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || echo manual)"
   log "building tx-mix image via Cloud Build (sha=${sha}) -> ${IMAGE}"
-  gcloud builds submit "${PROJECT_ROOT}" \
+  gcloud_imp builds submit "${PROJECT_ROOT}" \
     --project "${PROJECT}" \
     --config "${PROJECT_ROOT}/cicd/cloudbuild-txmix.yaml" \
     --substitutions "COMMIT_SHA=${sha},_IMAGE_NAME=${IMAGE}"
@@ -147,17 +177,19 @@ cmd_build() {
 # env overrides (window/label) are applied at `run`/`smoke`/`capture` time
 # via --update-env-vars so the SAME job definition serves every window.
 cmd_deploy() {
-  ensure_bucket
+  verify_bucket
   local action=create
-  if gcloud run jobs describe "${JOB_NAME}" --project "${PROJECT}" \
+  if gcloud_imp run jobs describe "${JOB_NAME}" --project "${PROJECT}" \
        --region "${REGION}" >/dev/null 2>&1; then
     action=update
   fi
   log "${action} Cloud Run JOB ${JOB_NAME} in ${REGION} (Tokyo, public egress)"
-  gcloud run jobs "${action}" "${JOB_NAME}" \
+  log "  run-as SA: ${RUN_AS_SA}  |  output: gs://${BUCKET}/txmix/"
+  gcloud_imp run jobs "${action}" "${JOB_NAME}" \
     --project "${PROJECT}" \
     --region "${REGION}" \
     --image "${IMAGE}:${IMAGE_TAG}" \
+    --service-account "${RUN_AS_SA}" \
     --task-timeout "${TASK_TIMEOUT}" \
     --max-retries "${MAX_RETRIES_JOB}" \
     --memory "${MEMORY}" \
@@ -181,7 +213,7 @@ _execute() {
   fi
   local joined
   joined="$(IFS=,; echo "${envs[*]}")"
-  gcloud run jobs execute "${JOB_NAME}" \
+  gcloud_imp run jobs execute "${JOB_NAME}" \
     --project "${PROJECT}" --region "${REGION}" \
     --update-env-vars "${joined}" \
     --wait
@@ -211,17 +243,17 @@ cmd_results() {
   local prefix="${1:-}"
   local base="gs://${BUCKET}/txmix/"
   if [[ -z "${prefix}" ]]; then
-    prefix="$(gcloud storage ls "${base}" --project "${PROJECT}" 2>/dev/null \
+    prefix="$(gcloud_imp storage ls "${base}" --project "${PROJECT}" 2>/dev/null \
               | sort | tail -1)"
     [[ -z "${prefix}" ]] && die "no artifacts under ${base}"
   fi
   log "latest artifact: ${prefix}"
   echo "================= tx-mix.meta.json ================="
-  gcloud storage cat "${prefix%/}/tx-mix.meta.json" --project "${PROJECT}" 2>/dev/null || echo "(none)"
+  gcloud_imp storage cat "${prefix%/}/tx-mix.meta.json" --project "${PROJECT}" 2>/dev/null || echo "(none)"
   echo "================= tx-mix.txt ======================="
-  gcloud storage cat "${prefix%/}/tx-mix.txt" --project "${PROJECT}" 2>/dev/null || echo "(none)"
+  gcloud_imp storage cat "${prefix%/}/tx-mix.txt" --project "${PROJECT}" 2>/dev/null || echo "(none)"
   echo "================= DONE =============================="
-  gcloud storage cat "${prefix%/}/DONE" --project "${PROJECT}" 2>/dev/null || echo "(none)"
+  gcloud_imp storage cat "${prefix%/}/DONE" --project "${PROJECT}" 2>/dev/null || echo "(none)"
 }
 
 # Post a cited summary built from a GCS artifact to issue #128 (+ optionally
@@ -232,13 +264,13 @@ cmd_post() {
   local issue="${TXMIX_ISSUE:-128}"
   local base="gs://${BUCKET}/txmix/"
   if [[ -z "${prefix}" ]]; then
-    prefix="$(gcloud storage ls "${base}" --project "${PROJECT}" 2>/dev/null | sort | tail -1)"
+    prefix="$(gcloud_imp storage ls "${base}" --project "${PROJECT}" 2>/dev/null | sort | tail -1)"
     [[ -z "${prefix}" ]] && die "no artifacts under ${base}"
   fi
   command -v gh >/dev/null || die "gh CLI not found — needed to post the summary"
   local meta mix
-  meta="$(gcloud storage cat "${prefix%/}/tx-mix.meta.json" --project "${PROJECT}" 2>/dev/null || echo '{}')"
-  mix="$(gcloud storage cat "${prefix%/}/tx-mix.txt" --project "${PROJECT}" 2>/dev/null || echo '(no mix table)')"
+  meta="$(gcloud_imp storage cat "${prefix%/}/tx-mix.meta.json" --project "${PROJECT}" 2>/dev/null || echo '{}')"
+  mix="$(gcloud_imp storage cat "${prefix%/}/tx-mix.txt" --project "${PROJECT}" 2>/dev/null || echo '(no mix table)')"
   local body
   body="$(cat <<EOF
 ## tx-mix capture result (Cloud Run Job, asia-northeast1 / Tokyo)
