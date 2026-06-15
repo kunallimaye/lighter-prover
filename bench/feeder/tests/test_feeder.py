@@ -275,6 +275,164 @@ class TestSynthPeak(unittest.TestCase):
         self.assertEqual(prov["params"]["duration_s"], 60.0)
 
 
+# Tier-2 crafted fixtures (issue #217): constant-tx_count synth streams
+# committed alongside the code that produces them.
+SYNTH_K24 = Path(__file__).resolve().parents[1] / "fixtures" / \
+    "synth_k24_tx216.jsonl"
+SYNTH_K32 = Path(__file__).resolve().parents[1] / "fixtures" / \
+    "synth_k32_tx288.jsonl"
+
+
+class TestSynthPeakConfigurableLoad(unittest.TestCase):
+    """Issue #217 — synth-peak on two independent load axes
+    (blocks/sec via --block-rate, txns/block via --tx-count), plus the
+    committed Tier-2 fixtures that pin k=24 / k=32 streams.
+
+    Offline only: in-process run_cli, no network, no sleeps.
+    """
+
+    def test_tx_count_sets_every_block(self):
+        # Axis A: --tx-count N -> every block carries exactly N txns.
+        rc, lines = run_cli(["synth-peak", "--tx-count", "216",
+                             "--block-rate", "1", "--duration", "60s",
+                             "--dry-run"])
+        self.assertEqual(rc, 0)
+        _, events, gaps = parse_stream(lines)
+        self.assertEqual(gaps, [])
+        self.assertTrue(events)
+        self.assertTrue(all(e["tx_count"] == 216 for e in events),
+                        "every block must carry tx_count == 216")
+
+    def test_block_rate_sets_cadence(self):
+        # Axis B: --block-rate B -> inter-block ts_ms delta ~= 1000/B ms.
+        rc, lines = run_cli(["synth-peak", "--tx-count", "216",
+                             "--block-rate", "4", "--duration", "10s",
+                             "--dry-run"])
+        self.assertEqual(rc, 0)
+        _, events, _ = parse_stream(lines)
+        expected_ms = 1000.0 / 4.0      # 250 ms
+        deltas = [b["ts_ms"] - a["ts_ms"]
+                  for a, b in zip(events, events[1:])]
+        self.assertTrue(deltas)
+        for d in deltas:
+            self.assertLessEqual(abs(d - expected_ms), 1.0,
+                                 f"gap {d} ms vs cadence {expected_ms} ms")
+
+    def test_axes_are_independent(self):
+        # Changing tx_count at a FIXED block-rate must NOT change cadence.
+        rc1, lines1 = run_cli(["synth-peak", "--tx-count", "216",
+                               "--block-rate", "2", "--duration", "30s",
+                               "--dry-run"])
+        rc2, lines2 = run_cli(["synth-peak", "--tx-count", "288",
+                               "--block-rate", "2", "--duration", "30s",
+                               "--dry-run"])
+        self.assertEqual((rc1, rc2), (0, 0))
+        _, ev1, _ = parse_stream(lines1)
+        _, ev2, _ = parse_stream(lines2)
+        ts1 = [e["ts_ms"] for e in ev1]
+        ts2 = [e["ts_ms"] for e in ev2]
+        # Identical cadence + same block count -> identical ts_ms sequence.
+        self.assertEqual(ts1, ts2)
+        # ...while the load axis differs.
+        self.assertTrue(all(e["tx_count"] == 216 for e in ev1))
+        self.assertTrue(all(e["tx_count"] == 288 for e in ev2))
+
+    def test_rate_back_compat_defaults_to_500(self):
+        # --rate alone (no --tx-count) reproduces the legacy single-axis
+        # behavior: tx=500 per block, cadence = 500/rate seconds.
+        rc, lines = run_cli(["synth-peak", "--rate", "2213",
+                             "--duration", "60s", "--dry-run"])
+        self.assertEqual(rc, 0)
+        header, events, _ = parse_stream(lines)
+        self.assertTrue(all(e["tx_count"] == 500 for e in events))
+        expected_ms = 500.0 / 2213.0 * 1000.0
+        deltas = [b["ts_ms"] - a["ts_ms"]
+                  for a, b in zip(events, events[1:])]
+        for d in deltas:
+            self.assertLessEqual(abs(d - expected_ms), 1.0)
+        # Legacy peak_rate axis is preserved in provenance.
+        self.assertEqual(header["provenance"]["params"]["peak_rate"], 2213.0)
+
+    def test_provenance_records_both_axes(self):
+        rc, lines = run_cli(["synth-peak", "--tx-count", "288",
+                             "--block-rate", "3", "--duration", "10s",
+                             "--dry-run"])
+        self.assertEqual(rc, 0)
+        header, _, _ = parse_stream(lines)
+        params = header["provenance"]["params"]
+        self.assertEqual(params["block_rate"], 3.0)
+        self.assertEqual(params["tx_count"], 288)
+        self.assertEqual(params["duration_s"], 10.0)
+        # No --rate used -> no legacy peak_rate axis recorded.
+        self.assertNotIn("peak_rate", params)
+
+    def test_validation_rejects_bad_args(self):
+        bad = [
+            # tx-count out of the 1..500 chain cap
+            ["synth-peak", "--tx-count", "0", "--block-rate", "1",
+             "--duration", "10s", "--dry-run"],
+            ["synth-peak", "--tx-count", "501", "--block-rate", "1",
+             "--duration", "10s", "--dry-run"],
+            # both rate axes are mutually exclusive
+            ["synth-peak", "--rate", "100", "--block-rate", "1",
+             "--duration", "10s", "--dry-run"],
+            # at least one rate axis is required
+            ["synth-peak", "--tx-count", "216", "--duration", "10s",
+             "--dry-run"],
+        ]
+        for argv in bad:
+            with self.subTest(argv=" ".join(argv)):
+                with self.assertRaises(SystemExit) as cm:
+                    feeder.main(argv)
+                self.assertEqual(cm.exception.code, 2)  # argparse usage error
+
+    def test_output_is_spec_conformant(self):
+        rc, lines = run_cli(["synth-peak", "--tx-count", "216",
+                             "--block-rate", "1", "--duration", "60s",
+                             "--dry-run"])
+        self.assertEqual(rc, 0)
+        # parse_stream validates line types; load_trace + validate_events
+        # enforce monotonicity / schema (spec §5).
+        header, events, gaps, _ = feeder.load_trace(lines)
+        self.assertIsNotNone(header)            # header on line 1
+        self.assertEqual(gaps, 0)
+        feeder.validate_events(events)          # must not raise
+        # Strictly increasing height, non-decreasing ts_ms, no jumps.
+        deltas = [b["height"] - a["height"]
+                  for a, b in zip(events, events[1:])]
+        self.assertTrue(all(d == 1 for d in deltas), "no height jumps")
+        self.assertTrue(all(e["tx_count"] is not None for e in events),
+                        "constant-tx_count synth trace has no nulls")
+
+    def _assert_fixture(self, path, want_tx, want_k):
+        self.assertTrue(path.exists(), f"missing committed fixture {path}")
+        with open(path) as f:
+            header, events, gaps, _ = feeder.load_trace(f)
+        # Spec conformance: header line 1, monotonic, no gaps.
+        self.assertIsNotNone(header, "fixture must have a provenance header")
+        self.assertEqual(header["generator"], "synth-peak")
+        self.assertEqual(gaps, 0)
+        feeder.validate_events(events)
+        self.assertTrue(events)
+        # Constant tx_count -> fixed k; integer tx_count, no nulls.
+        for e in events:
+            self.assertIsInstance(e["tx_count"], int)
+            self.assertEqual(e["tx_count"], want_tx)
+        # Strictly increasing, gapless heights; non-decreasing ts_ms.
+        hs = [e["height"] for e in events]
+        self.assertEqual(hs, list(range(hs[0], hs[0] + len(hs))))
+        ts = [e["ts_ms"] for e in events]
+        self.assertEqual(ts, sorted(ts))
+        # k = ceil(tx_count / S) at the canonical S=9.
+        self.assertEqual(math.ceil(want_tx / 9), want_k)
+
+    def test_committed_fixture_k24(self):
+        self._assert_fixture(SYNTH_K24, want_tx=216, want_k=24)
+
+    def test_committed_fixture_k32(self):
+        self._assert_fixture(SYNTH_K32, want_tx=288, want_k=32)
+
+
 class TestSchemaAndMonotonicity(unittest.TestCase):
     """Test 6 — every emitted stream parses + spec §5 monotonicity."""
 
