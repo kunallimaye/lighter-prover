@@ -110,6 +110,24 @@ struct Args {
     #[arg(long, env = "LIGHTER_RESULTS_SUBSCRIPTION")]
     results_subscription: Option<String>,
 
+    /// Issue #198: Pub/Sub MERGE-TASK topic — the leader publishes one merge
+    /// task per pair here; idle coordinators competing-pull from the merge
+    /// subscription to fold a single block's tree across machines.
+    #[arg(long, env = "LIGHTER_MERGE_TASK_TOPIC")]
+    merge_task_topic: Option<String>,
+
+    /// Issue #198: Pub/Sub MERGE-TASK subscription — fold workers competing-pull.
+    #[arg(long, env = "LIGHTER_MERGE_TASK_SUBSCRIPTION")]
+    merge_task_subscription: Option<String>,
+
+    /// Issue #198: Pub/Sub MERGE-RESULT topic — fold workers publish results.
+    #[arg(long, env = "LIGHTER_MERGE_RESULT_TOPIC")]
+    merge_result_topic: Option<String>,
+
+    /// Issue #198: Pub/Sub MERGE-RESULT subscription — leader pulls results.
+    #[arg(long, env = "LIGHTER_MERGE_RESULT_SUBSCRIPTION")]
+    merge_result_subscription: Option<String>,
+
     /// `gcloud` binary path for the Pub/Sub transport (default `gcloud`).
     #[arg(long, env = "LIGHTER_GCLOUD_BIN", default_value = "gcloud")]
     gcloud_bin: String,
@@ -226,6 +244,25 @@ struct Args {
     /// JSONL stream is the headline.
     #[arg(long, default_value_t = 1)]
     l2_workers: usize,
+
+    /// Issue #198 (cross-machine fold fan-out): select the coordinator's fold
+    /// TOPOLOGY. Default `false` = `FoldTopology::InProcess` — the existing
+    /// single-box fold, BYTE-FOR-BYTE unchanged (the `--l2-workers` knob still
+    /// controls its in-process per-level parallelism). `true` =
+    /// `FoldTopology::Distributed` — the leader emits each merge pair as a
+    /// task to the merge-task plane, idle coordinator WORKERS competing-pull
+    /// and prove ONE merge at a time on their FULL core budget (no in-process
+    /// thread rationing), intermediate proofs transit the proof store, and the
+    /// leader re-sorts each level's results by stable in-level index so the
+    /// final proof is bit-identical to the in-process fold (the #193 contract).
+    ///
+    /// The distributed path requires `--proof-bucket` (transit) and the
+    /// merge-task/result plane flags. It does NOT use `--l2-workers`: per the
+    /// governing principle, each worker proves one merge on its full cores and
+    /// we scale by worker COUNT, not by cramming proofs onto one box. The
+    /// per-merge thread-cap is a deprecated single-box workaround, not used here.
+    #[arg(long, env = "LIGHTER_FOLD_DISTRIBUTED", default_value_t = false)]
+    fold_distributed: bool,
 
     /// Issue #78: run the 8-way L5 (`CyclicRecursionCircuit`) segment
     /// scheduler. Synthesizes a `--blocks` continuation-consistent block
@@ -362,6 +399,12 @@ enum RunMode {
     Bench,
     Coordinator,
     Cell,
+    /// Issue #198: a FOLD WORKER. An independent coordinator-class pod that
+    /// competing-pulls merge tasks from the merge-task plane, proves ONE merge
+    /// at a time on its FULL core budget (no thread rationing), uploads the
+    /// output to the proof store, and publishes a merge result. This is how a
+    /// single block's merge tree shards across separate machines.
+    FoldWorker,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -369,6 +412,21 @@ enum RunMode {
 enum L2FoldMode {
     Serial,
     Tree,
+}
+
+/// Issue #198: the coordinator's fold TOPOLOGY — how a single block's merge
+/// tree is folded.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FoldTopology {
+    /// The existing single-box fold (`fold_merge_tree`), byte-for-byte
+    /// unchanged. Every merge proves in THIS process; `--l2-workers` controls
+    /// its in-process per-level parallelism.
+    InProcess,
+    /// Cross-machine fan-out (issue #198): the leader emits each merge pair as
+    /// a task to the merge-task plane; independent coordinator WORKERS pull,
+    /// prove ONE merge each on their full cores, and transit intermediate
+    /// proofs through the proof store. Bit-identical to `InProcess`.
+    Distributed,
 }
 
 /// Issue #72: tree-fold leaf-proving order. The default `Forward` order
@@ -615,6 +673,10 @@ fn main() {
         }
         RunMode::Cell => {
             run_cell(&args);
+            return;
+        }
+        RunMode::FoldWorker => {
+            run_fold_worker(&args);
             return;
         }
     }
@@ -1480,6 +1542,10 @@ fn resolve_pubsub_config(args: &Args) -> bench::conductor::PubSubConfig {
         chunk_subscription: args.chunk_subscription.clone().unwrap_or_default(),
         results_topic: args.results_topic.clone().unwrap_or_default(),
         results_subscription: args.results_subscription.clone().unwrap_or_default(),
+        merge_task_topic: args.merge_task_topic.clone().unwrap_or_default(),
+        merge_task_subscription: args.merge_task_subscription.clone().unwrap_or_default(),
+        merge_result_topic: args.merge_result_topic.clone().unwrap_or_default(),
+        merge_result_subscription: args.merge_result_subscription.clone().unwrap_or_default(),
         gcloud_bin: args.gcloud_bin.clone(),
     }
 }
@@ -1975,6 +2041,12 @@ struct CoordinatorRealFold {
     /// per-level merge parallelism. Reuses the existing `--l2-workers` flag.
     /// `1` (the default) takes the byte-for-byte serial fold.
     fold_workers: usize,
+    /// Issue #198: the fold topology. `InProcess` (default) uses the
+    /// byte-for-byte single-box `fold_merge_tree`; `Distributed` shards the
+    /// merge tree across separate coordinator workers via the merge-task plane
+    /// + proof-store transit. Per the governing principle the distributed path
+    /// does NOT use `fold_workers` (one proof per worker, scale by count).
+    topology: FoldTopology,
 }
 
 impl CoordinatorRealFold {
@@ -2023,6 +2095,13 @@ impl CoordinatorRealFold {
             // Issue #193: reuse --l2-workers as the coordinator fold's
             // concurrency knob (least invasive; already plumbed + documented).
             fold_workers: args.l2_workers,
+            // Issue #198: --fold-distributed selects the cross-machine
+            // fan-out topology; default is the unchanged in-process fold.
+            topology: if args.fold_distributed {
+                FoldTopology::Distributed
+            } else {
+                FoldTopology::InProcess
+            },
         }
     }
 }
@@ -2110,6 +2189,7 @@ fn coordinator_leaf_keys_ordered(
 fn coordinator_real_fold(
     real: &CoordinatorRealFold,
     proof_store: &bench::conductor::GcloudStorage,
+    bus: &bench::conductor::GcloudPubSub,
     block_results: &[bench::conductor::ChunkResultMessage],
     height: u64,
 ) -> anyhow::Result<CoordinatorFoldOutcome> {
@@ -2134,25 +2214,34 @@ fn coordinator_real_fold(
     let leaves_count = leaves.len();
     info!(
         "coordinator: downloaded + deserialized {leaves_count} REAL L2 leaf proofs for \
-         height={height}; folding with BlockTxChainMergeCircuit (issue #179 WS4)"
+         height={height}; folding with BlockTxChainMergeCircuit (topology={:?})",
+        real.topology
     );
 
-    // FOLD (WS4 + #193): shared single-source merge tree. `merge_start.elapsed()`
-    // below is the REALIZED wall (the honest merge wall reported downstream);
-    // `fold.merge_prove_total` is summed prove-WORK, not wall (see fold_merge_tree).
+    // FOLD: choose the topology. InProcess (default) is the byte-for-byte
+    // single-box `fold_merge_tree`. Distributed (issue #198) shards the tree
+    // across separate coordinator workers via the merge-task plane + proof-
+    // store transit, producing a BIT-IDENTICAL final proof. `merge_start.elapsed()`
+    // is the REALIZED merge wall reported downstream either way.
     let merge_start = Instant::now();
-    let fold = fold_merge_tree(
-        &real.merge_target,
-        &real.merge_data,
-        leaves,
-        real.fold_workers,
-    )?;
+    let fold = match real.topology {
+        FoldTopology::InProcess => fold_merge_tree(
+            &real.merge_target,
+            &real.merge_data,
+            leaves,
+            real.fold_workers,
+        )?,
+        FoldTopology::Distributed => {
+            coordinator_distributed_fold(real, proof_store, bus, height, leaves, &keys)?
+        }
+    };
     let merge_ms = merge_start.elapsed().as_millis() as u64;
     info!(
         "coordinator: folded {leaves_count} leaves for height={height}: depth={} merges={} \
-         fold_workers={} merge_wall_ms={} sum_merge_prove_ms={} (issue #179 WS4 / #193)",
+         topology={:?} fold_workers={} merge_wall_ms={} sum_merge_prove_ms={} (issue #179/#193/#198)",
         fold.depth,
         fold.merges,
+        real.topology,
         real.fold_workers,
         merge_ms,
         fold.merge_prove_total.as_millis(),
@@ -2384,7 +2473,7 @@ fn run_coordinator(args: &Args) {
         // measured merge/L4 for this block).
         let mut fold_outcome: Option<CoordinatorFoldOutcome> = None;
         if let Some(real) = real_fold.as_ref() {
-            match coordinator_real_fold(real, &proof_store, &block_results, block.height) {
+            match coordinator_real_fold(real, &proof_store, &bus, &block_results, block.height) {
                 Ok(outcome) => {
                     merge_ms = outcome.merge_ms;
                     l4_ms = outcome.l4_ms;
@@ -3523,6 +3612,417 @@ fn fold_merge_tree(
         merges,
         merge_prove_total,
     })
+}
+
+/// Issue #198 (cross-machine fold fan-out): the LEADER-side proof-store +
+/// merge-task-plane transport. Implements [`bench::conductor::FoldTransport`]
+/// so the shared library leader ([`bench::conductor::fold_distributed`]) drives
+/// it unchanged.
+///
+/// `put`/`get` are the real proof-store transit (`GcloudStorage` upload/download
+/// of the `serde_json` of `ProofWithPublicInputs`, the #117 export format the
+/// cells already use). `run_level` is the leader's dispatch+barrier: it
+/// PUBLISHES one [`MergeTaskMessage`] per pair to the merge-task plane, then
+/// POLLS the merge-result subscription until every task's result has landed
+/// (the M2 level barrier), surfacing honest failures as `Err`. It does NOT
+/// prove — that happens out-of-process on the independent fold WORKERS
+/// ([`run_fold_worker`]), which run the SHARED `prove_merge_pair`. The
+/// `merge_fn` argument is therefore unused on this leader path (the single
+/// merge implementation lives in the worker), and that is documented here so
+/// no second merge implementation is ever added.
+struct GcloudFoldTransport<'a> {
+    store: &'a bench::conductor::GcloudStorage,
+    bus: &'a bench::conductor::GcloudPubSub,
+    /// Per-result poll backoff (seconds).
+    poll_interval_s: u64,
+    /// Max wall to wait for a level's results before failing honestly.
+    level_deadline: Duration,
+}
+
+impl bench::conductor::FoldTransport<ProofWithPublicInputs<F, C, D>> for GcloudFoldTransport<'_> {
+    fn put(&self, key: &str, proof: &ProofWithPublicInputs<F, C, D>) -> anyhow::Result<Duration> {
+        let bytes = serde_json::to_vec(proof)
+            .map_err(|e| anyhow::anyhow!("serialize merge input '{key}': {e}"))?;
+        let t = Instant::now();
+        self.store
+            .upload(key, &bytes)
+            .map_err(|e| anyhow::anyhow!("transit PUT of '{key}' failed: {e}"))?;
+        Ok(t.elapsed())
+    }
+
+    fn get(&self, key: &str) -> anyhow::Result<(ProofWithPublicInputs<F, C, D>, Duration)> {
+        let t = Instant::now();
+        let bytes = self
+            .store
+            .download(key)
+            .map_err(|e| anyhow::anyhow!("transit GET of '{key}' failed: {e}"))?;
+        let dt = t.elapsed();
+        let proof: ProofWithPublicInputs<F, C, D> = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("deserialize merge output '{key}': {e}"))?;
+        Ok((proof, dt))
+    }
+
+    fn run_level(
+        &self,
+        tasks: &[bench::conductor::fold::LevelTask],
+        _merge_fn: &bench::conductor::MergeFn<ProofWithPublicInputs<F, C, D>>,
+    ) -> anyhow::Result<Vec<bench::conductor::fold::TaskResult>> {
+        use bench::conductor::MergeTaskMessage;
+        if tasks.is_empty() {
+            return Ok(Vec::new());
+        }
+        // DISPATCH: publish one merge task per pair to the merge-task plane.
+        // Idle fold workers competing-pull these (one proof per worker, full
+        // cores). The leader does NOT prove here.
+        for task in tasks {
+            let msg = MergeTaskMessage {
+                height: task.height,
+                level: task.level,
+                index: task.index,
+                left_key: task.left_key.clone(),
+                right_key: task.right_key.clone(),
+                left_is_merge: task.left_is_merge,
+                right_is_merge: task.right_is_merge,
+            };
+            self.bus
+                .publish_merge_task(&msg)
+                .map_err(|e| anyhow::anyhow!("publish merge task #{} failed: {e}", task.index))?;
+        }
+        info!(
+            "coordinator(leader): released {} merge tasks at level {} to the merge-task plane; \
+             awaiting results (issue #198 M2 barrier)",
+            tasks.len(),
+            tasks[0].level,
+        );
+
+        // BARRIER: poll the merge-result subscription until every task index in
+        // THIS level has reported an OK result, the deadline hits, or a worker
+        // reports an honest failure. Level n+1 is only released by the caller
+        // after this returns (the leader-released level barrier).
+        let mut got: std::collections::HashMap<u64, bench::conductor::fold::TaskResult> =
+            std::collections::HashMap::new();
+        let want: std::collections::HashSet<u64> = tasks.iter().map(|t| t.index).collect();
+        let level = tasks[0].level;
+        let deadline = Instant::now() + self.level_deadline;
+        while got.len() < want.len() && Instant::now() < deadline {
+            let results = match self.bus.pull_merge_results(want.len() as u32) {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("coordinator(leader): pull_merge_results error: {e}");
+                    std::thread::sleep(Duration::from_secs(self.poll_interval_s));
+                    continue;
+                }
+            };
+            if results.is_empty() {
+                std::thread::sleep(Duration::from_secs(self.poll_interval_s));
+                continue;
+            }
+            for r in results {
+                // Ignore stragglers from other heights/levels.
+                if r.height != tasks[0].height || r.level != level {
+                    continue;
+                }
+                if !want.contains(&r.index) {
+                    continue;
+                }
+                if !r.ok {
+                    anyhow::bail!(
+                        "coordinator(leader): fold worker reported HONEST FAILURE for merge \
+                         task height={} level={} index={} (cell={}); refusing to fold a partial \
+                         tree (issue #179/#198 — no fabricated proof)",
+                        r.height, r.level, r.index, r.cell,
+                    );
+                }
+                let output_key = match r.proof_object {
+                    Some(k) => k,
+                    None => anyhow::bail!(
+                        "coordinator(leader): merge result height={} level={} index={} ok=true \
+                         but carries no proof_object; cannot transit its output",
+                        r.height, r.level, r.index,
+                    ),
+                };
+                got.entry(r.index).or_insert(bench::conductor::fold::TaskResult {
+                    index: r.index,
+                    output_key,
+                    prove_ms: r.prove_ms.unwrap_or(0),
+                });
+            }
+        }
+        if got.len() < want.len() {
+            anyhow::bail!(
+                "coordinator(leader): level {level} barrier TIMED OUT — got {}/{} merge results \
+                 (honest-partial — a fold worker was lost; refusing to fabricate)",
+                got.len(),
+                want.len(),
+            );
+        }
+        Ok(got.into_values().collect())
+    }
+}
+
+/// Issue #198: bridge the shared library distributed fold
+/// ([`bench::conductor::fold_distributed`]) into the binary's
+/// [`CoordinatorFold`] outcome shape, so [`coordinator_real_fold`]'s L4 step is
+/// identical regardless of topology. Builds the leader transport over the real
+/// proof store + merge-task plane, supplies the SHARED `prove_merge_pair` as
+/// the single merge implementation, runs the fold, and emits the first-class
+/// (measured, NOT gated) per-level barrier/straggler/transit instrumentation.
+fn coordinator_distributed_fold(
+    real: &CoordinatorRealFold,
+    proof_store: &bench::conductor::GcloudStorage,
+    bus: &bench::conductor::GcloudPubSub,
+    height: u64,
+    leaves: Vec<ProofWithPublicInputs<F, C, D>>,
+    leaf_keys: &[String],
+) -> anyhow::Result<CoordinatorFold> {
+    // Validate the merge-task plane is configured before we start (honest
+    // up-front failure rather than a mid-fold timeout).
+    if bus.config().merge_task_topic.is_empty() || bus.config().merge_result_subscription.is_empty()
+    {
+        anyhow::bail!(
+            "distributed fold requires --merge-task-topic and --merge-result-subscription \
+             (the merge-task plane); none configured"
+        );
+    }
+
+    // The SINGLE merge implementation: the SHARED `prove_merge_pair`. The
+    // leader transport ignores this (workers prove out-of-process), but we
+    // still pass the real one so there is never a second merge impl and so the
+    // same closure type drives both the in-memory (hermetic) and live paths.
+    let merge_target = &real.merge_target;
+    let merge_data = &real.merge_data;
+    let merge_fn = move |left: &ProofWithPublicInputs<F, C, D>,
+                         left_is_merge: bool,
+                         right: &ProofWithPublicInputs<F, C, D>,
+                         right_is_merge: bool|
+          -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
+        let (proof, _is_merge) = prove_merge_pair(
+            merge_target,
+            merge_data,
+            &(left.clone(), left_is_merge),
+            &(right.clone(), right_is_merge),
+        )?;
+        Ok(proof)
+    };
+
+    let transport = GcloudFoldTransport {
+        store: proof_store,
+        bus,
+        poll_interval_s: 2,
+        level_deadline: Duration::from_secs(900),
+    };
+
+    let outcome = bench::conductor::fold_distributed(
+        height,
+        leaves,
+        leaf_keys.to_vec(),
+        &transport,
+        &merge_fn,
+    )?;
+
+    // Emit the FIRST-CLASS instrumentation (issue #198; measured, never gated).
+    for m in &outcome.level_metrics {
+        info!(
+            "BENCH_METRIC fold_barrier height={height} level={} tasks={} odd_carry={} \
+             barrier_ms={} slowest_prove_ms={} median_prove_ms={} straggler_ms={} (issue #198)",
+            m.level, m.tasks, m.odd_carry, m.barrier_ms, m.slowest_prove_ms,
+            m.median_prove_ms, m.straggler_ms,
+        );
+    }
+    info!(
+        "BENCH_METRIC fold_transit height={height} transit_total_ms={} \
+         max_intermediate_bytes={} depth={} merges={} (issue #198; ~412 KB constant expected)",
+        outcome.transit_total.as_millis(),
+        outcome.max_intermediate_bytes,
+        outcome.depth,
+        outcome.merges,
+    );
+
+    Ok(CoordinatorFold {
+        final_proof: outcome.final_proof,
+        final_is_merge: outcome.final_is_merge,
+        depth: outcome.depth,
+        merges: outcome.merges,
+        merge_prove_total: outcome.merge_prove_total,
+    })
+}
+
+/// Issue #198: the FOLD WORKER pod (`bench --mode fold-worker`). An independent
+/// coordinator-class machine that shards a single block's merge tree: it
+/// competing-pulls merge tasks from the merge-task plane, downloads the two
+/// input proofs from the proof store, proves ONE merge at a time on its FULL
+/// core budget with the SHARED `prove_merge_pair` (no in-process thread
+/// rationing — the deprecated thread-cap is NOT used here), uploads the merged
+/// proof to the proof store under `{height}/m/{level}/{index}`, and publishes a
+/// merge result. Scale the fold by running MORE of these workers, not bigger
+/// boxes (the governing principle).
+///
+/// Honest-failure: a missing input, a failed download/deserialize, a failed
+/// merge, or a failed upload publishes `ok=false` / `proof_object=None`. No
+/// proof is ever fabricated; the leader marks the block partial.
+fn run_fold_worker(args: &Args) {
+    use bench::conductor::{GcloudPubSub, GcloudStorage, MergeResultMessage, StorageConfig};
+
+    let mut cfg = resolve_pubsub_config(args);
+    if cfg.merge_task_subscription.is_empty() {
+        eprintln!(
+            "error: --mode fold-worker requires --merge-task-subscription (or \
+             LIGHTER_MERGE_TASK_SUBSCRIPTION)"
+        );
+        std::process::exit(2);
+    }
+    if cfg.merge_result_topic.is_empty() {
+        eprintln!(
+            "error: --mode fold-worker requires --merge-result-topic (or \
+             LIGHTER_MERGE_RESULT_TOPIC)"
+        );
+        std::process::exit(2);
+    }
+    // Workers don't need the block/chunk planes.
+    cfg.dispatch_subscription.clear();
+    cfg.chunk_subscription.clear();
+    let bus = GcloudPubSub::new(cfg);
+
+    let proof_store = GcloudStorage::new(StorageConfig {
+        bucket: args.proof_bucket.clone(),
+        gcloud_bin: args.gcloud_bin.clone(),
+    });
+    if !proof_store.config().enabled() {
+        eprintln!("error: --mode fold-worker requires --proof-bucket (the proof-store transit)");
+        std::process::exit(2);
+    }
+
+    let worker_id = read_hostname();
+    info!(
+        "fold-worker: starting (id={}) merge_task_sub={} merge_result_topic={} bucket={} \
+         max_units={} (issue #198 — one proof per worker on full cores)",
+        worker_id,
+        bus.config().merge_task_subscription,
+        bus.config().merge_result_topic,
+        proof_store.config().bucket,
+        args.max_units,
+    );
+
+    // Build the REAL merge circuit ONCE (resident) — the SAME shape the
+    // coordinator/cells build (the cyclic fixed point), so its VK matches.
+    let real = CoordinatorRealFold::build(args);
+
+    let mut merges_done: u64 = 0;
+    loop {
+        if args.max_units != 0 && merges_done >= args.max_units {
+            info!("fold-worker: reached max_units={}, exiting", args.max_units);
+            break;
+        }
+        let tasks = match bus.pull_merge_tasks(1) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!("fold-worker: pull_merge_tasks error: {e}");
+                std::thread::sleep(Duration::from_secs(args.poll_interval_s));
+                continue;
+            }
+        };
+        let task = match tasks.into_iter().next() {
+            Some(t) => t,
+            None => {
+                std::thread::sleep(Duration::from_secs(args.poll_interval_s));
+                continue;
+            }
+        };
+
+        info!(
+            "fold-worker: claimed merge task height={} level={} index={} (left={} right={})",
+            task.height, task.level, task.index, task.left_key, task.right_key
+        );
+
+        let result = fold_worker_prove_one(&real, &proof_store, &task);
+        let msg = match result {
+            Ok((output_key, prove_ms)) => {
+                info!(
+                    "fold-worker: merge height={} level={} index={} PROVEN in {} ms -> {} \
+                     (issue #198)",
+                    task.height, task.level, task.index, prove_ms, output_key
+                );
+                MergeResultMessage {
+                    height: task.height,
+                    level: task.level,
+                    index: task.index,
+                    ok: true,
+                    cell: worker_id.clone(),
+                    proof_object: Some(output_key),
+                    prove_ms: Some(prove_ms),
+                }
+            }
+            Err(e) => {
+                log::error!(
+                    "fold-worker: merge height={} level={} index={} FAILED honestly: {e}",
+                    task.height, task.level, task.index
+                );
+                MergeResultMessage {
+                    height: task.height,
+                    level: task.level,
+                    index: task.index,
+                    ok: false,
+                    cell: worker_id.clone(),
+                    proof_object: None,
+                    prove_ms: None,
+                }
+            }
+        };
+        if let Err(e) = bus.publish_merge_result(&msg) {
+            log::error!("fold-worker: publish_merge_result failed: {e}");
+        }
+        merges_done += 1;
+    }
+    info!("fold-worker: done, {} merges proven", merges_done);
+}
+
+/// Issue #198: prove ONE merge task on this worker — download the two inputs,
+/// run the SHARED `prove_merge_pair` on full cores, upload the output under its
+/// `{height}/m/{level}/{index}` key, and return `(output_key, prove_ms)`.
+/// Honest-failure: any step's error propagates (no fabricated proof).
+fn fold_worker_prove_one(
+    real: &CoordinatorRealFold,
+    proof_store: &bench::conductor::GcloudStorage,
+    task: &bench::conductor::MergeTaskMessage,
+) -> anyhow::Result<(String, u64)> {
+    use bench::conductor::merge_object_key;
+
+    // DOWNLOAD the two inputs by key (transit GET). The merge circuit needs the
+    // inputs' is_merge VK flags; the leader put them in the task message (the
+    // authoritative source, mirroring the in-process `TreeNode`'s is_merge bit)
+    // so the worker never GUESSES from the key shape.
+    let fetch = |key: &str| -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
+        let bytes = proof_store
+            .download(key)
+            .map_err(|e| anyhow::anyhow!("download merge input '{key}' failed: {e}"))?;
+        let proof: ProofWithPublicInputs<F, C, D> = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("deserialize merge input '{key}' failed: {e}"))?;
+        Ok(proof)
+    };
+    let left = fetch(&task.left_key)?;
+    let right = fetch(&task.right_key)?;
+
+    // PROVE the merge with the SHARED single-source helper (full cores).
+    let t = Instant::now();
+    let (proof, _is_merge) = prove_merge_pair(
+        &real.merge_target,
+        &real.merge_data,
+        &(left, task.left_is_merge),
+        &(right, task.right_is_merge),
+    )
+    .map_err(|e| anyhow::anyhow!("merge prove failed: {e}"))?;
+    let prove_ms = t.elapsed().as_millis() as u64;
+
+    // UPLOAD the output under the merge-transit key (so the next level's task
+    // can read it from any other coordinator).
+    let output_key = merge_object_key(task.height, task.level, task.index);
+    let bytes = serde_json::to_vec(&proof)
+        .map_err(|e| anyhow::anyhow!("serialize merge output: {e}"))?;
+    proof_store
+        .upload(&output_key, &bytes)
+        .map_err(|e| anyhow::anyhow!("upload merge output '{output_key}' failed: {e}"))?;
+
+    Ok((output_key, prove_ms))
 }
 
 /// Issue #179 (single source of truth for the L4 block proof): patch the

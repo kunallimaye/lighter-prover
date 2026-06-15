@@ -206,6 +206,48 @@ fabricated, no cluster was burned pretending, and no VMs were left running
 (none were created). The single-box numbers above (PR #196) remain the only
 measured fold data; the cluster claim awaits #198.
 
+### Update (issue #198, M1 + M2 — capability landed)
+
+The **capability** is now implemented (M1 + M2): a single block's merge tree
+folds across separate coordinator workers.
+
+- The fold loop is refactored into a **task emitter** behind a
+  `FoldTopology::{InProcess, Distributed}` flag (`--fold-distributed`). The
+  `InProcess` path is byte-for-byte the prior single-box fold (zero
+  regression); `Distributed` is additive.
+- A **merge-task plane** (`MergeTaskMessage` / `MergeResultMessage` over
+  Pub/Sub, mirroring the chunk planes) carries pending merges; a new
+  `bench --mode fold-worker` pod competing-pulls them and proves ONE merge on
+  its FULL core budget (the deprecated per-merge thread-cap is NOT used).
+- **Intermediate-proof transit** uploads every merge output to the proof
+  store under the new non-colliding key `{height}/m/{level}/{index}`
+  (`merge_object_key`), so a merge proven on coordinator A is read by
+  coordinator B at the next level.
+- The leader **barriers** each level (level n+1 releases only once every
+  level-n result lands) and **re-sorts** results by stable in-level index, so
+  the final proof is **bit-identical** to the in-process fold (the #193
+  contract, generalized).
+
+**Verified (hermetic, real plonky2 proofs):** the `distributed_fold_e2e`
+gate folds the SAME fixed leaf batch through the distributed task-emitter +
+proof-store transit path and asserts the final proof **VERIFIES** and is
+**bit-identical** to the in-process fold — across worker counts 1/2/3/4, for
+**k=4 (depth 2, 3 merges)** and **k=8 (depth 3, 7 merges)**.
+
+**Confirmed pilot facts:** the intermediate merge-proof size held
+**constant at ~422 KB at every level up to depth 3** (k=8), matching the
+~412 KB recursive-proof constant — coordinator↔coordinator payload does not
+grow up the tree.
+
+**Still pending (M3, deferred follow-up):** the **live multi-VM
+1-vs-2-vs-3-coordinator fold-wall matrix** (the actual cloud measurement
+#197 needs). The capability + correctness ship here hermetically; the
+cloud-cluster wall-clock numbers are gathered later (the merge-task-plane
+Terraform resources are provisioned but gated `enable_merge_plane = false`).
+Per #198, performance is **instrumented, not gated** — per-level barrier /
+straggler / transit metrics are emitted (`BENCH_METRIC fold_barrier` /
+`fold_transit`) to learn and tune, never to block delivery.
+
 ## Reproduce the measurement
 
 ```sh
