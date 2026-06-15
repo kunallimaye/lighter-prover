@@ -1718,7 +1718,8 @@ fn run_cell(args: &Args) {
                         "cell: L1 prove FAILED for height={} witness_index={}: {:?}",
                         chunk.height, chunk.witness_index, err
                     );
-                    // Honest failure report — no fabricated proof.
+                    // Honest failure report — no fabricated proof, no proof
+                    // object (issue #179: None on honest failure).
                     let _ = bus.publish_result(&ChunkResultMessage {
                         height: chunk.height,
                         witness_index: chunk.witness_index,
@@ -1726,6 +1727,7 @@ fn run_cell(args: &Args) {
                         witness_fetch_ms,
                         ok: false,
                         cell: cell_id.clone(),
+                        proof_object: None,
                     });
                     continue;
                 }
@@ -1785,6 +1787,8 @@ fn run_cell(args: &Args) {
             });
 
             // Report the result back to the coordinator over the results topic.
+            // proof_object stays None for now: cell upload of L2 leaf proof
+            // bytes to the shared proof store is a LATER slice of issue #179.
             if let Err(e) = bus.publish_result(&ChunkResultMessage {
                 height: chunk.height,
                 witness_index: chunk.witness_index,
@@ -1792,6 +1796,7 @@ fn run_cell(args: &Args) {
                 witness_fetch_ms,
                 ok,
                 cell: cell_id.clone(),
+                proof_object: None,
             }) {
                 log::warn!("cell: publish_result failed: {e}");
             }

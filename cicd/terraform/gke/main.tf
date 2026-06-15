@@ -29,6 +29,12 @@ locals {
 
   # Which deployment the backlog HPA targets.
   hpa_target_deployment = var.hpa_target_class == "coordinator" ? "coordinator" : "cells"
+
+  proof_store_on = var.enable_proof_store ? 1 : 0
+
+  # Resolved proof-store bucket name: an explicit override, else a
+  # deterministic project-derived name (bucket names are globally unique).
+  proof_store_bucket_name = var.proof_store_bucket != "" ? var.proof_store_bucket : "${var.project_id}-lighter-prover-proofs"
 }
 
 # ─── 1. GKE Autopilot cluster ────────────────────────────────────────
@@ -134,6 +140,48 @@ resource "google_pubsub_subscription" "results" {
   labels  = var.resource_labels
 
   ack_deadline_seconds = 60
+}
+
+# ─── 2d. Shared proof store: the L2-leaf-proof bucket (issue #179) ────
+# The fan-IN half of the distributed prover (issue #179) needs proof BYTES
+# to cross from cells to the coordinator. Pub/Sub message-size limits make
+# inline L2 proofs impractical, so cells write each L2 leaf proof to this
+# shared GCS bucket keyed by {height, witness_index}; ChunkResultMessage
+# carries the object key. The coordinator (a LATER slice of #179) fetches
+# the k proofs from here and runs the real merge tree + L4.
+#
+# Gated behind enable_proof_store so the default smoke topology is unchanged.
+# Uniform bucket-level access (IAM only — no legacy ACLs) and versioning
+# off (proofs are write-once, keyed; re-prove overwrites idempotently).
+
+resource "google_storage_bucket" "proof_store" {
+  count = local.proof_store_on
+
+  name     = local.proof_store_bucket_name
+  project  = var.project_id
+  location = var.proof_store_location
+  labels   = var.resource_labels
+
+  # IAM-only access; no object ACLs (the pod GSA is granted objectAdmin via
+  # the bucket-scoped IAM member below — least privilege, bucket not project).
+  uniform_bucket_level_access = true
+
+  # Smoke/scale validation buckets must be destroyable even with proofs in
+  # them (parametrised — set false to retain proofs).
+  force_destroy = var.proof_store_force_destroy
+}
+
+# Grant the EXISTING pod GSA objectAdmin on the proof-store bucket ONLY.
+# Bucket-scoped (google_storage_bucket_iam_member), NOT a project-wide
+# google_project_iam_member — least privilege per issue #179 WS1. The SA
+# already exists (created out-of-band with the pubsub roles); we do NOT
+# create it here, we only add this one bucket binding.
+resource "google_storage_bucket_iam_member" "proof_store_pod_object_admin" {
+  count = local.proof_store_on
+
+  bucket = google_storage_bucket.proof_store[0].name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${var.proof_store_pod_gsa_email}"
 }
 
 # ─── 3. Workload Identity for the metrics adapter ────────────────────
