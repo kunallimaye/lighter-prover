@@ -112,6 +112,20 @@ struct Args {
     #[arg(long, env = "LIGHTER_GCLOUD_BIN", default_value = "gcloud")]
     gcloud_bin: String,
 
+    /// Proof-store bucket NAME (no `gs://` prefix) the cell uploads its REAL
+    /// L2 leaf proof bytes to, keyed by `{height}/{witness_index}` (issue
+    /// #179, the fan-IN half of the distributed prover). On a successful
+    /// upload the cell sets `ChunkResultMessage.proof_object` to that key so
+    /// the coordinator can later fetch + fold the bytes.
+    ///
+    /// OPT-IN / OFF BY DEFAULT: when empty (the default), the cell behaves
+    /// EXACTLY as before — it proves, sets `proof_object: None`, and
+    /// publishes — so existing benchmark runs are byte-for-byte unchanged.
+    /// For `kunal-scratch` the provisioned bucket (terraform, slice 1) is
+    /// `kunal-scratch-lighter-prover-proofs`.
+    #[arg(long, env = "LIGHTER_PROOF_BUCKET", default_value = "")]
+    proof_bucket: String,
+
     /// Distributed modes: how many blocks the coordinator proves before
     /// exiting, OR how many chunks the cell proves before exiting. `0` =
     /// run forever (until SIGINT/SIGTERM). Bounded values make a single
@@ -1473,7 +1487,8 @@ fn run_cell(args: &Args) {
     use std::time::Instant;
 
     use bench::conductor::{
-        ChunkResultMessage, GcloudPubSub, MountedCorpus, WitnessKey, WitnessResolver,
+        proof_object_key, ChunkResultMessage, GcloudPubSub, GcloudStorage, MountedCorpus,
+        StorageConfig, WitnessKey, WitnessResolver,
     };
 
     let mut cfg = resolve_pubsub_config(args);
@@ -1490,6 +1505,16 @@ fn run_cell(args: &Args) {
     let bus = GcloudPubSub::new(cfg);
     let cell_id = read_hostname();
 
+    // Proof store (issue #179, WS3). OPT-IN: only when --proof-bucket /
+    // LIGHTER_PROOF_BUCKET is set does the cell ship its REAL L2 leaf proof
+    // bytes to the shared store and reference them on `proof_object`. With no
+    // bucket the cell behaves EXACTLY as before (prove, proof_object: None,
+    // publish) — so existing benchmark runs are unchanged.
+    let proof_store = GcloudStorage::new(StorageConfig {
+        bucket: args.proof_bucket.clone(),
+        gcloud_bin: args.gcloud_bin.clone(),
+    });
+
     info!(
         "cell: starting (id={}) chunk_sub={} results_topic={} max_units={}",
         cell_id,
@@ -1497,6 +1522,18 @@ fn run_cell(args: &Args) {
         bus.config().results_topic,
         args.max_units,
     );
+    if proof_store.config().enabled() {
+        info!(
+            "cell: proof store ENABLED -- uploading L2 leaf proofs to gs://{} keyed by \
+             {{height}}/{{witness_index}} (issue #179 WS3)",
+            proof_store.config().bucket,
+        );
+    } else {
+        info!(
+            "cell: proof store DISABLED (no --proof-bucket) -- proof_object stays None; \
+             behavior identical to pre-#179 (issue #179 WS3 is opt-in/off-by-default)"
+        );
+    }
 
     // ---- Build the witness corpus (k=1 mounted, from bench_test.json) ----
     //
@@ -1767,6 +1804,59 @@ fn run_cell(args: &Args) {
                 );
             }
 
+            // ── Ship the REAL L2 leaf proof bytes to the proof store ──
+            // (issue #179 WS3). Only when (a) the proof succeeded AND (b) a
+            // bucket is configured. The proof is serialized with the SAME
+            // `serde_json::to_string` on `ProofWithPublicInputs` the
+            // single-process gnark-bridge export uses (`export_outer_wrapper_json`,
+            // issue #117) — NOT a new format — so the coordinator slice can
+            // deserialize these exact bytes with `serde_json::from_str` later.
+            //
+            // Honest-failure rule: if the proof succeeded but the
+            // serialize/upload fails, we log the error LOUDLY and leave
+            // `proof_object: None`. We never fabricate a stored-bytes claim,
+            // and `ok` continues to reflect the PROVE result (the proof did
+            // happen) — the missing `proof_object` is the truthful signal to
+            // the coordinator that these bytes are not available to fold.
+            let proof_object: Option<String> = match (&chain_ok, proof_store.config().enabled()) {
+                (Ok(leaf_proof), true) => {
+                    let key = proof_object_key(chunk.height, chunk.witness_index);
+                    match serde_json::to_vec(leaf_proof) {
+                        Ok(bytes) => match proof_store.upload(&key, &bytes) {
+                            Ok(stored_key) => {
+                                info!(
+                                    "cell: uploaded L2 leaf proof ({} bytes) to gs://{}/{} \
+                                     (issue #179 WS3)",
+                                    bytes.len(),
+                                    proof_store.config().bucket,
+                                    stored_key,
+                                );
+                                Some(stored_key)
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "cell: proof-store UPLOAD FAILED for height={} \
+                                     witness_index={}: {e}; proof_object stays None (honest \
+                                     failure — bytes are NOT available for the coordinator fold)",
+                                    chunk.height, chunk.witness_index,
+                                );
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            log::error!(
+                                "cell: L2 leaf proof SERIALIZE FAILED for height={} \
+                                 witness_index={}: {e}; proof_object stays None (honest failure)",
+                                chunk.height, chunk.witness_index,
+                            );
+                            None
+                        }
+                    }
+                }
+                // Proof failed, or upload disabled: nothing to reference.
+                _ => None,
+            };
+
             // Emit the chunk_proven BENCH_EVENT with REAL timings (ADR-0008
             // §2.2 — witness_fetch_ms on the primary ChunkProven site).
             events::emit(&BenchEvent::ChunkProven {
@@ -1786,9 +1876,12 @@ fn run_cell(args: &Args) {
                 witness_fetch_ms,
             });
 
-            // Report the result back to the coordinator over the results topic.
-            // proof_object stays None for now: cell upload of L2 leaf proof
-            // bytes to the shared proof store is a LATER slice of issue #179.
+            // Report the result back to the coordinator over the results
+            // topic. `proof_object` is `Some(<height>/<witness_index>)` ONLY
+            // when a real L2 leaf proof was produced AND its bytes were
+            // successfully uploaded to the proof store (issue #179 WS3);
+            // otherwise it is `None` (off-by-default, or honest upload
+            // failure). The coordinator fold slice keys off this reference.
             if let Err(e) = bus.publish_result(&ChunkResultMessage {
                 height: chunk.height,
                 witness_index: chunk.witness_index,
@@ -1796,7 +1889,7 @@ fn run_cell(args: &Args) {
                 witness_fetch_ms,
                 ok,
                 cell: cell_id.clone(),
-                proof_object: None,
+                proof_object,
             }) {
                 log::warn!("cell: publish_result failed: {e}");
             }

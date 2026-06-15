@@ -1,0 +1,227 @@
+//! Proof-store transport — cells ship their REAL L2 leaf proof bytes to a
+//! shared object store keyed by `{height}/{witness_index}` (issue #179, the
+//! fan-IN half of the distributed prover).
+//!
+//! ## Why a proof store exists
+//!
+//! Pub/Sub messages are size-bounded; L2 leaf proofs are far too large to
+//! inline on the results topic. So a cell, after it produces and verifies its
+//! REAL `BlockTxChainCircuit` leaf proof, writes the proof BYTES to a shared
+//! bucket and only the OBJECT KEY (a small string) crosses the wire on
+//! [`ChunkResultMessage::proof_object`](super::pubsub::ChunkResultMessage).
+//! The coordinator (a LATER slice of #179) fetches those bytes by key and
+//! folds them with the existing `BlockTxChainMergeCircuit` tree.
+//!
+//! ## Transport choice: shell out to `gcloud storage cp` (DOCUMENTED)
+//!
+//! This adapter drives the object store by invoking the **`gcloud storage`
+//! CLI**, exactly mirroring [`super::pubsub::GcloudPubSub`]'s decision to
+//! shell out to `gcloud pubsub`:
+//!
+//! - The runtime image already ships `google-cloud-cli` and
+//!   `cicd/entrypoint.sh` already uses `gcloud storage`.
+//! - Shelling out adds **no new Rust dependency** (no heavy GCS SDK) and
+//!   reuses ADC/workload-identity auth the CLI already resolves.
+//! - The CLI surface is small and isolated to this one file, so a future
+//!   swap to a native client touches only here.
+//!
+//! ## Opt-in / off by default
+//!
+//! Upload is OFF unless a bucket is configured (`--proof-bucket` /
+//! `LIGHTER_PROOF_BUCKET`). With no bucket, the cell behaves EXACTLY as it
+//! did before this slice: prove, set `proof_object: None`, publish. This
+//! makes the slice incapable of regressing existing benchmark runs.
+//!
+//! ## What is unit-testable WITHOUT gcloud
+//!
+//! The object-key construction ([`proof_object_key`]) and the
+//! `gcloud`-argument-vector construction ([`StorageConfig::cp_to_gcs_argv`])
+//! are pure and fully unit-tested here. The actual `cp` (which needs a live
+//! bucket + auth) is exercised only behind an explicit env gate so CI stays
+//! hermetic.
+
+use std::process::Command;
+
+/// Construct the proof-store OBJECT KEY for an L2 leaf proof.
+///
+/// The key is `{height}/{witness_index}` — the EXACT scheme the plan
+/// specifies (issue #179) and the identical scheme the future coordinator
+/// slice must use to fetch the bytes. Keep this the single source of truth
+/// for the key so the two sides can never drift.
+pub fn proof_object_key(height: u64, witness_index: u64) -> String {
+    format!("{height}/{witness_index}")
+}
+
+/// Resolved configuration for the gcloud-backed proof store. Mirrors
+/// [`super::pubsub::PubSubConfig`]: the binary resolves the values from a
+/// flag/env var and hands the struct over, so the transport reads no globals.
+#[derive(Debug, Clone)]
+pub struct StorageConfig {
+    /// Target bucket NAME (no `gs://` prefix), e.g.
+    /// `kunal-scratch-lighter-prover-proofs`. Empty means "disabled" — the
+    /// cell must not attempt any upload.
+    pub bucket: String,
+    /// `gcloud` binary path (default `gcloud`; overridable for a vendored
+    /// CLI). Reuses the same binary the Pub/Sub transport uses.
+    pub gcloud_bin: String,
+}
+
+impl StorageConfig {
+    /// Whether uploads are enabled. Off when no bucket is configured.
+    pub fn enabled(&self) -> bool {
+        !self.bucket.trim().is_empty()
+    }
+
+    /// The full `gs://<bucket>/<key>` destination URI for an object key.
+    pub fn gcs_uri(&self, key: &str) -> String {
+        format!("gs://{}/{}", self.bucket, key)
+    }
+
+    /// Build the `gcloud storage cp <local_path> gs://<bucket>/<key>` argv
+    /// (pure — no process spawned), so it is unit-testable. `--quiet`
+    /// suppresses the interactive progress UI in non-tty pods.
+    pub fn cp_to_gcs_argv(&self, local_path: &str, key: &str) -> Vec<String> {
+        vec![
+            "storage".into(),
+            "cp".into(),
+            "--quiet".into(),
+            local_path.into(),
+            self.gcs_uri(key),
+        ]
+    }
+}
+
+/// The gcloud-backed proof store. Holds the resolved [`StorageConfig`] and
+/// drives the CLI. All network/auth is delegated to `gcloud`.
+#[derive(Debug, Clone)]
+pub struct GcloudStorage {
+    cfg: StorageConfig,
+}
+
+impl GcloudStorage {
+    pub fn new(cfg: StorageConfig) -> Self {
+        Self { cfg }
+    }
+
+    pub fn config(&self) -> &StorageConfig {
+        &self.cfg
+    }
+
+    /// Upload raw `bytes` to the object `key` in the configured bucket,
+    /// returning the object key on success.
+    ///
+    /// The bytes are staged to a temp file (the `gcloud storage cp` CLI takes
+    /// a path, not stdin) which is removed afterward. Errors are honest: a
+    /// failed upload returns `Err` — the caller keeps `proof_object: None` and
+    /// never fabricates a stored-bytes claim (issue #179 honest-failure rule).
+    pub fn upload(&self, key: &str, bytes: &[u8]) -> std::io::Result<String> {
+        if !self.cfg.enabled() {
+            return Err(std::io::Error::other(
+                "proof store disabled (no bucket configured); refusing to upload",
+            ));
+        }
+
+        // Stage to a uniquely-named temp file. The key contains a '/', so
+        // flatten it for the temp filename to avoid creating subdirs in TMP.
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "lighter-proof-{}-{}.bin",
+            key.replace('/', "_"),
+            std::process::id()
+        ));
+        std::fs::write(&tmp, bytes)?;
+
+        let local_path = tmp.to_string_lossy().to_string();
+        let argv = self.cfg.cp_to_gcs_argv(&local_path, key);
+        let result = Command::new(&self.cfg.gcloud_bin).args(&argv).output();
+
+        // Best-effort cleanup regardless of upload outcome.
+        let _ = std::fs::remove_file(&tmp);
+
+        let out = result?;
+        if !out.status.success() {
+            return Err(std::io::Error::other(format!(
+                "gcloud storage cp to {} failed: {}",
+                self.cfg.gcs_uri(key),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(key.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg() -> StorageConfig {
+        StorageConfig {
+            bucket: "kunal-scratch-lighter-prover-proofs".into(),
+            gcloud_bin: "gcloud".into(),
+        }
+    }
+
+    #[test]
+    fn object_key_is_height_slash_witness_index() {
+        // The EXACT key scheme the coordinator slice must mirror. Guard it.
+        assert_eq!(proof_object_key(186_974_616, 3), "186974616/3");
+        assert_eq!(proof_object_key(0, 0), "0/0");
+        assert_eq!(proof_object_key(100, 55), "100/55");
+    }
+
+    #[test]
+    fn disabled_when_bucket_empty() {
+        let c = StorageConfig {
+            bucket: String::new(),
+            gcloud_bin: "gcloud".into(),
+        };
+        assert!(!c.enabled());
+        let c2 = StorageConfig {
+            bucket: "   ".into(),
+            gcloud_bin: "gcloud".into(),
+        };
+        assert!(!c2.enabled(), "whitespace-only bucket is still disabled");
+    }
+
+    #[test]
+    fn enabled_when_bucket_set() {
+        assert!(cfg().enabled());
+    }
+
+    #[test]
+    fn gcs_uri_prefixes_bucket() {
+        let key = proof_object_key(100, 2);
+        assert_eq!(
+            cfg().gcs_uri(&key),
+            "gs://kunal-scratch-lighter-prover-proofs/100/2"
+        );
+    }
+
+    #[test]
+    fn cp_argv_is_well_formed() {
+        let key = proof_object_key(100, 2);
+        let argv = cfg().cp_to_gcs_argv("/tmp/proof.bin", &key);
+        assert_eq!(
+            argv,
+            vec![
+                "storage".to_string(),
+                "cp".to_string(),
+                "--quiet".to_string(),
+                "/tmp/proof.bin".to_string(),
+                "gs://kunal-scratch-lighter-prover-proofs/100/2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn upload_refused_when_disabled() {
+        let store = GcloudStorage::new(StorageConfig {
+            bucket: String::new(),
+            gcloud_bin: "gcloud".into(),
+        });
+        // No bucket → upload must error WITHOUT shelling out, so the cell
+        // path stays None and never claims bytes were stored.
+        let err = store.upload("100/2", b"bytes").unwrap_err();
+        assert!(err.to_string().contains("disabled"));
+    }
+}

@@ -64,6 +64,7 @@
 pub mod dispatch;
 pub mod pubsub;
 pub mod queue;
+pub mod storage;
 pub mod witness;
 
 pub use dispatch::{Coordinator, CoordinatorPool, InnerDispatchOutcome};
@@ -71,4 +72,5 @@ pub use pubsub::{
     BlockMessage, ChunkMessage, ChunkResultMessage, GcloudPubSub, PubSubConfig, PulledMessage,
 };
 pub use queue::{BlockJob, BlockQueue, LocalBlockQueue};
+pub use storage::{proof_object_key, GcloudStorage, StorageConfig};
 pub use witness::{MountedCorpus, ResolvedWitness, WitnessKey, WitnessResolver, WitnessSlice};
