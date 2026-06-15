@@ -69,6 +69,9 @@ local-fanout: ## N concurrent local bench processes; aggregate via orchestrator 
 local-lint: ## cargo fmt --check + cargo clippy on bench
 	@bash scripts/local.sh lint
 
+e2e: ## LOCAL end-to-end distributed-fold gate (#179): real multi-chunk L1→L2→fold→L4, verifies + measured walls. EXPENSIVE, opt-in.
+	@bash scripts/local.sh e2e
+
 # ─── Container (Podman) ──────────────────────────────────────────────
 # Issue #2 acceptance criteria use the names: local-build / local-test /
 # local-bench / local-fanout. Per the makefile-ops scaffold convention,

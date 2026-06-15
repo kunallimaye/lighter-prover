@@ -2017,11 +2017,15 @@ struct CoordinatorFoldOutcome {
     leaves: usize,
     depth: usize,
     merges: usize,
-    /// Measured merge-tree wall-time (ms). WS6 handoff: route into BENCH_EVENT
-    /// and replace the model constant `merge_s`.
+    /// Measured merge-tree wall-time (ms). Routed into the BENCH_EVENT stream
+    /// as `CoordinatorFold.merge_ms` (labeled `merge_source: "measured"`) by
+    /// `run_coordinator` (issue #179 WS6) — the genuine distributed merge wall,
+    /// NOT the single-machine model constant `merge_s`.
     merge_ms: u64,
-    /// Measured L4 wall-time (ms). WS6 handoff: route into BENCH_EVENT and
-    /// replace the model constant `l4_s`.
+    /// Measured L4 wall-time (ms). Routed into the BENCH_EVENT stream as
+    /// `CoordinatorFold.l4_ms` (labeled `l4_source: "measured"`) by
+    /// `run_coordinator` (issue #179 WS6) — the genuine distributed L4 wall,
+    /// NOT the single-machine model constant `l4_s`.
     l4_ms: u64,
 }
 
@@ -2132,10 +2136,19 @@ fn coordinator_real_fold(
     );
 
     // L4 (WS5): shared single-source block proof over the folded chain proof.
-    // A single-leaf block did not merge, so L4 verifies against the leaf chain
-    // VK; otherwise against the merge VK (the merge built into the chain shape,
-    // so both use chain_data as the chain_like_data).
-    let chain_like_data = &real.chain_data;
+    // `BlockCircuit::define` embeds the verifier key of the circuit that
+    // PRODUCED the final chain proof, so it must be defined against THAT
+    // circuit: the merge circuit when at least one merge fired (the multi-chunk
+    // case), the leaf chain circuit for a single-leaf block. The two share the
+    // same `common` data (the closed cyclic fixed point) but NOT the same
+    // verifier_only VK, so picking the wrong one fails witness generation with
+    // a "set twice" wire conflict. This mirrors `run_tree_fold`'s
+    // `final_is_merge` switch (the single-process path's tested behavior).
+    let chain_like_data = if fold.final_is_merge {
+        &real.merge_data
+    } else {
+        &real.chain_data
+    };
     let l4_start = Instant::now();
     let t = prove_block_l4_from_chain(
         &real.pre_exec_data,
@@ -2340,6 +2353,13 @@ fn run_coordinator(args: &Args) {
         // block HONESTLY (logs + marks incomplete) and NEVER fabricates.
         let mut merge_ms: u64 = 0;
         let mut l4_ms: u64 = 0;
+        // Issue #179 WS6: retain the successful real-fold outcome so the
+        // BENCH_EVENT below can carry the MEASURED merge-tree shape (leaves /
+        // depth / merges) alongside the measured walls. `None` whenever the
+        // real fold did not run OR ran but failed honestly — in both of those
+        // cases the emitted event is labeled "modeled" (the stream carries no
+        // measured merge/L4 for this block).
+        let mut fold_outcome: Option<CoordinatorFoldOutcome> = None;
         if let Some(real) = real_fold.as_ref() {
             match coordinator_real_fold(real, &proof_store, &block_results, block.height) {
                 Ok(outcome) => {
@@ -2352,6 +2372,7 @@ fn run_coordinator(args: &Args) {
                         block.height, outcome.leaves, outcome.depth, outcome.merges,
                         merge_ms, l4_ms,
                     );
+                    fold_outcome = Some(outcome);
                 }
                 Err(e) => {
                     // Honest failure: a missing/bad proof, a failed download,
@@ -2390,13 +2411,48 @@ fn run_coordinator(args: &Args) {
             ts: now_iso8601(),
         });
 
-        // NOTE (issue #179 WS6 handoff): `merge_ms` and `l4_ms` are the
-        // MEASURED coordinator-side wall-times of the REAL fold and L4 (0 when
-        // the real path is disabled). The NEXT slice routes these into the
-        // BENCH_EVENT stream and replaces the model constants `merge_s`/`l4_s`.
+        // Issue #179 WS6: route the MEASURED merge + L4 walls into the
+        // BENCH_EVENT stream. The `CoordinatorFold` event makes the provenance
+        // UNAMBIGUOUS via `merge_source`/`l4_source`:
+        //
+        //   - REAL fold ran AND succeeded  -> "measured": merge_ms/l4_ms are
+        //     genuine coordinator wall-clock times of actually proving +
+        //     verifying the distributed fold and L4. `merge_s`/`l4_s` are an
+        //     honest ms->s conversion of the SAME measurement.
+        //   - real fold disabled OR failed -> "modeled": no measured walls in
+        //     the stream (zeros); the single-machine model constants
+        //     merge_s/l4_s continue to be applied DOWNSTREAM by the fleet
+        //     parser exactly as before this slice (no regression).
+        //
+        // We never substitute a model constant for a measured number, and
+        // never label a model proxy "measured" (issue #179 acceptance rule).
+        let measured = fold_outcome.is_some();
+        let source = if measured { "measured" } else { "modeled" };
+        let (leaves_ev, depth_ev, merges_ev) = match &fold_outcome {
+            Some(o) => (o.leaves as u64, o.depth as u32, o.merges as u64),
+            None => (0, 0, 0),
+        };
+        events::emit(&BenchEvent::CoordinatorFold {
+            height: block.height,
+            merge_source: source,
+            l4_source: source,
+            leaves: leaves_ev,
+            depth: depth_ev,
+            merges: merges_ev,
+            merge_ms,
+            l4_ms,
+            // Honest ms->s conversion (precision preserved). Zero on the
+            // modeled path — the stream carries no measured merge/L4 there.
+            merge_s: merge_ms as f64 / 1000.0,
+            l4_s: l4_ms as f64 / 1000.0,
+            rss_mb_peak: peak_rss_mb(),
+            ts: now_iso8601(),
+        });
+
         info!(
             "coordinator: block height={} COMPLETE={} k={} dispatched={} collected={} ok={} \
-             block_wall_ms={} sum_prove_ms={} sum_witness_fetch_ms={} merge_ms={} l4_ms={}",
+             block_wall_ms={} sum_prove_ms={} sum_witness_fetch_ms={} merge_ms={} l4_ms={} \
+             merge_source={source} (issue #179 WS6)",
             block.height, complete, k, dispatched, collected, ok_count,
             block_wall_ms, total_prove_ms, total_witness_fetch_ms, merge_ms, l4_ms
         );

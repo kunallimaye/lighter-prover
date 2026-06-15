@@ -223,17 +223,44 @@ The bench binary is installed as **both** `/app/bench` (worker entrypoint) and
 `/usr/local/bin/prover` (symlink), so the tfvars `--mode` form works AND the
 worker role is untouched. One binary, two names.
 
-### Assumption 7 — Coordinator L2 fold scope (honest gap)
+### Assumption 7 — Coordinator L2→L4 fold scope (CLOSED by issue #179)
 
 The cell runs the REAL L1 (`BlockTxCircuit`) **and** a REAL single-chunk L2
-LEAF chain proof (`BlockTxChainCircuit` folded onto the cyclic base). The
-coordinator currently performs the **accounting** fold (collect results, sum
-prove/fetch wall, emit per-block completion + lag) — it does NOT yet recursively
-merge the cells' L2 leaf proofs into one block chain proof + L4 over the bus
-(that needs the cells to ship the proof bytes back, a larger result payload, or
-a shared proof store). The cell's per-chunk proof IS real and verified; the
-coordinator's cross-cell L2→L4 merge is the named next slice of #75. This is
-flagged so no one mistakes the accounting fold for a full block-proof merge.
+LEAF chain proof (`BlockTxChainCircuit` folded onto the cyclic base). Issue #179
+landed the cross-cell fan-IN that closes the former accounting-only gap:
+
+- **Cells ship proof bytes (WS3).** After proving its leaf, the cell serializes
+  the L2 leaf proof (`serde_json` of `ProofWithPublicInputs`) and uploads it to
+  a shared proof store (`gcloud storage cp`, behind `bench::conductor::storage`)
+  keyed `{height}/{witness_index}`. Only the small object key crosses the
+  results topic (`ChunkResultMessage.proof_object`).
+- **Coordinator runs the REAL fold + L4 (WS4+WS5).** When pointed at the same
+  bucket (`--proof-bucket` / `LIGHTER_PROOF_BUCKET`), the coordinator downloads
+  the k leaf proofs, runs the REAL `BlockTxChainMergeCircuit` merge tree
+  (shared `fold_merge_tree` helper, same code as the single-process `--l2-fold
+  tree` path), then the REAL `BlockCircuit` L4 prove **and verify** over the
+  merged chain proof (shared `prove_block_l4_from_chain` helper). No stubs, no
+  fabricated proofs: a missing key, bad bytes, failed merge or failed L4 marks
+  the block `block_partial` honestly.
+- **Measured merge + L4 timings in the event stream (WS6).** Each block emits a
+  `coordinator_fold` BENCH_EVENT carrying the MEASURED `merge_ms` / `l4_ms`
+  (and their honest ms→s mirrors `merge_s` / `l4_s`). The `merge_source` /
+  `l4_source` fields are the single source of truth for provenance:
+  `"measured"` when the real distributed fold ran, `"modeled"` on the
+  accounting fallback (no `--proof-bucket`) where the single-machine model
+  constants continue to be applied DOWNSTREAM by the fleet parser exactly as
+  before. The event is purely additive — pre-#179 runs emitted no merge/L4
+  event, so the modeled-path stream stays a strict superset.
+
+**Opt-in, no regression.** With no `--proof-bucket` the coordinator behaves
+EXACTLY as the pre-#179 accounting fold (the only addition is the one
+`merge_source: "modeled"` event per block). Existing benchmark runs are
+unaffected.
+
+**Local end-to-end gate.** `make e2e` (see §5) proves ONE small but real
+multi-chunk block all the way L1 → L2(cells) → fold → L4(coordinator), asserts
+the L4 block proof VERIFIES, and asserts the stream carries measured (not
+modeled) merge + L4 walls — hermetically, with NO live GCP/GCS or Pub/Sub.
 
 ---
 
@@ -254,6 +281,24 @@ flagged so no one mistakes the accounting fold for a full block-proof merge.
   needing `aarch64-linux-gnu-gcc`, which is NOT in this sandbox but IS installed
   by `cicd/Containerfile` (`gcc-aarch64-linux-gnu`). So this is a sandbox
   limitation, not a regression.
+- **LOCAL end-to-end distributed fold (issue #179):** `make e2e` proves ONE
+  small but REAL multi-chunk block through the full L1 → L2(cells) → fold →
+  L4(coordinator) path and asserts (a) the final L4 `BlockCircuit` block proof
+  VERIFIES and (b) the `coordinator_fold` event carries MEASURED (not modeled)
+  merge + L4 wall times. It is HERMETIC — the proof store is a local-filesystem
+  stand-in driven through the SAME `bench::conductor::storage::GcloudStorage`
+  surface (via a tiny local `gcloud storage cp` shim), so the REAL serde
+  round-trip and argv builders run with NO live GCP/GCS or Pub/Sub. Because it
+  really proves circuits it is EXPENSIVE and gated out of the fast
+  `make local-test` lane (`#[ignore]` + `DIST_FOLD_E2E=1`). Run it with:
+
+  ```sh
+  make e2e
+  # or, directly (tune chunk width/count; keep K >= 2 for multi-chunk):
+  DIST_FOLD_E2E=1 DIST_FOLD_E2E_S=4 DIST_FOLD_E2E_K=2 \
+    cargo test -p bench --release --test distributed_fold_e2e \
+    -- --ignored --nocapture --test-threads=1
+  ```
 
 **Only runs on GKE / against the Pub/Sub emulator (NOT verified locally):**
 
