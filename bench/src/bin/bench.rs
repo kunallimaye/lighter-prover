@@ -512,11 +512,19 @@ fn main() {
         eprintln!("error: --l2-workers must be > 0");
         std::process::exit(2);
     }
-    if args.l2_workers > 1 && args.l2_fold != L2FoldMode::Tree {
+    // Issue #73: in the single-process bench driver, --l2-workers > 1 only
+    // makes sense with --l2-fold tree (the parallel scheduler dispatches leaves
+    // and merges across M worker threads). Issue #193: the distributed
+    // COORDINATOR also consumes --l2-workers (as its per-level fold concurrency
+    // knob) and does NOT use --l2-fold; exempt the coordinator mode here so it
+    // can opt into the parallel fold.
+    if args.l2_workers > 1 && args.l2_fold != L2FoldMode::Tree && args.mode != RunMode::Coordinator
+    {
         eprintln!(
             "error: --l2-workers > 1 requires --l2-fold tree (issue #73; the parallel scheduler \
              dispatches leaves and merges across M worker threads, which only makes sense in the \
-             tree-fold driver)"
+             tree-fold driver) — except in --mode coordinator, where --l2-workers is the \
+             coordinator fold's per-level concurrency knob (issue #193)"
         );
         std::process::exit(2);
     }
@@ -1963,6 +1971,10 @@ struct CoordinatorRealFold {
     block: Block<F>,
     /// `tx_per_proof` (S) — used only for the L4 event's `tx_per_proof` field.
     tx_per_proof: usize,
+    /// Issue #193: number of concurrent fold workers for the coordinator's
+    /// per-level merge parallelism. Reuses the existing `--l2-workers` flag.
+    /// `1` (the default) takes the byte-for-byte serial fold.
+    fold_workers: usize,
 }
 
 impl CoordinatorRealFold {
@@ -2008,6 +2020,9 @@ impl CoordinatorRealFold {
             pre_proof,
             block,
             tx_per_proof: args.tx_per_proof,
+            // Issue #193: reuse --l2-workers as the coordinator fold's
+            // concurrency knob (least invasive; already plumbed + documented).
+            fold_workers: args.l2_workers,
         }
     }
 }
@@ -2122,15 +2137,23 @@ fn coordinator_real_fold(
          height={height}; folding with BlockTxChainMergeCircuit (issue #179 WS4)"
     );
 
-    // FOLD (WS4): shared single-source merge tree.
+    // FOLD (WS4 + #193): shared single-source merge tree. `merge_start.elapsed()`
+    // below is the REALIZED wall (the honest merge wall reported downstream);
+    // `fold.merge_prove_total` is summed prove-WORK, not wall (see fold_merge_tree).
     let merge_start = Instant::now();
-    let fold = fold_merge_tree(&real.merge_target, &real.merge_data, leaves)?;
+    let fold = fold_merge_tree(
+        &real.merge_target,
+        &real.merge_data,
+        leaves,
+        real.fold_workers,
+    )?;
     let merge_ms = merge_start.elapsed().as_millis() as u64;
     info!(
         "coordinator: folded {leaves_count} leaves for height={height}: depth={} merges={} \
-         merge_wall_ms={} sum_merge_prove_ms={} (issue #179 WS4)",
+         fold_workers={} merge_wall_ms={} sum_merge_prove_ms={} (issue #179 WS4 / #193)",
         fold.depth,
         fold.merges,
+        real.fold_workers,
         merge_ms,
         fold.merge_prove_total.as_millis(),
     );
@@ -3299,25 +3322,48 @@ struct CoordinatorFold {
     merge_prove_total: Duration,
 }
 
-/// Issue #179 WS4 (distributed coordinator fold — SEQUENTIAL): fold `leaves`
+/// Issue #179 WS4 + #193 (distributed coordinator fold): fold `leaves`
 /// (the k REAL L2 leaf proofs the cells produced and the coordinator fetched
 /// from the proof store) into ONE block-chain proof using the SAME
 /// `BlockTxChainMergeCircuit` pairwise tree the single-process path uses.
 ///
 /// This reuses [`prove_merge_pair`] for the actual circuit prove, so the merge
-/// CIRCUIT logic is shared with [`run_tree_fold`] (single source of truth). The
-/// SCHEDULING differs by design: the single-process driver parallelizes each
-/// level across a rayon pool and emits the rich `L2TreeLevel`/`L2TreeSchedule`
-/// events; the coordinator runs the fold sequentially (one proof per core is
-/// already saturating) and returns timings for the caller to log. Odd proofs at
-/// any level carry up unchanged, exactly as the single-process tree does.
+/// CIRCUIT logic is shared with [`run_tree_fold`] (single source of truth) —
+/// there is exactly ONE merge implementation, never a copy-paste.
 ///
-/// Honest-failure: a failed merge returns `Err` (no fabricated proof). The
-/// caller must mark the block partial/non-ok, never pretend it merged.
+/// ## Scheduling (issue #193)
+///
+/// The merges WITHIN a tree level are independent (embarrassingly parallel);
+/// only LEVELS are ordered (level n+1 consumes level n's outputs). When
+/// `workers > 1` this folds each level CONCURRENTLY across an owned rayon pool
+/// of `workers` threads, mirroring the single-process driver
+/// ([`run_tree_fold`] ~`l2_pool`): it collects the level's pairs (preserving
+/// the odd-proof carry-up exactly as the serial path), proves them with
+/// `into_par_iter()` inside `pool.install(...)`, then RE-SORTS the results by
+/// their stable in-level index so the folded node order — and therefore the
+/// final proof — is bit-identical regardless of worker scheduling. This cuts
+/// the critical path from `merges` serial proofs to `depth × per-merge`.
+/// `CircuitData` (`merge_data`/`merge_target`) is Send+Sync and immutable
+/// after build, so it is shared by reference across workers with no copying.
+///
+/// `workers <= 1` takes the EXACT pre-#193 serial loop byte-for-byte (the
+/// zero-regression contract, mirroring the single-process path's `M = 1`).
+///
+/// `merge_prove_total` is the SUM of the per-merge prove walls (TOTAL WORK).
+/// With parallel merges that sum no longer equals the wall-clock; the caller
+/// ([`coordinator_real_fold`]) measures realized wall separately
+/// (`merge_start.elapsed()`) and reports THAT as the merge wall. We keep
+/// `merge_prove_total` as summed prove-work and never mislabel it as wall.
+///
+/// Honest-failure: a failed merge returns `Err` (no fabricated proof). In the
+/// parallel path the first failing pair short-circuits the whole level (its
+/// `Err` propagates out); a bad node is never carried up. The caller must mark
+/// the block partial/non-ok, never pretend it merged.
 fn fold_merge_tree(
     merge_target: &BlockTxChainMergeTarget,
     merge_data: &CircuitData<F, C, D>,
     leaves: Vec<ProofWithPublicInputs<F, C, D>>,
+    workers: usize,
 ) -> anyhow::Result<CoordinatorFold> {
     if leaves.is_empty() {
         anyhow::bail!("coordinator fold: no leaf proofs to fold");
@@ -3328,43 +3374,143 @@ fn fold_merge_tree(
     let mut merges = 0usize;
     let mut merge_prove_total = Duration::ZERO;
 
+    // Issue #193: when workers > 1, build a dedicated rayon pool to fold each
+    // level concurrently (mirrors run_tree_fold's l2_pool). workers <= 1 takes
+    // the byte-for-byte serial loop below (zero-regression guarantee).
+    let fold_pool: Option<rayon::ThreadPool> = if workers > 1 {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .thread_name(|i| format!("fold-worker-{i}"))
+            .build()
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "issue #193: failed to build rayon pool of {workers} fold workers: {err:?}"
+                )
+            })?;
+        info!(
+            "coordinator fold: built rayon pool of {} worker threads (CircuitData shared by \
+             reference; plonky2's global rayon pool still saturates cores per individual proof)",
+            workers
+        );
+        Some(pool)
+    } else {
+        info!("coordinator fold: workers=1 (serial fold; zero regression vs pre-#193)");
+        None
+    };
+
     while level.len() > 1 {
         depth += 1;
-        let mut iter = level.into_iter();
-        let mut next: Vec<TreeNode> = Vec::new();
-        let mut pair_idx = 0usize;
-        while let Some(left) = iter.next() {
-            match iter.next() {
-                Some(right) => {
-                    let merge_dt = Instant::now();
-                    let node = prove_merge_pair(merge_target, merge_data, &left, &right)
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "coordinator fold: merge pair #{pair_idx} (level {depth}) \
-                                 failed: {e}"
-                            )
-                        })?;
-                    let dt = merge_dt.elapsed();
-                    merge_prove_total += dt;
-                    merges += 1;
-                    info!(
-                        "coordinator fold: merge pair #{pair_idx} (level {depth}) \
-                         BlockTxChainMergeCircuit::prove time: {:?}",
-                        dt
-                    );
-                    next.push(node);
-                }
-                None => {
-                    info!(
-                        "coordinator fold: level {depth} odd proof at pair #{pair_idx} \
-                         carried up to the next level"
-                    );
-                    next.push(left);
+
+        if let Some(pool) = fold_pool.as_ref() {
+            // ---- Parallel level (issue #193). Collect the pairs preserving
+            // the odd-proof carry-up, prove them concurrently, then re-sort by
+            // the stable in-level index so the next level's node order — and
+            // hence the final proof — is deterministic regardless of which
+            // worker finished first.
+            let mut pairs: Vec<MergePair> = Vec::with_capacity(level.len() / 2 + 1);
+            let mut iter = level.into_iter();
+            while let Some(left) = iter.next() {
+                match iter.next() {
+                    Some(right) => pairs.push((left, Some(right))),
+                    None => pairs.push((left, None)),
                 }
             }
-            pair_idx += 1;
+
+            // Each pair proves into (node, Option<wall_ms>): Some for a real
+            // merge, None for an odd carry-up. Errors propagate as the Err of
+            // the per-pair Result; `collect::<Result<_>>` short-circuits on the
+            // FIRST failure so a bad pair never folds up (honest-failure).
+            type IndexedPair = (usize, (TreeNode, Option<u64>));
+            let depth_for_pair = depth;
+            let level_results: anyhow::Result<Vec<IndexedPair>> = pool.install(|| {
+                pairs
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(pair_idx, pair)| {
+                        let (left, right_opt) = pair;
+                        match right_opt {
+                            Some(right) => {
+                                let merge_dt = Instant::now();
+                                let node =
+                                    prove_merge_pair(merge_target, merge_data, &left, &right)
+                                        .map_err(|e| {
+                                            anyhow::anyhow!(
+                                                "coordinator fold: merge pair #{pair_idx} \
+                                                 (level {depth_for_pair}) failed: {e}"
+                                            )
+                                        })?;
+                                let dt = merge_dt.elapsed();
+                                info!(
+                                    "coordinator fold: merge pair #{pair_idx} \
+                                     (level {depth_for_pair}) BlockTxChainMergeCircuit::prove \
+                                     time: {:?}",
+                                    dt
+                                );
+                                Ok((pair_idx, (node, Some(dt.as_millis() as u64))))
+                            }
+                            None => {
+                                info!(
+                                    "coordinator fold: level {depth_for_pair} odd proof at pair \
+                                     #{pair_idx} carried up to the next level"
+                                );
+                                Ok((pair_idx, (left, None)))
+                            }
+                        }
+                    })
+                    .collect()
+            });
+
+            let mut indexed = level_results?;
+            // Determinism: restore in-level order regardless of completion
+            // order (mirrors run_tree_fold's index-then-resort approach).
+            indexed.sort_by_key(|(i, _)| *i);
+            let mut next: Vec<TreeNode> = Vec::with_capacity(indexed.len());
+            for (_, (node, opt_wall)) in indexed {
+                if let Some(w) = opt_wall {
+                    merges += 1;
+                    merge_prove_total += Duration::from_millis(w);
+                }
+                next.push(node);
+            }
+            level = next;
+        } else {
+            // ---- Serial level: byte-for-byte the pre-#193 fold (workers<=1).
+            let mut iter = level.into_iter();
+            let mut next: Vec<TreeNode> = Vec::new();
+            let mut pair_idx = 0usize;
+            while let Some(left) = iter.next() {
+                match iter.next() {
+                    Some(right) => {
+                        let merge_dt = Instant::now();
+                        let node = prove_merge_pair(merge_target, merge_data, &left, &right)
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "coordinator fold: merge pair #{pair_idx} (level {depth}) \
+                                     failed: {e}"
+                                )
+                            })?;
+                        let dt = merge_dt.elapsed();
+                        merge_prove_total += dt;
+                        merges += 1;
+                        info!(
+                            "coordinator fold: merge pair #{pair_idx} (level {depth}) \
+                             BlockTxChainMergeCircuit::prove time: {:?}",
+                            dt
+                        );
+                        next.push(node);
+                    }
+                    None => {
+                        info!(
+                            "coordinator fold: level {depth} odd proof at pair #{pair_idx} \
+                             carried up to the next level"
+                        );
+                        next.push(left);
+                    }
+                }
+                pair_idx += 1;
+            }
+            level = next;
         }
-        level = next;
     }
 
     let (final_proof, final_is_merge) = level
