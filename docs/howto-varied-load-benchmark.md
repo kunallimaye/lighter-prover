@@ -58,12 +58,50 @@ for height_txcount in 1001:100 1002:250 1003:400 1004:500 1005:500; do
 done
 ```
 
-> The cadence feeder `bench/feeder/feeder.py` (`replay` / `synth-peak`) emits
-> `{ts_ms, height, tx_count}` JSONL — the same fields, plus a timestamp — and
-> is the way to **pace** a realistic arrival cadence. To use it as the producer,
-> publish each emitted line's `{height, tx_count}` to `$DISPATCH_TOPIC` (same
-> `gcloud pubsub topics publish` call as above). The feeder never carries
-> witnesses; it carries block cadence only.
+### Option C — sustained streamed run via the native feeder bridge (#211)
+
+For a real sustained-rate streaming benchmark (Tier 2 and beyond), drive
+`feeder.py` straight into the dispatch topic via its built-in native
+Pub/Sub publisher. This replaces the per-message `gcloud pubsub publish`
+shell-out (which has ~1-2 s of process-spawn overhead per message and
+**becomes the bottleneck before the prover does** at mainnet rates of
+~11 blk/s mean, ~41 blk/s peak; see issue #211 and #128):
+
+```bash
+# synth-peak at mean mainnet rate, 60 s window:
+python3 bench/feeder/feeder.py synth-peak --rate 11 --duration 60s \
+    --project "$PROJECT_ID" --publish-to "$DISPATCH_TOPIC"
+
+# replay a recorded mainnet trace at its real cadence:
+python3 bench/feeder/feeder.py replay --in trace.jsonl --target-rate 11 \
+    --project "$PROJECT_ID" --publish-to "$DISPATCH_TOPIC"
+```
+
+The bridge uses the in-process `google-cloud-pubsub` client (persistent
+gRPC connection, no per-publish process spawn) and reports pacing drift
+(p50/p95/p99/max in ms) on stderr at end of run so any future pacing
+degradation is loud, not silent. On a publish failure it fails loudly
+rather than silently dropping a message and corrupting the throughput
+number (issue #211 §Scope).
+
+Requires the bridge dependency:
+
+```bash
+pip install -r bench/feeder/requirements.txt
+```
+
+> **The bash-loop `gcloud pubsub topics publish` snippets in Options A
+> and B above are deprecated for sustained runs** — keep them only as
+> single-shot fixture-publish fallbacks. Anything reading rate / lag /
+> throughput from a sustained stream must use Option C, or it is measuring
+> `gcloud` startup time rather than the system under test.
+
+> The feeder (`bench/feeder/feeder.py`) emits `{ts_ms, height, tx_count}` —
+> Option C publishes only `{height, tx_count}` to the dispatch topic
+> (byte-equivalent to the `gcloud pubsub publish --message
+> '{"height":…,"tx_count":…}'` Option-B form, just over a persistent gRPC
+> connection). The feeder never carries witnesses; it carries block
+> cadence only.
 
 ---
 

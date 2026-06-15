@@ -91,6 +91,13 @@ BACKOFF_INITIAL_S = 1.0
 BACKOFF_CAP_S = 15.0
 SYNTH_HEIGHT_BASE = 1_000_000
 
+# ── Native Pub/Sub publisher bridge (issue #211) ──────────────────────
+# Per-publish timeout for the native google-cloud-pubsub publisher. The bridge
+# fails LOUDLY (not silently) on a missed deadline so a publisher bottleneck
+# corrupts the pacing report instead of the benchmark's throughput number
+# (issue #211 requirement 5: honest backpressure).
+PUBLISH_TIMEOUT_S = 30.0
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Shared helpers (pure, stdlib-only — unit tested offline)
@@ -335,6 +342,242 @@ def synth_schedule(rate, duration_s, base_ts_ms):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Native Pub/Sub publisher bridge (issue #211)
+#
+# The feeder produces a paced {ts_ms, height, tx_count} stream; the
+# distributed coordinator consumes BlockMessage {height, tx_count} from a
+# Pub/Sub dispatch topic. The seam between them used to be a shell pipe
+# (xargs gcloud pubsub publish), which spawns a ~1-2 s gcloud process per
+# message — the publisher becomes the bottleneck before the prover does, and
+# at the measured mainnet rates (mean 11.08 blk/s, p99 25 blk/s, 1 s rolling
+# peak 41 blk/s; see #128) pacing fidelity collapses. The bridge below uses
+# the NATIVE google-cloud-pubsub Python client: one persistent gRPC
+# connection, in-process auth, no per-publish process spawn.
+#
+# Mirrors the discipline of #205 / pubsub_native.rs (the merge-task plane's
+# native streaming-pull client) on the publish side. Publisher-side is much
+# simpler than consumer-side: no manual ack, no streaming-pull state.
+#
+# Honest-failure contract (issue #211 requirement 5): a publish that fails
+# or times out RAISES; we never silently drop a block message and corrupt
+# the stream's pacing. The benchmark would rather fail visibly than report
+# an inflated throughput number.
+#
+# Honest-pacing contract (issue #211 requirement 2): every publish records
+# the wall-clock drift between its scheduled time and its actual publish
+# time. At end of run we report median/p95/p99/max drift on stderr so any
+# future pacing degradation is loud, not silent.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def block_message_payload(ev):
+    """Project a scheduled feeder event to the wire BlockMessage payload.
+
+    The dispatch plane carries only `{height, tx_count}` (the coordinator's
+    `BlockMessage` shape; ts_ms is wall-clock and is reconstructed from
+    publish/receive time at the consumer). Synthetic-flag and other
+    feeder-internal fields are dropped here so the wire payload is
+    byte-for-byte equivalent to what a manual `gcloud pubsub publish` of
+    `{height, tx_count}` would have sent. Pure, offline-testable.
+    """
+    return {"height": int(ev["height"]), "tx_count": int(ev["tx_count"])}
+
+
+def encode_block_message(ev):
+    """Serialize a scheduled feeder event to the wire bytes (UTF-8 JSON).
+
+    Pub/Sub messages are arbitrary bytes; the coordinator parses UTF-8 JSON
+    with the BlockMessage fields. Kept tiny and pure so tests can assert the
+    on-the-wire payload without a real client.
+    """
+    return json.dumps(block_message_payload(ev),
+                      separators=(",", ":")).encode("utf-8")
+
+
+class PacingReport:
+    """Accumulate per-event scheduled-vs-actual drift; report at end.
+
+    Drift = actual_publish_time - scheduled_time (ms). Positive = late
+    (publisher fell behind the schedule). We track ABSOLUTE drift for the
+    tail summary (the SLO question is "how far off the schedule did we
+    get", in either direction) and a separate count of late events.
+
+    Pure (sleep/clock injectable from the caller's loop) — no hidden global
+    state; tests can drive it with a deterministic clock.
+    """
+
+    def __init__(self):
+        self.drifts_ms = []   # signed: actual - scheduled, in ms
+        self.published = 0
+        self.late_count = 0   # events where actual > scheduled
+
+    def record(self, scheduled_ms, actual_ms):
+        d = actual_ms - scheduled_ms
+        self.drifts_ms.append(d)
+        self.published += 1
+        if d > 0:
+            self.late_count += 1
+
+    def summary(self):
+        """Return a dict of the pacing statistics (mediums, tails, late%)."""
+        n = len(self.drifts_ms)
+        if n == 0:
+            return {"published": 0}
+        absd = [abs(d) for d in self.drifts_ms]
+        absd_sorted = sorted(absd)
+
+        def pct(p):
+            # nearest-rank percentile; small-sample correct for our use
+            if n == 1:
+                return absd_sorted[0]
+            idx = max(0, min(n - 1, int(round(p / 100.0 * (n - 1)))))
+            return absd_sorted[idx]
+
+        return {
+            "published": n,
+            "late_count": self.late_count,
+            "late_fraction": self.late_count / n,
+            "abs_drift_ms_p50": pct(50),
+            "abs_drift_ms_p95": pct(95),
+            "abs_drift_ms_p99": pct(99),
+            "abs_drift_ms_max": absd_sorted[-1],
+            "signed_drift_ms_mean": sum(self.drifts_ms) / n,
+        }
+
+    def render(self):
+        """Human + machine readable pacing summary (single line + table)."""
+        s = self.summary()
+        if s.get("published", 0) == 0:
+            return "pacing: no events published."
+        lines = []
+        lines.append(f"pacing: published {s['published']} events; "
+                     f"late={s['late_count']} "
+                     f"({s['late_fraction'] * 100:.2f}%)")
+        lines.append(
+            f"  abs drift (ms): p50={s['abs_drift_ms_p50']:.1f} "
+            f"p95={s['abs_drift_ms_p95']:.1f} "
+            f"p99={s['abs_drift_ms_p99']:.1f} "
+            f"max={s['abs_drift_ms_max']:.1f}")
+        lines.append(
+            f"  signed mean drift (ms): "
+            f"{s['signed_drift_ms_mean']:+.1f} "
+            "(positive = behind schedule)")
+        return "\n".join(lines)
+
+
+class PublisherBridge:
+    """Native Pub/Sub publisher: persistent client, paced real-time
+    publish, drift tracking, honest backpressure.
+
+    `publisher` and `topic_path` are injected so the unit tests use a fake
+    publisher (no real GCP); `sleep` and `clock` are injected so pacing
+    arithmetic is testable with a deterministic clock.
+
+    Backpressure contract: every publish blocks until the message is
+    accepted by the server (`future.result(timeout=...)`); a server error
+    or timeout RAISES, the loop above does NOT swallow it, the run fails
+    loudly with the pacing report so far on stderr.
+    """
+
+    def __init__(self, publisher, topic_path, *,
+                 timeout_s=PUBLISH_TIMEOUT_S,
+                 sleep=time.sleep, clock=time.monotonic):
+        self.publisher = publisher
+        self.topic_path = topic_path
+        self.timeout_s = timeout_s
+        self._sleep = sleep
+        self._clock = clock
+        self.report = PacingReport()
+
+    def publish_one(self, payload_bytes, scheduled_offset_ms, base_clock):
+        """Publish `payload_bytes` aiming at `scheduled_offset_ms` from
+        `base_clock`. Blocks until the server accepts. Records pacing
+        drift. Raises (loudly) on publish failure or timeout.
+
+        `base_clock` is the monotonic-clock value at run start; the
+        scheduled wall-clock instant is `base_clock + scheduled_offset/1000`.
+        Sleeping to that instant uses the injected sleep so tests can run
+        instantly. Drift is measured AFTER the server accepts the publish
+        — the SLO-relevant quantity (when did the message actually arrive
+        on the wire, not just when did we hand it off to a library buffer).
+        """
+        now = self._clock()
+        elapsed_ms = (now - base_clock) * 1000.0
+        delay_ms = scheduled_offset_ms - elapsed_ms
+        if delay_ms > 0:
+            self._sleep(delay_ms / 1000.0)
+        future = self.publisher.publish(self.topic_path, payload_bytes)
+        # Block on server accept; raises on transport/server error or timeout.
+        future.result(timeout=self.timeout_s)
+        actual_ms = (self._clock() - base_clock) * 1000.0
+        self.report.record(scheduled_offset_ms, actual_ms)
+
+
+def _import_pubsub():
+    """Lazy import google.cloud.pubsub_v1 with a crisp error on missing dep.
+
+    Mirrors the lazy-import pattern other network subcommands use; keeps
+    replay/synth-peak/the offline test suite stdlib-only when --publish-to
+    is not used."""
+    try:
+        from google.cloud import pubsub_v1  # noqa: PLC0415
+    except ImportError as e:
+        raise SystemExit(
+            "error: --publish-to requires the 'google-cloud-pubsub' Python "
+            "package.\n"
+            "  Install: pip install -r bench/feeder/requirements.txt\n"
+            f"  (import error: {e})")
+    return pubsub_v1
+
+
+def build_publisher_bridge(project, topic, *, pubsub_v1=None,
+                           sleep=time.sleep, clock=time.monotonic):
+    """Construct a PublisherBridge wired to a real Pub/Sub publisher.
+
+    Resolved as a single function so tests can stub `pubsub_v1` and the
+    real path stays a thin wiring layer. Honors no extra batch knobs —
+    publisher-side defaults are fine for the rates we target (mean ~11
+    blk/s, peak ~41); we keep the seam tight + predictable.
+    """
+    if pubsub_v1 is None:
+        pubsub_v1 = _import_pubsub()
+    publisher = pubsub_v1.PublisherClient()
+    topic_path = publisher.topic_path(project, topic)
+    return PublisherBridge(publisher, topic_path, sleep=sleep, clock=clock)
+
+
+def publish_scheduled_events(bridge, events, *, base_clock=None,
+                             progress=None):
+    """Drive a bridge over an iterable of scheduled events.
+
+    Each event must carry `ts_ms`, `height`, `tx_count`. The first event's
+    `ts_ms` defines the schedule's zero — every later event's
+    `ts_ms - first.ts_ms` is its scheduled offset from `base_clock` (so
+    real-time pacing is preserved exactly as the schedule said). The
+    ts_ms-based timeline is the feeder's own (`replay_schedule` /
+    `synth_schedule`), so this honors issue #211 requirement 2 byte-for-byte.
+
+    `progress` is an optional callable invoked after each successful
+    publish (for stderr heartbeat); kept injectable so tests stay silent.
+
+    Raises (does NOT swallow) on any publish failure or timeout. Returns
+    the bridge so the caller can render the pacing report.
+    """
+    first_ts_ms = None
+    if base_clock is None:
+        base_clock = bridge._clock()
+    for ev in events:
+        if first_ts_ms is None:
+            first_ts_ms = ev["ts_ms"]
+        scheduled_offset_ms = ev["ts_ms"] - first_ts_ms
+        payload = encode_block_message(ev)
+        bridge.publish_one(payload, scheduled_offset_ms, base_clock)
+        if progress is not None:
+            progress(ev)
+    return bridge
+
+
+# ──────────────────────────────────────────────────────────────────────
 # replay
 # ──────────────────────────────────────────────────────────────────────
 
@@ -379,6 +622,24 @@ def cmd_replay(args, out=None):
     if args.dry_run:
         params["dry_run"] = True
 
+    # --publish-to wires the schedule into a native Pub/Sub publisher
+    # instead of stdout JSONL. The provenance header (which carries the
+    # measured rate/speed/fill) is still written to `out` so the run is
+    # cited the same way; the per-event JSONL is replaced by Pub/Sub
+    # messages whose payload is `{height, tx_count}` (see issue #211).
+    publish_to = getattr(args, "publish_to", None)
+    if publish_to:
+        if args.dry_run:
+            print("error: --dry-run and --publish-to are mutually exclusive",
+                  file=sys.stderr)
+            return 1
+        project = getattr(args, "project", None)
+        if not project:
+            print("error: --publish-to requires --project <id>",
+                  file=sys.stderr)
+            return 1
+        params["publish_to"] = {"project": project, "topic": publish_to}
+
     print(provenance_line(generator, params, source_trace=args.input),
           file=out, flush=True)
 
@@ -386,6 +647,13 @@ def cmd_replay(args, out=None):
     base_ts = events[0]["ts_ms"] if args.dry_run else int(time.time() * 1000)
     sched = replay_schedule(expanded, speed, base_ts,
                             loop_seam_ms=seam_ms, duration_s=duration_s)
+    if publish_to:
+        bridge = build_publisher_bridge(project, publish_to)
+        try:
+            publish_scheduled_events(bridge, sched)
+        finally:
+            print(bridge.report.render(), file=sys.stderr, flush=True)
+        return 0
     start_mono = time.monotonic()
     for ev in sched:
         if not args.dry_run:
@@ -408,10 +676,32 @@ def cmd_synth_peak(args, out=None):
     params = {"peak_rate": args.rate, "duration_s": duration_s}
     if args.dry_run:
         params["dry_run"] = True
+
+    publish_to = getattr(args, "publish_to", None)
+    if publish_to:
+        if args.dry_run:
+            print("error: --dry-run and --publish-to are mutually exclusive",
+                  file=sys.stderr)
+            return 1
+        project = getattr(args, "project", None)
+        if not project:
+            print("error: --publish-to requires --project <id>",
+                  file=sys.stderr)
+            return 1
+        params["publish_to"] = {"project": project, "topic": publish_to}
+
     print(provenance_line("synth-peak", params), file=out, flush=True)
     base_ts = 0 if args.dry_run else int(time.time() * 1000)
+    sched = synth_schedule(args.rate, duration_s, base_ts)
+    if publish_to:
+        bridge = build_publisher_bridge(project, publish_to)
+        try:
+            publish_scheduled_events(bridge, sched)
+        finally:
+            print(bridge.report.render(), file=sys.stderr, flush=True)
+        return 0
     start_mono = time.monotonic()
-    for ev in synth_schedule(args.rate, duration_s, base_ts):
+    for ev in sched:
         if not args.dry_run:
             delay = (ev["ts_ms"] - base_ts) / 1000.0 - (
                 time.monotonic() - start_mono)
@@ -1145,6 +1435,16 @@ def build_parser():
                          "(e.g. 15m, 900s)")
     pp.add_argument("--dry-run", action="store_true",
                     help="print the emission schedule without sleeping")
+    # Native Pub/Sub publisher bridge (#211): when both flags are set the
+    # scheduled stream is published to the dispatch topic instead of stdout,
+    # using the in-process google-cloud-pubsub client (NOT a per-message
+    # `gcloud pubsub publish` shell-out — the bottleneck this replaces).
+    pp.add_argument("--publish-to", default=None, metavar="TOPIC",
+                    help="dispatch topic name to publish to via the native "
+                         "Pub/Sub client (replaces stdout JSONL); requires "
+                         "--project")
+    pp.add_argument("--project", default=None, metavar="PROJECT_ID",
+                    help="GCP project for --publish-to")
     pp.set_defaults(func=cmd_replay)
 
     ps = sub.add_parser("synth-peak",
@@ -1156,6 +1456,13 @@ def build_parser():
                     help="trace duration (e.g. 15m, 900s)")
     ps.add_argument("--dry-run", action="store_true",
                     help="print the emission schedule without sleeping")
+    # Native Pub/Sub publisher bridge (#211); see replay subcommand for shape.
+    ps.add_argument("--publish-to", default=None, metavar="TOPIC",
+                    help="dispatch topic name to publish to via the native "
+                         "Pub/Sub client (replaces stdout JSONL); requires "
+                         "--project")
+    ps.add_argument("--project", default=None, metavar="PROJECT_ID",
+                    help="GCP project for --publish-to")
     ps.set_defaults(func=cmd_synth_peak)
 
     ph = sub.add_parser("peak-hours",
