@@ -397,6 +397,12 @@ straggler floor we already measured, at which point the prove-dominated
 wide) would reward a 3rd+ worker. At the current CLI-paced plane, **2 workers
 capture most of the available win at k≤16; a 3rd is marginal.**
 
+**Follow-up filed:** the native manual-ack streaming-pull merge-plane client
+is tracked in #203 — replacing the gcloud-CLI poll with low-latency streaming
+pull is the lever to move realized speedup toward the depth-bounded ideal;
+correctness (verify + bit-identical) is preserved and the #200 matrix is
+re-measured (instrumented, not gated).
+
 ### Reproduce
 
 The harness is `bench --mode fold-leader-bench` (added for #200). On an
@@ -433,4 +439,6 @@ fingerprint). Worker count = number of live `fold-worker` pods.
   deliverable. The `fold-leader-bench` harness was added to drive it.
 - PR #201 — cross-machine fold fan-out M1/M2 (the capability this section
   measured live).
+- #203 — native manual-ack streaming-pull merge-plane client (lever to
+  approach the depth-bounded fold ideal).
 - ADR-0006 — distributed-prover-conductor (production topology source).

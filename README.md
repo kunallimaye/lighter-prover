@@ -16,6 +16,12 @@ with throughput-benchmarking infrastructure layered on top.
   in (Cloud Build uses `$COMMIT_SHA`; local podman uses
   `git rev-parse HEAD`). See
   [ADR-0001 §Revision 1](docs/decisions/ADR-0001-container-topology.md#revision-1-2026-06-10-tag-provenance-fix).
+- **Distributed coordinator fold** (#198) — the block-proof merge fold can
+  run across separate worker machines (`bench --fold-distributed`,
+  `bench --mode fold-worker`) via a Pub/Sub merge-task plane plus
+  proof-store transit, scaling by worker count and producing a
+  bit-identical proof. See
+  [`docs/perf/coordinator-fold-measurement.md`](docs/perf/coordinator-fold-measurement.md).
 
 Phase 2 (#3) will replace the embarrassingly-parallel fan-out with true
 work-sharding across layer-1 chunks. Phase 1 ships fan-out only.
