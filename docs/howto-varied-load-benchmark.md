@@ -154,9 +154,11 @@ Both roles emit `BENCH_EVENT ` JSONL to stdout; filter with `grep '^BENCH_EVENT
 
 - **Per-block completion** (coordinator): a `StreamSummary` event with `phase =
   "block_complete"` (or `"block_partial"`), carrying `throughput_tx_s` and the
-  block-arrival→all-chunks-proven wall as `lag_p50_ms` / `lag_p95_ms`. Sweep
-  these across the `tx_count` bands to read **fold-width / L4 variation** vs
-  block size.
+  block-arrival→all-chunks-proven wall as `lag_p50_ms` / `lag_p95_ms`. It also
+  carries `height` and `block_wall_ms` (issue #222): the block height plus the
+  coordinator's **real measured gather wall**, keyed by height so a consumer can
+  JOIN the true measured wall rather than estimate it. Sweep these across the
+  `tx_count` bands to read **fold-width / L4 variation** vs block size.
 - **Per-chunk** (cells): `chunk_proven` events with `wall_ms`, `lag_ms`,
   `queue_depth`, and `witness_fetch_ms` (the local-resolve floor).
 - **L4 / fold**: the per-block lag at the cap band (`tx_count = 500`, widest
@@ -180,6 +182,16 @@ p99 ≤ 40 s, ≥ 5 blocks/s), feed the coordinator stream to
 and **refuses to count a `"modeled"` fold** — only `--proof-bucket` runs whose
 `merge_source`/`l4_source` are `"measured"` enter the percentiles; modeled
 blocks are flagged and excluded.
+
+The GATHER term is the coordinator's **real measured gather wall** — the
+per-block `block_complete` record's `block_wall_ms`, joined on `height`
+(issue #222). On a legacy/partial stream that lacks the measured wall, the tool
+can still score a block using the slowest-chunk-lag PROXY
+(`max(chunk_proven.lag_ms)`), but that proxy **approximates** the gather wall —
+it omits coordination time after the last cell finishes — so it is **never the
+silent default**: any block scored on the proxy is tagged, counted, and flagged
+LOUDLY in the report (and `proxy_gather_count` in the JSON mirror). A
+fully-measured run reports `proxy_gather_count = 0`.
 
 ```bash
 # From a saved log (prefix or prefix-stripped JSONL both accepted):

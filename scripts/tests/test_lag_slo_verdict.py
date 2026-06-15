@@ -137,6 +137,95 @@ class TestLagComputation(unittest.TestCase):
         self.assertEqual(b["leaves"], 4)
 
 
+class TestGatherProvenance(unittest.TestCase):
+    """Issue #222: GATHER must be the coordinator's REAL measured wall, not
+    the slowest-chunk-lag proxy. The proxy is never the silent default."""
+
+    def test_fixture_uses_measured_gather_not_proxy(self):
+        # Every measured block in the fixture carries a block_complete summary
+        # with block_wall_ms, so gather_source must be "measured" -- NOT the
+        # chunk_proven.lag_ms proxy.
+        rep = _report()
+        for b in rep["blocks"]:
+            self.assertEqual(
+                b["gather_source"],
+                "measured",
+                f"block {b['height']} must use the measured wall, not the proxy",
+            )
+        self.assertEqual(rep["proxy_gather_count"], 0)
+        self.assertEqual(rep["measured_gather_count"], 6)
+        self.assertTrue(rep["gather_fully_measured"])
+        self.assertEqual(rep["proxy_gather_heights"], [])
+
+    def test_gather_value_is_measured_wall_not_chunk_lag(self):
+        # The decisive assertion: the GATHER term equals the coordinator's
+        # block_wall_ms (8000 for h100), NOT the slower-to-detect proxy value
+        # max(chunk_proven.lag_ms) which is 7600 for h100. If the proxy path
+        # were (wrongly) taken, gather_wall_ms would be 7600.
+        rep = _report()
+        by_h = {b["height"]: b for b in rep["blocks"]}
+        self.assertEqual(by_h[100]["gather_wall_ms"], 8000)  # measured wall
+        self.assertNotEqual(by_h[100]["gather_wall_ms"], 7600)  # NOT the proxy
+        self.assertEqual(by_h[105]["gather_wall_ms"], 11000)  # measured wall
+        # lag = measured gather + measured merge + measured l4.
+        self.assertEqual(by_h[100]["lag_ms"], 8000 + 3000 + 4000)
+
+    def test_proxy_fallback_when_no_measured_wall(self):
+        # A legacy/partial stream WITHOUT block_complete summaries must still
+        # be scoreable, but the block is tagged "proxy" and flagged loudly.
+        text = (
+            'BENCH_EVENT {"event":"chunk_proven","height":1,"lag_ms":5000,"queue_depth":1}\n'
+            'BENCH_EVENT {"event":"coordinator_fold","height":1,"merge_source":"measured","l4_source":"measured","merge_ms":1000,"l4_ms":2000}\n'
+        )
+        rep = _report(text)
+        self.assertEqual(rep["proxy_gather_count"], 1)
+        self.assertIn(1, rep["proxy_gather_heights"])
+        self.assertFalse(rep["gather_fully_measured"])
+        b = rep["blocks"][0]
+        self.assertEqual(b["gather_source"], "proxy")
+        # Proxy gather (5000) + measured merge (1000) + measured l4 (2000).
+        self.assertEqual(b["lag_ms"], 5000 + 1000 + 2000)
+
+    def test_proxy_use_flagged_loudly_in_render(self):
+        # When the proxy is used, the rendered report must say so LOUDLY --
+        # never a silent default (issue #222 acceptance criterion).
+        text = (
+            'BENCH_EVENT {"event":"chunk_proven","height":1,"lag_ms":5000,"queue_depth":1}\n'
+            'BENCH_EVENT {"event":"coordinator_fold","height":1,"merge_source":"measured","l4_source":"measured","merge_ms":1000,"l4_ms":2000}\n'
+        )
+        out = lsv._render(_report(text))
+        self.assertIn("WARNING", out)
+        self.assertIn("PROXY", out)
+        self.assertIn("ESTIMATE", out)
+        self.assertIn("issue #222", out)
+
+    def test_fully_measured_render_states_no_proxy(self):
+        # The all-measured fixture render must affirm no proxy/estimate.
+        out = lsv._render(_report())
+        self.assertIn("REAL", out)
+        self.assertIn("Fully-measured end-to-end lag", out)
+        self.assertNotIn("WARNING", out)
+
+    def test_per_block_summary_join_keys_on_height(self):
+        # The measured wall must join on the matching height: h102's summary
+        # (block_wall_ms 9000) must attach to h102, not bleed into another.
+        rep = _report()
+        by_h = {b["height"]: b for b in rep["blocks"]}
+        self.assertEqual(by_h[102]["gather_wall_ms"], 9000)
+        self.assertEqual(by_h[104]["gather_wall_ms"], 10000)
+
+    def test_explicit_chunk_proven_source_tags_proxy(self):
+        # Forcing --gather-source chunk_proven must tag every block "proxy"
+        # even when a measured wall exists (explicit opt-in to the estimate).
+        rep = _report(gather_source="chunk_proven")
+        self.assertEqual(rep["proxy_gather_count"], len(rep["blocks"]))
+        for b in rep["blocks"]:
+            self.assertEqual(b["gather_source"], "proxy")
+        # h100's proxy gather is the chunk lag (7600), not the measured 8000.
+        by_h = {b["height"]: b for b in rep["blocks"]}
+        self.assertEqual(by_h[100]["gather_wall_ms"], 7600)
+
+
 class TestModeledExclusion(unittest.TestCase):
     """The critical honesty test (issue #179/#215 acceptance rule)."""
 

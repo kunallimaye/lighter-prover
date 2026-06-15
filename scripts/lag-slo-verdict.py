@@ -9,12 +9,30 @@ SUM, and no committed tool computes the SLO verdict. This parser joins the
 two coordinator event streams on `height` and computes the TRUE per-block
 lag:
 
-    lag_block = gather_wall_ms        (stream_summary block-complete phase,
-                                       else chunk_proven.lag_ms keyed by height
-                                       -- the L1->L2 GATHER wall, anchored at
-                                       coordinator-DEQUEUE)
+    lag_block = gather_wall_ms        (REAL measured coordinator gather wall:
+                                       the per-block stream_summary
+                                       block-complete record's block_wall_ms,
+                                       keyed by height -- the L1->L2 GATHER
+                                       wall, anchored at coordinator-DEQUEUE.
+                                       issue #222)
               + coordinator_fold.merge_ms   (MEASURED distributed merge wall)
               + coordinator_fold.l4_ms      (MEASURED L4 prove+verify wall)
+
+    GATHER PROVENANCE (the issue #222 honesty rule)
+    ===============================================
+    The GATHER term must be the coordinator's REAL recorded gather wall, not
+    an estimate. A real coordinator's per-block `stream_summary` (phase
+    `block_complete`) now carries `height` + `block_wall_ms` (its own measured
+    block wall), so the join keys the TRUE measured gather wall by height.
+
+    A legacy/partial stream that lacks the measured wall can still be scored
+    via the slowest-chunk-lag PROXY (`max(chunk_proven.lag_ms)` per height),
+    but that proxy APPROXIMATES the gather wall -- it omits the coordination
+    time after the last cell finishes. The proxy is therefore NEVER the silent
+    default: any block scored on the proxy is tagged, COUNTED, and flagged
+    LOUDLY in the rendered report and the machine-readable mirror. A run that
+    leans on the proxy for any block is explicitly NOT a fully-measured
+    end-to-end lag.
 
 then derives run-level lag p50 AND p99 (nearest-rank, matching
 cicd/orchestrator.py `_aggregate`), throughput, a backlog/keep-pace
@@ -185,6 +203,13 @@ class BlockLag:
     l4_ms: int
     lag_ms: int
     fold_measured: bool
+    # Issue #222: provenance of the GATHER term. "measured" when it is the
+    # coordinator's REAL recorded gather wall (the per-block stream_summary
+    # block_wall_ms keyed by height); "proxy" when it falls back to the
+    # slowest-chunk lag_ms (max chunk_proven.lag_ms), which APPROXIMATES the
+    # gather wall but omits coordination time after the last cell finishes.
+    # merge_ms/l4_ms remain genuine measured walls regardless.
+    gather_source: str = "measured"
     depth: int = 0
     merges: int = 0
     leaves: int = 0
@@ -202,12 +227,24 @@ def _extract_blocks(
     "measured") and ``modeled_heights`` are the heights EXCLUDED because
     their fold was modeled (zeroed walls -- never counted; issue #179/#215).
 
-    GATHER source selection (issue #215):
+    GATHER source selection (issue #215, provenance-tracked since #222):
       - "summary":      a stream_summary whose phase == `block_phase`,
-                        using block_wall_ms (the gather wall).
-      - "chunk_proven": chunk_proven.lag_ms keyed by height.
-      - "auto":         prefer block-complete stream_summary rows if any are
-                        present, else fall back to chunk_proven.
+                        using block_wall_ms (the coordinator's REAL measured
+                        gather wall) -- the truthful default for a real run.
+      - "chunk_proven": chunk_proven.lag_ms keyed by height. This is the
+                        slowest-chunk-lag PROXY: it APPROXIMATES the gather
+                        wall but omits coordination time after the last cell
+                        finishes, so it is NOT a fully-measured end-to-end
+                        lag (issue #222). Selecting it is an explicit opt-in.
+      - "auto":         PER BLOCK, prefer the real measured summary wall when
+                        the coordinator emitted one for that height; fall back
+                        to the chunk_proven proxy ONLY for blocks with no
+                        measured wall. Each block records which source it used
+                        in `gather_source` so the report can flag any proxy
+                        use LOUDLY rather than silently (issue #222).
+
+    Each returned BlockLag carries `gather_source` = "measured" | "proxy"
+    so the caller can refuse to silently ship a proxy lag on a real run.
     """
     # Index coordinator_fold by height (last write wins -- one per block).
     folds: dict[int, dict[str, Any]] = {}
@@ -218,6 +255,8 @@ def _extract_blocks(
                 folds[int(h)] = ev
 
     # Collect candidate GATHER walls from each source, keyed by height.
+    # summary_walls is the REAL measured gather wall the coordinator records on
+    # its per-block completion record (issue #222); chunk_walls is the proxy.
     summary_walls: dict[int, int] = {}
     for ev in events:
         if ev.get("event") != "stream_summary":
@@ -238,23 +277,35 @@ def _extract_blocks(
         if h is None or lag is None:
             continue
         # A block may emit several chunk_proven lines (one per chunk); the
-        # GATHER wall is the slowest chunk's lag (block is complete when the
-        # last chunk lands). issue #215
+        # PROXY gather wall is the slowest chunk's lag (block is complete when
+        # the last chunk lands). issue #215
         h = int(h)
         chunk_walls[h] = max(chunk_walls.get(h, 0), int(lag))
 
+    # Build the per-block (wall, source) map according to the selection mode.
+    # On "auto" we resolve PER HEIGHT so a partly-instrumented stream uses the
+    # real measured wall wherever it exists and only proxies the gap (#222).
     if gather_source == "summary":
-        gather = summary_walls
+        gather: dict[int, tuple[int, str]] = {
+            h: (w, "measured") for h, w in summary_walls.items()
+        }
     elif gather_source == "chunk_proven":
-        gather = chunk_walls
-    else:  # auto
-        gather = summary_walls if summary_walls else chunk_walls
+        # Explicit opt-in to the proxy: every block is tagged "proxy".
+        gather = {h: (w, "proxy") for h, w in chunk_walls.items()}
+    else:  # auto -- per-block: real measured wall wins, proxy fills the gap.
+        heights = set(summary_walls) | set(chunk_walls)
+        gather = {}
+        for h in heights:
+            if h in summary_walls:
+                gather[h] = (summary_walls[h], "measured")
+            else:
+                gather[h] = (chunk_walls[h], "proxy")
 
     measured: list[BlockLag] = []
     modeled: list[int] = []
     for height in sorted(gather):
         fold = folds.get(height)
-        gather_wall = gather[height]
+        gather_wall, gsrc = gather[height]
         if fold is None:
             # No fold event for this block -- cannot compute a real lag.
             # Treat as modeled/excluded so it is flagged, never silently
@@ -278,6 +329,7 @@ def _extract_blocks(
                 l4_ms=l4_ms,
                 lag_ms=lag_ms,
                 fold_measured=True,
+                gather_source=gsrc,
                 depth=int(fold.get("depth", 0)),
                 merges=int(fold.get("merges", 0)),
                 leaves=int(fold.get("leaves", 0)),
@@ -517,11 +569,24 @@ def build_report(
         if name in metrics
     }
 
+    # Issue #222: GATHER provenance accounting. Any block whose GATHER term is
+    # the slowest-chunk-lag PROXY (not the coordinator's real measured wall) is
+    # counted and listed so the report can flag it LOUDLY. A fully-measured run
+    # has proxy_gather_count == 0.
+    proxy_heights = [b.height for b in blocks if b.gather_source == "proxy"]
+    measured_gather_count = sum(
+        1 for b in blocks if b.gather_source == "measured"
+    )
+
     return {
         "blocks": [b.__dict__ for b in blocks],
         "modeled_excluded_heights": modeled_heights,
         "modeled_excluded_count": len(modeled_heights),
         "measured_block_count": len(blocks),
+        "measured_gather_count": measured_gather_count,
+        "proxy_gather_heights": proxy_heights,
+        "proxy_gather_count": len(proxy_heights),
+        "gather_fully_measured": len(proxy_heights) == 0,
         "lag_p50_s": lag_p50_s,
         "lag_p99_s": lag_p99_s,
         "throughput_tx_s": keep.get("throughput_tx_s"),
@@ -542,21 +607,63 @@ def _render(report: dict[str, Any]) -> str:
     lines.append("=" * 64)
     lines.append("")
 
-    # Per-block lag table.
+    # Per-block lag table. The `gsrc` column (issue #222) marks each block's
+    # GATHER provenance: "meas" = real measured coordinator wall; "PROXY" =
+    # slowest-chunk-lag estimate (flagged loudly below).
     lines.append("Per-block lag (measured merge+L4, ms):")
     header = (
-        f"  {'height':>10} {'gather':>9} {'merge':>9} {'l4':>9} "
+        f"  {'height':>10} {'gather':>9} {'gsrc':>6} {'merge':>9} {'l4':>9} "
         f"{'lag_ms':>9} {'depth':>6} {'merges':>7} {'leaves':>7}"
     )
     lines.append(header)
     for b in report["blocks"]:
+        gsrc = "PROXY" if b.get("gather_source") == "proxy" else "meas"
         lines.append(
-            f"  {b['height']:>10} {b['gather_wall_ms']:>9} {b['merge_ms']:>9} "
-            f"{b['l4_ms']:>9} {b['lag_ms']:>9} {b['depth']:>6} "
-            f"{b['merges']:>7} {b['leaves']:>7}"
+            f"  {b['height']:>10} {b['gather_wall_ms']:>9} {gsrc:>6} "
+            f"{b['merge_ms']:>9} {b['l4_ms']:>9} {b['lag_ms']:>9} "
+            f"{b['depth']:>6} {b['merges']:>7} {b['leaves']:>7}"
         )
     if not report["blocks"]:
         lines.append("  (no MEASURED blocks -- nothing to score)")
+    lines.append("")
+
+    # Issue #222: GATHER provenance banner. The proxy is NEVER silent -- if any
+    # block was scored on the slowest-chunk-lag estimate, say so LOUDLY so the
+    # reported lag is not mistaken for a fully-measured end-to-end number.
+    proxy_n = report.get("proxy_gather_count", 0)
+    if proxy_n:
+        ph = ", ".join(str(h) for h in report["proxy_gather_heights"])
+        lines.append("!" * 64)
+        lines.append(
+            f"WARNING: GATHER is an ESTIMATE (PROXY) for {proxy_n} block(s) at "
+            f"height(s) {ph}."
+        )
+        lines.append(
+            "  These blocks use max(chunk_proven.lag_ms) -- the slowest single "
+            "cell's lag --"
+        )
+        lines.append(
+            "  NOT the coordinator's real measured gather wall. The reported "
+            "lag for these"
+        )
+        lines.append(
+            "  blocks is therefore PARTLY ESTIMATED (it omits coordination "
+            "time after the"
+        )
+        lines.append(
+            "  last cell finishes), NOT a fully-measured end-to-end lag. "
+            "(issue #222)"
+        )
+        lines.append("!" * 64)
+    else:
+        lines.append(
+            "GATHER provenance: all measured blocks use the coordinator's REAL "
+            "measured"
+        )
+        lines.append(
+            "  gather wall (no proxy/estimate). Fully-measured end-to-end lag. "
+            "(issue #222)"
+        )
     lines.append("")
 
     # Excluded modeled blocks (the honesty count).

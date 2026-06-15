@@ -2694,6 +2694,14 @@ fn run_coordinator(args: &Args) {
             gaps_skipped: 0,
             chunks_proven: ok_count,
             elapsed_s: block_wall_ms as f64 / 1000.0,
+            // Issue #222: carry the block height + the REAL measured GATHER
+            // wall on this per-block completion record so the lag-verdict tool
+            // (scripts/lag-slo-verdict.py) JOINs the coordinator's true
+            // measured gather wall on height instead of falling back to the
+            // slowest-chunk-lag PROXY. `block_wall_ms` is the coordinator's
+            // own measurement (`block_start.elapsed()`), NOT an estimate.
+            height: Some(block.height),
+            block_wall_ms: Some(block_wall_ms),
             ts: now_iso8601(),
         });
 

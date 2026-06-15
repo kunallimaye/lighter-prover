@@ -362,6 +362,14 @@ fn emit_stream_summary(
         gaps_skipped: shared.gaps_skipped.load(Ordering::Relaxed),
         chunks_proven,
         elapsed_s: (elapsed.as_secs_f64() * 10.0).round() / 10.0,
+        // Issue #222: the periodic/final rolling summaries aggregate across
+        // all blocks -- there is no single block height to key on and no
+        // single per-block gather wall. Both are `None` (skipped from JSON),
+        // keeping these lines byte-identical to pre-#222 output. The per-block
+        // gather wall + height are carried ONLY by the coordinator's
+        // `block_complete` per-block record (bench/src/bin/bench.rs).
+        height: None,
+        block_wall_ms: None,
         ts: now_iso8601(),
     });
 }
