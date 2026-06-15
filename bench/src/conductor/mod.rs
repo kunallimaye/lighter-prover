@@ -88,5 +88,7 @@ pub use pubsub_native::{
     AckableMergeResult, AckableMergeTask, NativePubSub, NativePulledMessage,
 };
 pub use queue::{BlockJob, BlockQueue, LocalBlockQueue};
-pub use storage::{merge_object_key, proof_object_key, GcloudStorage, StorageConfig};
+pub use storage::{
+    merge_object_key, proof_object_key, GcloudStorage, StorageConfig, VisibilityWait,
+};
 pub use witness::{MountedCorpus, ResolvedWitness, WitnessKey, WitnessResolver, WitnessSlice};

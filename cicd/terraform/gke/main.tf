@@ -35,6 +35,19 @@ locals {
   # Resolved proof-store bucket name: an explicit override, else a
   # deterministic project-derived name (bucket names are globally unique).
   proof_store_bucket_name = var.proof_store_bucket != "" ? var.proof_store_bucket : "${var.project_id}-lighter-prover-proofs"
+
+  # Issue #206: gcsfuse-mount the proof bucket into the coordinator pod. Only
+  # meaningful when the bucket + pod-GSA permission exist (enable_proof_store),
+  # so AND the two so a stray enable_proof_mount can't try to mount a bucket
+  # that was never created.
+  proof_mount_on = var.enable_proof_mount && var.enable_proof_store
+
+  # The gcsfuse CSI driver is opted in per-pod via this annotation; merged with
+  # the hardwired safe-to-evict annotation on the coordinator template.
+  coordinator_annotations = merge(
+    local.coordinator_safe_to_evict_annotation,
+    local.proof_mount_on ? { "gke-gcsfuse/volumes" = "true" } : {}
+  )
 }
 
 # ─── 1. GKE Autopilot cluster ────────────────────────────────────────
@@ -354,8 +367,10 @@ resource "kubernetes_deployment" "coordinator" {
         # ── HARD DAY-1 REQUIREMENT (ADR-0003 amendment §3) ──
         # safe-to-evict=false so Autopilot will not evict an in-flight,
         # key-resident coordinator for bin-packing. HARDWIRED via locals
-        # — a bad tfvars cannot remove it.
-        annotations = local.coordinator_safe_to_evict_annotation
+        # — a bad tfvars cannot remove it. Issue #206: when the proof bucket
+        # is gcsfuse-mounted, the `gke-gcsfuse/volumes=true` opt-in is merged
+        # in (local.coordinator_annotations).
+        annotations = local.coordinator_annotations
       }
 
       spec {
@@ -370,6 +385,30 @@ resource "kubernetes_deployment" "coordinator" {
           image   = var.coordinator_image
           command = length(var.coordinator_command) > 0 ? var.coordinator_command : null
 
+          # Issue #206: point the bench binary at the gcsfuse mount so
+          # storage.rs selects mount-mode file I/O (LIGHTER_PROOF_MOUNT).
+          # Only set when the bucket is actually mounted below.
+          dynamic "env" {
+            for_each = local.proof_mount_on ? [1] : []
+            content {
+              name  = "LIGHTER_PROOF_MOUNT"
+              value = var.proof_mount_path
+            }
+          }
+
+          # Issue #206: mount the gcsfuse CSI volume into the container at the
+          # path the bench binary reads from.
+          dynamic "volume_mount" {
+            for_each = local.proof_mount_on ? [1] : []
+            content {
+              name       = "proof-store"
+              mount_path = var.proof_mount_path
+              # read_write: fold workers WRITE intermediate merge proofs +
+              # READ inputs through this mount (the #206 transit surface).
+              read_only = false
+            }
+          }
+
           resources {
             requests = {
               cpu    = var.coordinator_cpu_request
@@ -378,6 +417,26 @@ resource "kubernetes_deployment" "coordinator" {
             limits = {
               cpu    = var.coordinator_cpu_request
               memory = var.coordinator_memory_request
+            }
+          }
+        }
+
+        # Issue #206: the gcsfuse CSI ephemeral inline volume backed by the
+        # SAME proof-store bucket #179 created. The pod GSA already holds
+        # objectAdmin on it (proof_store_pod_object_admin), so NO new IAM is
+        # needed. implicit_dirs lets the `{height}/m/{level}/` key prefixes
+        # resolve as directories on the bucket.
+        dynamic "volume" {
+          for_each = local.proof_mount_on ? [1] : []
+          content {
+            name = "proof-store"
+            csi {
+              driver    = "gcsfuse.csi.storage.gke.io"
+              read_only = false
+              volume_attributes = {
+                bucketName   = local.proof_store_bucket_name
+                mountOptions = "implicit-dirs"
+              }
             }
           }
         }

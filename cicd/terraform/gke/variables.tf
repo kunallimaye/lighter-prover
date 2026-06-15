@@ -319,6 +319,29 @@ variable "proof_store_force_destroy" {
   default     = true
 }
 
+# Issue #206: mount the proof-store bucket into the coordinator/fold-worker pod
+# as a gcsfuse VOLUME so the bench binary's proof-store upload/download become
+# plain file write/read against the mount, instead of shelling out to
+# `gcloud storage cp` once per copy (the per-subprocess overhead that became the
+# dominant per-level fold barrier after #203). When enabled, the gcsfuse CSI
+# ephemeral inline volume is attached to the coordinator container at
+# var.proof_mount_path and LIGHTER_PROOF_MOUNT is set to that path, so
+# bench/src/conductor/storage.rs selects mount-mode file I/O. Reuses the
+# EXISTING pod-GSA objectAdmin binding from #179/#182 — NO new IAM. The CLI
+# transport remains the fallback when this is false (additive/non-regressing).
+
+variable "enable_proof_mount" {
+  description = "Mount the proof-store bucket into the coordinator pod via the gcsfuse CSI driver and point LIGHTER_PROOF_MOUNT at it (issue #206). Requires enable_proof_store (the bucket + pod-GSA permission). false = the bench binary keeps using the `gcloud storage cp` CLI transport (unchanged)."
+  type        = bool
+  default     = false
+}
+
+variable "proof_mount_path" {
+  description = "In-pod path the proof-store bucket is gcsfuse-mounted at when enable_proof_mount is true (issue #206). Passed to the bench binary as LIGHTER_PROOF_MOUNT so storage.rs maps {height}/{witness_index} and {height}/m/{level}/{index} keys to files under this root."
+  type        = string
+  default     = "/mnt/proof-store"
+}
+
 variable "hpa_target_class" {
   description = "Which workload the backlog HPA scales (cells | coordinator). Cells consume the block backlog at smoke scale."
   type        = string

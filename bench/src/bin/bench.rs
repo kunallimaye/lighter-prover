@@ -146,6 +146,25 @@ struct Args {
     #[arg(long, env = "LIGHTER_PROOF_BUCKET", default_value = "")]
     proof_bucket: String,
 
+    /// Issue #206: filesystem root of the MOUNTED proof bucket (e.g. a gcsfuse
+    /// mount of `--proof-bucket`). When set, the proof-store `upload`/`download`
+    /// become plain file write/read against `<mount>/<key>` (the SAME
+    /// `{height}/{witness_index}` leaf / `{height}/m/{level}/{index}` merge key
+    /// scheme, now as file paths) instead of shelling out to `gcloud storage
+    /// cp` once per copy — removing the per-`cp` subprocess overhead that became
+    /// the dominant per-level fold barrier after #203. Writes are ATOMIC (temp
+    /// + rename) so a cross-machine reader never sees a partial proof, and a
+    /// missing / not-yet-visible proof is an honest `Err` (never fabricated).
+    ///
+    /// SELECTABLE / ADDITIVE: empty (the default) keeps the existing `gcloud
+    /// storage cp` transport unchanged (non-regressing fallback). When mount
+    /// mode is on, the read-after-write VISIBILITY wait at the level barrier is
+    /// instrumented (`proof_visibility_wait_ms`) so we can see whether the
+    /// gcsfuse close-to-open consistency lag lands on the critical path (the
+    /// number that feeds #207). Mirrors the witness plane's mounted corpus (#61).
+    #[arg(long, env = "LIGHTER_PROOF_MOUNT", default_value = "")]
+    proof_mount_path: String,
+
     /// Distributed modes: how many blocks the coordinator proves before
     /// exiting, OR how many chunks the cell proves before exiting. `0` =
     /// run forever (until SIGINT/SIGTERM). Bounded values make a single
@@ -1647,6 +1666,7 @@ fn run_cell(args: &Args) {
     let proof_store = GcloudStorage::new(StorageConfig {
         bucket: args.proof_bucket.clone(),
         gcloud_bin: args.gcloud_bin.clone(),
+        mount_path: args.proof_mount_path.clone(),
     });
 
     info!(
@@ -2399,6 +2419,7 @@ fn run_coordinator(args: &Args) {
     let proof_store = GcloudStorage::new(StorageConfig {
         bucket: args.proof_bucket.clone(),
         gcloud_bin: args.gcloud_bin.clone(),
+        mount_path: args.proof_mount_path.clone(),
     });
     let real_fold_enabled = proof_store.config().enabled();
 
@@ -4177,6 +4198,7 @@ fn run_fold_worker(args: &Args) {
     let proof_store = GcloudStorage::new(StorageConfig {
         bucket: args.proof_bucket.clone(),
         gcloud_bin: args.gcloud_bin.clone(),
+        mount_path: args.proof_mount_path.clone(),
     });
     if !proof_store.config().enabled() {
         eprintln!("error: --mode fold-worker requires --proof-bucket (the proof-store transit)");
@@ -4510,6 +4532,7 @@ fn run_fold_leader_bench(args: &Args) {
     let proof_store = GcloudStorage::new(StorageConfig {
         bucket: args.proof_bucket.clone(),
         gcloud_bin: args.gcloud_bin.clone(),
+        mount_path: args.proof_mount_path.clone(),
     });
     if !proof_store.config().enabled() {
         eprintln!("error: --mode fold-leader-bench requires --proof-bucket (the proof-store transit)");
@@ -4665,6 +4688,16 @@ fn fold_pi_fingerprint(proof: &ProofWithPublicInputs<F, C, D>) -> u64 {
 /// run the SHARED `prove_merge_pair` on full cores, upload the output under its
 /// `{height}/m/{level}/{index}` key, and return `(output_key, prove_ms)`.
 /// Honest-failure: any step's error propagates (no fabricated proof).
+///
+/// Issue #206 (the storage decomposition deliverable): each input GET is done
+/// through [`GcloudStorage::wait_for_object`], which polls until the proof —
+/// written at the PREVIOUS level on (possibly) ANOTHER machine — is visible
+/// through the mount, and reports BOTH the read-after-write VISIBILITY WAIT
+/// (the gcsfuse close-to-open lag) and the final read wall. The output PUT is
+/// timed via [`GcloudStorage::upload_timed`]. The per-merge decomposition is
+/// emitted as a `BENCH_METRIC fold_storage` line so the post-run analysis can
+/// see where storage time actually goes and whether the visibility lag lands
+/// on the critical path (feeds #207).
 fn fold_worker_prove_one(
     real: &CoordinatorRealFold,
     proof_store: &bench::conductor::GcloudStorage,
@@ -4676,16 +4709,28 @@ fn fold_worker_prove_one(
     // inputs' is_merge VK flags; the leader put them in the task message (the
     // authoritative source, mirroring the in-process `TreeNode`'s is_merge bit)
     // so the worker never GUESSES from the key shape.
-    let fetch = |key: &str| -> anyhow::Result<ProofWithPublicInputs<F, C, D>> {
-        let bytes = proof_store
-            .download(key)
+    //
+    // Issue #206: poll for read-after-write VISIBILITY of each input through the
+    // mount (a just-written cross-machine proof can lag a gcsfuse mount), with
+    // an honest deadline — a never-visible input is an `Err`, never fabricated.
+    // The poll degrades to a single immediate read on the `gcloud cp` CLI path
+    // (which is itself read-after-write consistent on the object store), so the
+    // wait there is ~0 and only the download wall is recorded.
+    let visibility_deadline = Duration::from_secs(120);
+    let visibility_poll = Duration::from_millis(50);
+    let fetch = |key: &str| -> anyhow::Result<(
+        ProofWithPublicInputs<F, C, D>,
+        bench::conductor::VisibilityWait,
+    )> {
+        let (bytes, wait) = proof_store
+            .wait_for_object(key, visibility_deadline, visibility_poll)
             .map_err(|e| anyhow::anyhow!("download merge input '{key}' failed: {e}"))?;
         let proof: ProofWithPublicInputs<F, C, D> = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("deserialize merge input '{key}' failed: {e}"))?;
-        Ok(proof)
+        Ok((proof, wait))
     };
-    let left = fetch(&task.left_key)?;
-    let right = fetch(&task.right_key)?;
+    let (left, left_wait) = fetch(&task.left_key)?;
+    let (right, right_wait) = fetch(&task.right_key)?;
 
     // PROVE the merge with the SHARED single-source helper (full cores).
     let t = Instant::now();
@@ -4699,13 +4744,36 @@ fn fold_worker_prove_one(
     let prove_ms = t.elapsed().as_millis() as u64;
 
     // UPLOAD the output under the merge-transit key (so the next level's task
-    // can read it from any other coordinator).
+    // can read it from any other coordinator). Timed for `storage_upload_ms`.
     let output_key = merge_object_key(task.height, task.level, task.index);
     let bytes = serde_json::to_vec(&proof)
         .map_err(|e| anyhow::anyhow!("serialize merge output: {e}"))?;
-    proof_store
-        .upload(&output_key, &bytes)
+    let (_k, upload_dt) = proof_store
+        .upload_timed(&output_key, &bytes)
         .map_err(|e| anyhow::anyhow!("upload merge output '{output_key}' failed: {e}"))?;
+
+    // Issue #206: emit the per-merge STORAGE DECOMPOSITION. `storage_download_ms`
+    // is the summed read wall of both inputs; `proof_visibility_wait_ms` is the
+    // summed read-after-write barrier wait (0 when both inputs were already
+    // visible); `storage_upload_ms` is the output write wall. `mount` flags the
+    // active transport so a mixed-run analysis can separate mount vs CLI.
+    let download_ms = (left_wait.read + right_wait.read).as_millis() as u64;
+    let visibility_wait_ms = (left_wait.wait + right_wait.wait).as_millis() as u64;
+    let upload_ms = upload_dt.as_millis() as u64;
+    info!(
+        "BENCH_METRIC fold_storage height={} level={} index={} mount={} \
+         storage_download_ms={} storage_upload_ms={} proof_visibility_wait_ms={} \
+         visibility_attempts={} payload_bytes={} (issue #206)",
+        task.height,
+        task.level,
+        task.index,
+        proof_store.config().mount_enabled(),
+        download_ms,
+        upload_ms,
+        visibility_wait_ms,
+        left_wait.attempts + right_wait.attempts,
+        bytes.len(),
+    );
 
     Ok((output_key, prove_ms))
 }
