@@ -541,6 +541,15 @@ pub fn parse_pull_json(stdout: &str) -> std::io::Result<Vec<PulledMessage>> {
     Ok(out)
 }
 
+/// Crate-internal re-export of the dependency-free base64 decoder so the native
+/// merge-task-plane client ([`super::pubsub_native`], issue #203) reuses the
+/// SAME decoder instead of carrying a second copy (Pub/Sub's REST `data` field
+/// is standard-base64, identical to what the CLI `--format=json` path decodes).
+#[cfg_attr(not(feature = "native-pubsub"), allow(dead_code))]
+pub(crate) fn base64_decode_pub(input: &str) -> Option<Vec<u8>> {
+    base64_decode(input)
+}
+
 /// Minimal standard-base64 decoder (no external dep — same dependency-free
 /// discipline as the rest of this module). Returns `None` on invalid input.
 fn base64_decode(input: &str) -> Option<Vec<u8>> {

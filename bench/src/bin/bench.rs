@@ -282,6 +282,29 @@ struct Args {
     #[arg(long, env = "LIGHTER_FOLD_DISTRIBUTED", default_value_t = false)]
     fold_distributed: bool,
 
+    /// Issue #203: use the NATIVE in-process Pub/Sub streaming-pull client (low
+    /// latency, MANUAL ack — ack-after-upload) for the merge-task plane instead
+    /// of shelling out to `gcloud pubsub pull` per poll (the #200-measured
+    /// barrier cost). Affects `--mode fold-worker` (task pulls) and the
+    /// distributed leader's result-plane consumption (`--mode fold-leader-bench`
+    /// / the distributed coordinator fold).
+    ///
+    /// SCOPED to the merge-task plane only — the block/chunk planes and the GCS
+    /// proof store are unchanged. Requires the `native-pubsub` Cargo feature to
+    /// be compiled in; if the flag is set without the feature the binary exits
+    /// with an honest error rather than silently falling back, so a run can
+    /// never claim "native" while using the CLI poll.
+    #[arg(long, env = "LIGHTER_NATIVE_MERGE_PLANE", default_value_t = false)]
+    native_merge_plane: bool,
+
+    /// Issue #203: server-side long-pull hold (seconds) for the native
+    /// streaming-pull client's `returnImmediately=false` pulls — the Pub/Sub
+    /// server blocks the request up to this long waiting for a message,
+    /// returning the instant one arrives. Only meaningful with
+    /// `--native-merge-plane`.
+    #[arg(long, env = "LIGHTER_NATIVE_PULL_TIMEOUT_S", default_value_t = 20)]
+    native_pull_timeout_s: u64,
+
     /// Issue #78: run the 8-way L5 (`CyclicRecursionCircuit`) segment
     /// scheduler. Synthesizes a `--blocks` continuation-consistent block
     /// sequence from `bench_test.json`, splits it into `--segments`
@@ -2225,6 +2248,7 @@ fn coordinator_real_fold(
     real: &CoordinatorRealFold,
     proof_store: &bench::conductor::GcloudStorage,
     bus: &bench::conductor::GcloudPubSub,
+    native: Option<&NativeMergeClient>,
     block_results: &[bench::conductor::ChunkResultMessage],
     height: u64,
 ) -> anyhow::Result<CoordinatorFoldOutcome> {
@@ -2267,7 +2291,7 @@ fn coordinator_real_fold(
             real.fold_workers,
         )?,
         FoldTopology::Distributed => {
-            coordinator_distributed_fold(real, proof_store, bus, height, leaves, &keys)?
+            coordinator_distributed_fold(real, proof_store, bus, native, height, leaves, &keys)?
         }
     };
     let merge_ms = merge_start.elapsed().as_millis() as u64;
@@ -2357,7 +2381,14 @@ fn run_coordinator(args: &Args) {
         std::process::exit(2);
     }
     cfg.chunk_subscription.clear();
+    let coord_project = cfg.project.clone();
     let bus = GcloudPubSub::new(cfg);
+
+    // Issue #203: native merge-plane client for the distributed leader's
+    // result-plane barrier (if `--native-merge-plane` + the `native-pubsub`
+    // feature). `None` for the InProcess fold path (which never touches the
+    // merge plane).
+    let native = make_native_merge_client(args, &coord_project);
 
     // Proof store (issue #179 WS4/WS5). OPT-IN: the REAL distributed fold +
     // L4 path activates ONLY when the coordinator is pointed at the SAME
@@ -2508,7 +2539,14 @@ fn run_coordinator(args: &Args) {
         // measured merge/L4 for this block).
         let mut fold_outcome: Option<CoordinatorFoldOutcome> = None;
         if let Some(real) = real_fold.as_ref() {
-            match coordinator_real_fold(real, &proof_store, &bus, &block_results, block.height) {
+            match coordinator_real_fold(
+                real,
+                &proof_store,
+                &bus,
+                native.as_ref(),
+                &block_results,
+                block.height,
+            ) {
                 Ok(outcome) => {
                     merge_ms = outcome.merge_ms;
                     l4_ms = outcome.l4_ms;
@@ -3668,7 +3706,20 @@ fn fold_merge_tree(
 struct GcloudFoldTransport<'a> {
     store: &'a bench::conductor::GcloudStorage,
     bus: &'a bench::conductor::GcloudPubSub,
-    /// Per-result poll backoff (seconds).
+    /// Issue #203: the NATIVE merge-plane client for the result-plane barrier.
+    /// `Some` only when `--native-merge-plane` is set + the `native-pubsub`
+    /// feature is compiled in; otherwise the leader uses the CLI poll
+    /// (`self.bus.pull_merge_results`). When native, the leader pulls results
+    /// with the low-latency `returnImmediately=false` streaming pull and acks
+    /// each consumed result manually (so a recorded result is not redelivered
+    /// into the next level's barrier).
+    native: Option<&'a NativeMergeClient>,
+    /// The merge-RESULT subscription name (for native pull/ack). Read only on
+    /// the native path; the CLI fallback uses the bus's configured subscription.
+    #[cfg_attr(not(feature = "native-pubsub"), allow(dead_code))]
+    merge_result_sub: String,
+    /// Per-result poll backoff (seconds) — CLI fallback only; the native long
+    /// pull blocks server-side instead of sleeping.
     poll_interval_s: u64,
     /// Max wall to wait for a level's results before failing honestly.
     level_deadline: Duration,
@@ -3740,7 +3791,11 @@ impl bench::conductor::FoldTransport<ProofWithPublicInputs<F, C, D>> for GcloudF
         let level = tasks[0].level;
         let deadline = Instant::now() + self.level_deadline;
         while got.len() < want.len() && Instant::now() < deadline {
-            let results = match self.bus.pull_merge_results(want.len() as u32) {
+            // PULL this level's results. Native path (issue #203): low-latency
+            // `returnImmediately=false` streaming pull returning each result's
+            // ack handle. CLI fallback: the auto-ack `gcloud pubsub pull`
+            // (ack_id = None), with a poll-interval sleep on empty.
+            let results = match self.pull_results(want.len() as u32) {
                 Ok(r) => r,
                 Err(e) => {
                     log::warn!("coordinator(leader): pull_merge_results error: {e}");
@@ -3749,15 +3804,29 @@ impl bench::conductor::FoldTransport<ProofWithPublicInputs<F, C, D>> for GcloudF
                 }
             };
             if results.is_empty() {
-                std::thread::sleep(Duration::from_secs(self.poll_interval_s));
+                // The native long-pull already blocked server-side; only the CLI
+                // fallback needs an explicit backoff here.
+                if self.native.is_none() {
+                    std::thread::sleep(Duration::from_secs(self.poll_interval_s));
+                }
                 continue;
             }
-            for r in results {
-                // Ignore stragglers from other heights/levels.
+            // Ack handles of results we have RECORDED this iteration (so a
+            // recorded result is not redelivered into the next level's barrier).
+            let mut to_ack: Vec<String> = Vec::new();
+            for (r, ack_id) in results {
+                // Ignore stragglers from other heights/levels — but still ack
+                // them on the native path so they don't pile up redeliveries.
                 if r.height != tasks[0].height || r.level != level {
+                    if let Some(id) = ack_id {
+                        to_ack.push(id);
+                    }
                     continue;
                 }
                 if !want.contains(&r.index) {
+                    if let Some(id) = ack_id {
+                        to_ack.push(id);
+                    }
                     continue;
                 }
                 if !r.ok {
@@ -3781,7 +3850,15 @@ impl bench::conductor::FoldTransport<ProofWithPublicInputs<F, C, D>> for GcloudF
                     output_key,
                     prove_ms: r.prove_ms.unwrap_or(0),
                 });
+                // Record-then-ack: this result is now durably recorded by the
+                // leader, so acking it is safe (it won't redeliver). Duplicate
+                // redeliveries of the SAME index are harmless (the `or_insert`
+                // above is idempotent), but acking avoids them.
+                if let Some(id) = ack_id {
+                    to_ack.push(id);
+                }
             }
+            self.ack_results(&to_ack);
         }
         if got.len() < want.len() {
             anyhow::bail!(
@@ -3792,6 +3869,52 @@ impl bench::conductor::FoldTransport<ProofWithPublicInputs<F, C, D>> for GcloudF
             );
         }
         Ok(got.into_values().collect())
+    }
+}
+
+impl GcloudFoldTransport<'_> {
+    /// Pull merge results with their (optional) ack handles. Native path (issue
+    /// #203): a low-latency `returnImmediately=false` streaming pull returning
+    /// each result's `ackId`. CLI fallback: the auto-ack `gcloud pubsub pull`
+    /// (ack_id = None, already acked at pull). Honest failure surfaces as `Err`.
+    fn pull_results(
+        &self,
+        max: u32,
+    ) -> anyhow::Result<Vec<(bench::conductor::MergeResultMessage, Option<String>)>> {
+        #[cfg(feature = "native-pubsub")]
+        if let Some(client) = self.native {
+            let pulled = client.pull_merge_results(&self.merge_result_sub, max)?;
+            return Ok(pulled
+                .into_iter()
+                .map(|a| (a.result, Some(a.ack_id)))
+                .collect());
+        }
+        // CLI fallback (unchanged behavior): auto-acked at pull, no ack handle.
+        let results = self
+            .bus
+            .pull_merge_results(max)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(results.into_iter().map(|r| (r, None)).collect())
+    }
+
+    /// Ack consumed result messages on the native client (issue #203). No-op on
+    /// the CLI fallback (already auto-acked). A failed ack is logged, not fatal —
+    /// a redelivered result is idempotently re-recorded by the barrier's
+    /// `or_insert`, so the fold stays bit-identical.
+    #[allow(unused_variables)]
+    fn ack_results(&self, ack_ids: &[String]) {
+        #[cfg(feature = "native-pubsub")]
+        if let Some(client) = self.native {
+            if !ack_ids.is_empty() {
+                if let Err(e) = client.acknowledge(&self.merge_result_sub, ack_ids) {
+                    log::warn!(
+                        "coordinator(leader): ack of {} merge-result(s) failed: {e} \
+                         (harmless — they will redeliver and be idempotently re-recorded)",
+                        ack_ids.len()
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -3806,6 +3929,7 @@ fn coordinator_distributed_fold(
     real: &CoordinatorRealFold,
     proof_store: &bench::conductor::GcloudStorage,
     bus: &bench::conductor::GcloudPubSub,
+    native: Option<&NativeMergeClient>,
     height: u64,
     leaves: Vec<ProofWithPublicInputs<F, C, D>>,
     leaf_keys: &[String],
@@ -3843,6 +3967,8 @@ fn coordinator_distributed_fold(
     let transport = GcloudFoldTransport {
         store: proof_store,
         bus,
+        native,
+        merge_result_sub: bus.config().merge_result_subscription.clone(),
         poll_interval_s: 2,
         level_deadline: Duration::from_secs(900),
     };
@@ -3882,6 +4008,127 @@ fn coordinator_distributed_fold(
     })
 }
 
+/// Issue #203: the native merge-plane client handle threaded through the
+/// fold-worker and leader paths. It is `Some` only when `--native-merge-plane`
+/// is set AND the `native-pubsub` feature is compiled in. When the feature is
+/// off the type degrades to a never-`Some` placeholder so the rest of the code
+/// compiles unchanged and always takes the CLI fallback.
+#[cfg(feature = "native-pubsub")]
+type NativeMergeClient = bench::conductor::NativePubSub;
+#[cfg(not(feature = "native-pubsub"))]
+enum NativeMergeClient {}
+
+/// Build the native merge-plane client if requested + compiled in. Exits
+/// honestly (never silently falls back to the CLI poll) if `--native-merge-plane`
+/// is set without the `native-pubsub` feature, so a run can never CLAIM "native"
+/// while actually polling the `gcloud` CLI (issue #203 honesty).
+#[cfg(feature = "native-pubsub")]
+fn make_native_merge_client(args: &Args, project: &str) -> Option<NativeMergeClient> {
+    if !args.native_merge_plane {
+        return None;
+    }
+    if project.is_empty() {
+        eprintln!("error: --native-merge-plane requires --project");
+        std::process::exit(2);
+    }
+    info!(
+        "issue #203: NATIVE merge-task-plane client ENABLED (project={project}, \
+         long-pull={}s, manual ack-after-upload) — replacing the gcloud-CLI poll",
+        args.native_pull_timeout_s
+    );
+    Some(bench::conductor::NativePubSub::new(
+        project.to_string(),
+        args.gcloud_bin.clone(),
+        Duration::from_secs(args.native_pull_timeout_s),
+    ))
+}
+
+#[cfg(not(feature = "native-pubsub"))]
+fn make_native_merge_client(args: &Args, _project: &str) -> Option<NativeMergeClient> {
+    if args.native_merge_plane {
+        eprintln!(
+            "error: --native-merge-plane was set but this binary was built WITHOUT the \
+             `native-pubsub` Cargo feature. Rebuild with `--features native-pubsub` (issue \
+             #203). Refusing to silently fall back to the gcloud-CLI poll."
+        );
+        std::process::exit(2);
+    }
+    None
+}
+
+/// Pull the next merge TASK with its (optional) ack handle. The native path
+/// (issue #203) does a low-latency `returnImmediately=false` streaming pull and
+/// returns the `ackId` for MANUAL ack-after-upload. The CLI fallback does the
+/// auto-ack `gcloud pubsub pull` and returns `ack_id = None` (already acked at
+/// pull). Returns `None` on an empty pull or a transient error (after backing
+/// off), so the caller simply `continue`s its loop.
+fn next_merge_task(
+    native: Option<&NativeMergeClient>,
+    bus: &bench::conductor::GcloudPubSub,
+    merge_task_sub: &str,
+    poll_interval_s: u64,
+) -> Option<(bench::conductor::MergeTaskMessage, Option<String>)> {
+    #[cfg(feature = "native-pubsub")]
+    if let Some(client) = native {
+        match client.pull_merge_tasks(merge_task_sub, 1) {
+            Ok(mut v) => {
+                if let Some(a) = v.drain(..).next() {
+                    return Some((a.task, Some(a.ack_id)));
+                }
+                // Empty long-pull (deadline reached, no message): loop again
+                // immediately — the server already blocked, so no extra sleep.
+                return None;
+            }
+            Err(e) => {
+                log::warn!("fold-worker(native): pull_merge_tasks error: {e}");
+                std::thread::sleep(Duration::from_secs(poll_interval_s));
+                return None;
+            }
+        }
+    }
+    #[cfg(not(feature = "native-pubsub"))]
+    let _ = native;
+
+    // CLI fallback (unchanged behavior).
+    let _ = merge_task_sub;
+    match bus.pull_merge_tasks(1) {
+        Ok(t) => match t.into_iter().next() {
+            Some(task) => Some((task, None)),
+            None => {
+                std::thread::sleep(Duration::from_secs(poll_interval_s));
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("fold-worker: pull_merge_tasks error: {e}");
+            std::thread::sleep(Duration::from_secs(poll_interval_s));
+            None
+        }
+    }
+}
+
+/// Manually acknowledge a merge-task message on the native client (issue #203).
+/// A no-op when there is no native client or no ack handle (the CLI fallback
+/// already auto-acked at pull). A failed ack is logged but not fatal — the
+/// message simply redelivers (at-least-once), and the idempotent by-key upload
+/// keeps the fold bit-identical.
+#[allow(unused_variables)]
+fn ack_merge_message(
+    native: Option<&NativeMergeClient>,
+    subscription: &str,
+    ack_id: Option<&str>,
+) {
+    #[cfg(feature = "native-pubsub")]
+    if let (Some(client), Some(id)) = (native, ack_id) {
+        if let Err(e) = client.acknowledge(subscription, std::slice::from_ref(&id.to_string())) {
+            log::warn!(
+                "ack of '{id}' on '{subscription}' failed: {e} — task will redeliver \
+                 (at-least-once; idempotent by-key upload keeps the fold bit-identical)"
+            );
+        }
+    }
+}
+
 /// Issue #198: the FOLD WORKER pod (`bench --mode fold-worker`). An independent
 /// coordinator-class machine that shards a single block's merge tree: it
 /// competing-pulls merge tasks from the merge-task plane, downloads the two
@@ -3916,7 +4163,16 @@ fn run_fold_worker(args: &Args) {
     // Workers don't need the block/chunk planes.
     cfg.dispatch_subscription.clear();
     cfg.chunk_subscription.clear();
+    let merge_task_sub = cfg.merge_task_subscription.clone();
+    let project = cfg.project.clone();
     let bus = GcloudPubSub::new(cfg);
+
+    // Issue #203: the NATIVE in-process streaming-pull (manual-ack) client for
+    // the merge-task plane, if requested + compiled in. The CLI poll is the
+    // fallback otherwise. `make_native_merge_client` exits honestly if the flag
+    // is set without the feature (never silently falls back to the CLI poll, so
+    // a run can't claim "native" while polling the CLI).
+    let native = make_native_merge_client(args, &project);
 
     let proof_store = GcloudStorage::new(StorageConfig {
         bucket: args.proof_bucket.clone(),
@@ -3948,20 +4204,19 @@ fn run_fold_worker(args: &Args) {
             info!("fold-worker: reached max_units={}, exiting", args.max_units);
             break;
         }
-        let tasks = match bus.pull_merge_tasks(1) {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("fold-worker: pull_merge_tasks error: {e}");
-                std::thread::sleep(Duration::from_secs(args.poll_interval_s));
-                continue;
-            }
-        };
-        let task = match tasks.into_iter().next() {
+
+        // PULL one merge task. Native path (issue #203): a low-latency
+        // streaming-style pull that also carries the ack handle for MANUAL ack
+        // AFTER the merge is proven + uploaded. CLI fallback: the auto-ack
+        // `gcloud pubsub pull` (the #200-measured per-poll process spawn).
+        let (task, ack_id) = match next_merge_task(
+            native.as_ref(),
+            &bus,
+            &merge_task_sub,
+            args.poll_interval_s,
+        ) {
             Some(t) => t,
-            None => {
-                std::thread::sleep(Duration::from_secs(args.poll_interval_s));
-                continue;
-            }
+            None => continue, // empty pull / transient error: backed off inside
         };
 
         info!(
@@ -3970,6 +4225,7 @@ fn run_fold_worker(args: &Args) {
         );
 
         let result = fold_worker_prove_one(&real, &proof_store, &task);
+        let proven_ok = result.is_ok();
         let msg = match result {
             Ok((output_key, prove_ms)) => {
                 info!(
@@ -4003,9 +4259,31 @@ fn run_fold_worker(args: &Args) {
                 }
             }
         };
-        if let Err(e) = bus.publish_merge_result(&msg) {
+        let published = bus.publish_merge_result(&msg);
+        if let Err(e) = &published {
             log::error!("fold-worker: publish_merge_result failed: {e}");
         }
+
+        // MANUAL ACK (issue #203, ack-after-upload): only ack a task once its
+        // merge was proven, its output uploaded (both inside
+        // `fold_worker_prove_one`), AND its result was published. If the merge
+        // FAILED, or the result couldn't be published, do NOT ack — the task's
+        // ack-deadline expires and Pub/Sub REDELIVERS it (at-least-once). A
+        // redelivered task re-proves + re-uploads to the SAME overwrite-safe
+        // `{height}/m/{level}/{index}` key, so the leader's #193 re-sort still
+        // yields a bit-identical final proof. On the CLI fallback `ack_id` is
+        // None (the CLI already auto-acked at pull time — the documented
+        // relaxation), so this is a no-op there.
+        if proven_ok && published.is_ok() {
+            ack_merge_message(native.as_ref(), &merge_task_sub, ack_id.as_deref());
+        } else if let Some(id) = &ack_id {
+            log::warn!(
+                "fold-worker: NOT acking task height={} level={} index={} (ackId={}) — \
+                 it will redeliver (honest at-least-once)",
+                task.height, task.level, task.index, id
+            );
+        }
+
         merges_done += 1;
     }
     info!("fold-worker: done, {} merges proven", merges_done);
@@ -4222,7 +4500,12 @@ fn run_fold_leader_bench(args: &Args) {
         );
         std::process::exit(2);
     }
+    let project = cfg.project.clone();
     let bus = GcloudPubSub::new(cfg);
+
+    // Issue #203: native merge-plane client for the leader's result-plane
+    // barrier (if `--native-merge-plane` + the `native-pubsub` feature).
+    let native = make_native_merge_client(args, &project);
 
     let proof_store = GcloudStorage::new(StorageConfig {
         bucket: args.proof_bucket.clone(),
@@ -4288,6 +4571,7 @@ fn run_fold_leader_bench(args: &Args) {
             &real,
             &proof_store,
             &bus,
+            native.as_ref(),
             height,
             leaves.clone(),
             &leaf_keys,

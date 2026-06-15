@@ -421,6 +421,80 @@ emits `BENCH_METRIC fold_wall` / `fold_barrier` / `fold_transit` plus a final
 `fold_wall_summary` (median/min/max + the bit-identical public-input
 fingerprint). Worker count = number of live `fold-worker` pods.
 
+## Native streaming-pull re-measurement (issue #203)
+
+The #200 conclusion pinned the per-level barrier on the **gcloud-CLI poll**
+(every leader/worker poll shelled out a fresh `gcloud pubsub pull` — Python +
+auth + TLS handshake, ~1–2 s — with `--auto-ack`, paced by the poll interval).
+Issue #203 replaced that, **for the merge-task plane only**, with a NATIVE
+in-process Pub/Sub client: REST `pull` with `returnImmediately=false` (server
+blocks until a message is available → no poll-interval pacing, no per-poll
+process) + **manual ack-after-upload** (a worker acks its merge task only after
+it has proven the merge and uploaded the result; a crashed worker's task
+redelivers — at-least-once, made exactly-once-in-effect by the idempotent
+overwrite-safe `{height}/m/{level}/{index}` upload). The GCS proof store, the
+fold algorithm, the ONE merge impl, the #193 re-sort, the odd-carry, the
+key scheme, and the InProcess path are all UNCHANGED (transport-scoped change).
+
+The #200 matrix was re-run on the native plane: real `c4a-standard-16` (ARM64
+Axion) VMs in `us-central1-a` (1 leader + up to 3 `fold-worker` pods over a real
+Pub/Sub merge-task plane + real GCS proof store), the **same fixed `k`-leaf
+batch reused byte-for-byte across worker counts**, fold-wall measured (leaf-gen
+excluded), 3 reps/cell. The `bench` binary was built **natively on a c4a VM**
+with the `native-pubsub` feature (proving the rustls/ring native client
+compiles+links+runs on aarch64 — no openssl/cross-compile risk). All infra was
+torn down after.
+
+### Fold-wall matrix — native plane vs the #200 CLI-poll baseline (median ms; min–max in parens; 3 reps/cell)
+
+| k  | depth | merges | plane | 1 worker | 2 workers | 3 workers | speedup 2w / 3w |
+|----|-------|--------|-------|----------|-----------|-----------|-----------------|
+| 4  | 2     | 3      | CLI #200    | 16880 | 12770 | 12277 | 1.32× / 1.38× |
+| 4  | 2     | 3      | **native #203** | **13087** (12686–13395) | **9875** (9569–9894) | **9696** (9462–9928) | 1.33× / 1.35× |
+| 8  | 3     | 7      | CLI #200    | 43770 | 25777 | 24845 | 1.70× / 1.76× |
+| 8  | 3     | 7      | **native #203** | **30345** (30251–30784) | **20150** (19969–21105) | **21590** (19088–22511) | 1.51× / 1.41× |
+| 16 | 4     | 15     | CLI #200    | 96661 | 54406 | 54303 | 1.78× / 1.78× |
+| 16 | 4     | 15     | **native #203** | **68281** (67327–68526) | **46409** (41520–48895) | **37510** (36435–37899) | 1.47× / **1.82×** |
+
+### Correctness gate — PASSED (the only hard bar)
+
+Every final folded proof **VERIFIED** (`verified=true`, all 27 reps) and was
+**bit-identical across 1/2/3 workers** for each k (one fingerprint per k, all
+reps): k=4 → `0xf24073be2ee2d9af` · k=8 → `0xe877b2484bba8262` · k=16 →
+`0xa1ae1d6a66983028`. `all_reps_bit_identical=true` for every cell. The native
+manual-ack transport preserves the #193 determinism contract live; no anomalies.
+
+### Per-level barrier — DROPPED at every level (k=16, the headline)
+
+| level | tasks | barrier_ms (CLI #200, 3w) | barrier_ms (native #203, 3w) | per-merge prove | straggler |
+|-------|-------|---------------------------|------------------------------|-----------------|-----------|
+| 1     | 8     | 16650–19569               | **12668**                    | ~511 ms         | 7 ms      |
+| 2     | 4     | 9416–10822                | **6988**                     | ~517 ms         | 16 ms     |
+| 3     | 2     | 5207–6411                 | **4669**                     | ~517 ms         | 0 ms      |
+| 4     | 1     | 4385–5443                 | **3072**                     | ~508 ms         | 0 ms      |
+
+The native plane cut each level's barrier (e.g. level 1 from ~17–19.5 s to
+~12.7 s at k=16/3w; the 1-worker level-1 barrier fell from the CLI-paced regime
+to **32.6 s for 8 serial merges ≈ 4.1 s/merge**). Per-merge prove stays ~511 ms
+and stragglers stay ≤16 ms — unchanged. Intermediate-proof size stays the
+**constant ~422 KB** (max 422,347 B) through depth 4.
+
+### Honest conclusion (one line)
+
+The native manual-ack streaming-pull plane **reduced the per-level barrier and
+the absolute fold wall at every k** (k=16 1-worker 96.7 s → **68.3 s**; 3-worker
+54.3 s → **37.5 s**) and, at k=16, **unblocked the 3rd worker** (#200's 2→3 step
+was flat at 1.78×; native is **1.82× at 3w and still dropping**, the
+depth-bounded collapse finally becoming visible) — all proofs VERIFIED +
+bit-identical. BUT the realized speedup is still **far below the ~3.75× k=16
+ideal**, because once the Pub/Sub poll latency is removed the **residual barrier
+is the GCS proof-store transit, which is STILL on the `gcloud storage cp` CLI**
+(~2–2.5 s of process overhead per merge for its 2 GETs + 1 PUT — see the
+~10 s `fold_transit` total at k=16). That is the *next* lever (a native GCS
+client for the proof store, the exact analogue of this change applied to the
+store rather than the plane) and is explicitly OUT OF #203's transport scope
+(plane-only). Net: the plane is no longer the bottleneck; the store is.
+
 ## Refs
 
 - PR #194 — parallel fold implementation (stays merged; correct).
@@ -439,6 +513,8 @@ fingerprint). Worker count = number of live `fold-worker` pods.
   deliverable. The `fold-leader-bench` harness was added to drive it.
 - PR #201 — cross-machine fold fan-out M1/M2 (the capability this section
   measured live).
-- #203 — native manual-ack streaming-pull merge-plane client (lever to
-  approach the depth-bounded fold ideal).
+- #203 — native manual-ack streaming-pull merge-plane client (DELIVERED; the
+  "Native streaming-pull re-measurement" section above is its result — the plane
+  poll latency is removed; the residual barrier is now the GCS-CLI proof-store
+  transit, the next lever).
 - ADR-0006 — distributed-prover-conductor (production topology source).
