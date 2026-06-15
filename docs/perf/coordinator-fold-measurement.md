@@ -126,6 +126,86 @@ PR #194's "no single-box speedup" finding, and it sharpens the framing:
 - We did NOT change the default `--l2-workers` value. Any change to the
   default is its own decision and a separate PR.
 
+## Multi-coordinator cluster experiment — attempted, BLOCKED (issue #197)
+
+> **Status:** feasibility result (issue #197). A real-VM
+> `c4a-highcpu-64` cluster experiment was scoped to measure fold wall-clock
+> with **1 vs 2 vs 3 coordinator machines** on a fixed 56-leaf batch. A
+> pre-provisioning code investigation found the prerequisite feature does
+> not exist, so **no VMs were provisioned** and the comparison was not run.
+> This is the honest result: the test we wanted requires a feature
+> (cross-machine merge fan-out) that is not yet implemented.
+
+### What was attempted
+
+The plan (issue #197): provision 4 cell VMs + N coordinator VMs (all
+`c4a-highcpu-64`, same zone), generate ~56 L2-leaf proofs ONCE from a
+~500-tx block at `S=9`, persist them, then fold that **identical** batch
+with 1, then 2, then 3 coordinators — capping per-merge threads so merges
+spread one-per-coordinator across the cluster — and compare fold wall-clock.
+Success = a fold-wall-vs-coordinator-count trend with the final proof
+verifying and bit-identical across configs.
+
+### Why it is blocked (the key feasibility finding)
+
+A single block's merge tree runs **entirely inside ONE coordinator
+process**. There is no mechanism to shard one block's merges across
+**separate coordinator machines**. Adding coordinator VMs only lets them
+prove *different blocks* concurrently — irrelevant to a single-block fold.
+The 1-vs-2-vs-3-machine comparison therefore cannot be measured honestly
+with today's code. Evidence (verified against the current `main` tip,
+including PR #194 and PR #196):
+
+1. **Fold is in-process.** `coordinator_real_fold`
+   (`bench/src/bin/bench.rs`) downloads all `k` leaves and calls
+   `fold_merge_tree` in the same process; `run_coordinator` pulls one block
+   and folds it end-to-end on the one box that pulled it.
+2. **`--l2-workers > 1` is same-machine threads.** `fold_merge_tree`'s
+   parallel path (PR #194) builds an **in-process rayon `ThreadPool`**.
+   Its own comment: *"plonky2's global rayon pool still saturates cores per
+   individual proof."* This is the single-box concurrency that the
+   single-box numbers above already showed to be ~2x slower — not
+   cross-machine fan-out.
+3. **`CoordinatorPool` scales across BLOCKS, not within a fold.**
+   `bench/src/conductor/dispatch.rs`: N coordinators competing-pull *whole
+   blocks*; the pool never shards one block's merge tree. Module doc: *"the
+   pool is HORIZONTAL only"* with *"no per-coordinator vertical
+   concurrency (#113 SECONDARY lever, deferred)."*
+4. **No coordinator→coordinator proof transit.** `conductor/pubsub.rs` has
+   block-dispatch, chunk-dispatch (coordinator→cells), and chunk-result
+   (cells→coordinator) planes only. There is no plane to ship an
+   intermediate (level-`n`) merge proof from one coordinator to another for
+   level `n+1`. Intermediate merge proofs never leave the folding process.
+
+### What the missing feature requires (filed as issue #198)
+
+To make the #197 measurement runnable, a single block's merge tree must
+shard across coordinator machines:
+
+- a **merge-task plane** (Pub/Sub topic/sub or queue) so any coordinator can
+  claim a pending merge pair;
+- **intermediate-proof transit**: upload every merge output (not just
+  leaves) to the shared proof store keyed by `{height, level, index}` so the
+  next level can read it on a different box;
+- **level-barrier / dependency readiness** so level `n+1` waits for its
+  level-`n` inputs, preserving the odd-proof carry-up;
+- refactor `fold_merge_tree` to optionally **emit merge tasks** to the plane
+  instead of always proving them in-process, keeping the #193 bit-identical
+  determinism contract;
+- a **real per-merge thread budget** (one merge on full cores per
+  coordinator, not the in-process rayon-pool sharing).
+
+This is the concrete sub-scope of issue #113. See issue **#198** for the
+full implementation outline.
+
+### Honest conclusion (cluster experiment)
+
+**Blocked: multi-coordinator (cross-machine) merge fan-out is not yet
+implemented; follow-up filed (#198).** No fold-wall numbers were
+fabricated, no cluster was burned pretending, and no VMs were left running
+(none were created). The single-box numbers above (PR #196) remain the only
+measured fold data; the cluster claim awaits #198.
+
 ## Reproduce the measurement
 
 ```sh
@@ -152,4 +232,8 @@ Look for the `[coord-fold-bench] RESULT ...` and
 - Issue #113 — multi-node coordinator pool (the design slice the
   parallel fold actually unlocks).
 - Issue #179 — distributed coordinator WS this lives in.
+- Issue #197 — multi-coordinator cluster fold experiment (attempted;
+  blocked on cross-machine fan-out — this note's cluster section).
+- Issue #198 — implement cross-machine merge fan-out (the prerequisite the
+  #197 experiment needs).
 - ADR-0006 — distributed-prover-conductor (production topology source).
