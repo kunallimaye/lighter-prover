@@ -15,7 +15,7 @@ build-and-run: build run
 # Trace producer for the streaming bench. Contract: trace-format.md.
 # stream-record / stream-replay live emission need network or a trace;
 # feeder-test is fully offline (<1 min, no network, no sleeps).
-.PHONY: stream-record stream-replay stream-peak stream-tx-mix feeder-test
+.PHONY: stream-record stream-replay stream-peak stream-tx-mix stream-publish-smoke feeder-test
 
 FEEDER := python3 feeder/feeder.py
 
@@ -43,6 +43,18 @@ stream-peak: ## Synthesize peak-load trace: RATE=TXS DURATION=15m
 
 feeder-test: ## Run the offline feeder test suite (no network, <1 min)
 	python3 -m unittest discover -s feeder/tests -v
+
+# stream-publish-smoke (#211): tiny live smoke for the native Pub/Sub
+# publisher bridge. Opt-in / env-gated (like `make e2e`) — requires a
+# real Pub/Sub topic + ADC credentials, makes real network calls, costs
+# pennies in Pub/Sub publishes. NOT part of any automated test target.
+# Publishes ~33 messages (3 blk/s × 10s) to PUBSUB_TOPIC in PUBSUB_PROJECT
+# and prints the bridge's pacing-drift summary at the end.
+stream-publish-smoke: ## Live Pub/Sub publish smoke (#211): PUBSUB_PROJECT=... PUBSUB_TOPIC=...
+	@test -n "$(PUBSUB_PROJECT)" || { echo "error: PUBSUB_PROJECT=<id> required"; exit 1; }
+	@test -n "$(PUBSUB_TOPIC)" || { echo "error: PUBSUB_TOPIC=<name> required"; exit 1; }
+	$(FEEDER) synth-peak --rate 3 --duration 10s \
+	  --project $(PUBSUB_PROJECT) --publish-to $(PUBSUB_TOPIC)
 # --- end feeder (producer, #48) ---
 
 # --- synthetic block corpus (#165; Refs #128 #121 #144) ---

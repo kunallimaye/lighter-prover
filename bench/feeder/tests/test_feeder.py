@@ -711,5 +711,317 @@ class TestTxMixGeoBlockGuidance(unittest.TestCase):
         self.assertNotIn("TX-TYPE MIX", out.getvalue())
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Native Pub/Sub publisher bridge (#211).
+# Offline only: a fake publisher captures every publish; a deterministic
+# clock drives pacing arithmetic with NO real sleeps and NO real network.
+# These tests pin the bridge's three contracts from the issue:
+#   - pacing fidelity (the publish loop honors ts_ms-derived schedule);
+#   - honest backpressure (a publish failure RAISES, does not drop);
+#   - wire payload byte-equivalence (the on-the-wire JSON matches what
+#     `gcloud pubsub publish` of {height, tx_count} would have sent).
+# ──────────────────────────────────────────────────────────────────────
+
+
+class _FakeFuture:
+    """Stand-in for the google-cloud-pubsub publish future.
+
+    `outcome` is either None (success, sentinel-id returned) or an Exception
+    (raised from `.result()` to drive the failure path). A `timeout`
+    argument is accepted and recorded so tests assert backpressure honors
+    the per-publish deadline.
+    """
+
+    def __init__(self, outcome=None):
+        self.outcome = outcome
+        self.timeouts_seen = []
+
+    def result(self, timeout=None):
+        self.timeouts_seen.append(timeout)
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return "message-id-stub"
+
+
+class _FakePublisher:
+    """Captures every publish call for assertions. `responses` is a list of
+    _FakeFuture instances handed out in order; the last entry repeats when
+    exhausted, matching the _FakeRequests style elsewhere in this file."""
+
+    def __init__(self, responses=None):
+        self._responses = list(responses) if responses else [_FakeFuture()]
+        self.calls = []   # [{"topic": ..., "data": ...}]
+
+    @staticmethod
+    def topic_path(project, topic):
+        return f"projects/{project}/topics/{topic}"
+
+    def publish(self, topic, data, **attrs):
+        self.calls.append({"topic": topic, "data": data, "attrs": attrs})
+        return (self._responses.pop(0) if len(self._responses) > 1
+                else self._responses[0])
+
+
+class _Clock:
+    """Deterministic clock + sleep that advances `t` by the slept amount."""
+
+    def __init__(self, start=0.0):
+        self.t = start
+        self.sleeps = []
+
+    def clock(self):
+        return self.t
+
+    def sleep(self, secs):
+        self.sleeps.append(secs)
+        self.t += secs
+
+
+class TestBlockMessagePayload(unittest.TestCase):
+    """Wire-payload byte-equivalence with `gcloud pubsub publish` (#211)."""
+
+    def test_projects_to_height_and_tx_count_only(self):
+        ev = {"ts_ms": 12345, "height": 1001, "tx_count": 500,
+              "synthetic": False}
+        self.assertEqual(feeder.block_message_payload(ev),
+                         {"height": 1001, "tx_count": 500})
+
+    def test_encode_is_compact_utf8_json(self):
+        ev = {"ts_ms": 0, "height": 7, "tx_count": 1}
+        # The Rust coordinator (`bench --mode coordinator`) parses
+        # BlockMessage as JSON. The bridge MUST emit the same bytes that
+        # `gcloud pubsub publish --message '{"height":7,"tx_count":1}'`
+        # would have sent — compact, no whitespace, UTF-8.
+        self.assertEqual(feeder.encode_block_message(ev),
+                         b'{"height":7,"tx_count":1}')
+
+    def test_coerces_to_int(self):
+        # Defensive: replay's expanded events are already ints (P4), but
+        # synthetic/null upstream can present floats. Pin int coercion.
+        ev = {"ts_ms": 0, "height": 7.0, "tx_count": 12.0}
+        p = feeder.block_message_payload(ev)
+        self.assertEqual(p, {"height": 7, "tx_count": 12})
+        self.assertIsInstance(p["height"], int)
+        self.assertIsInstance(p["tx_count"], int)
+
+
+class TestPacingReport(unittest.TestCase):
+    """Drift bookkeeping (#211 requirement 2: tail pacing drift reported)."""
+
+    def test_empty_report(self):
+        r = feeder.PacingReport()
+        self.assertEqual(r.summary(), {"published": 0})
+        self.assertIn("no events", r.render())
+
+    def test_records_signed_and_absolute_drift(self):
+        r = feeder.PacingReport()
+        r.record(scheduled_ms=100.0, actual_ms=110.0)   # +10  late
+        r.record(scheduled_ms=200.0, actual_ms=195.0)   # -5   early
+        r.record(scheduled_ms=300.0, actual_ms=320.0)   # +20  late
+        s = r.summary()
+        self.assertEqual(s["published"], 3)
+        self.assertEqual(s["late_count"], 2)
+        self.assertAlmostEqual(s["late_fraction"], 2 / 3)
+        # abs drifts sorted: [5, 10, 20] -> max = 20
+        self.assertEqual(s["abs_drift_ms_max"], 20.0)
+        # mean signed = (10 - 5 + 20)/3
+        self.assertAlmostEqual(s["signed_drift_ms_mean"], 25.0 / 3)
+
+    def test_render_mentions_late_and_tail(self):
+        r = feeder.PacingReport()
+        for d in (0, 5, 10, 50, 100):
+            r.record(0.0, float(d))
+        text = r.render()
+        self.assertIn("published 5", text)
+        self.assertIn("p50", text)
+        self.assertIn("p95", text)
+        self.assertIn("p99", text)
+        self.assertIn("max", text)
+
+
+class TestPublisherBridgePublishOne(unittest.TestCase):
+    """publish_one: sleeps to the scheduled instant, blocks on server
+    accept, records drift, raises on failure (no silent drop). All with
+    deterministic clock + sleep — NO real time elapses."""
+
+    def _bridge(self, futures=None):
+        pub = _FakePublisher(futures)
+        c = _Clock()
+        bridge = feeder.PublisherBridge(
+            pub, "projects/p/topics/t", sleep=c.sleep, clock=c.clock)
+        return bridge, pub, c
+
+    def test_sleeps_to_scheduled_offset_then_publishes(self):
+        bridge, pub, c = self._bridge()
+        # Schedule says: publish at +250ms from base; current clock is base.
+        bridge.publish_one(b'{"height":1,"tx_count":1}', 250.0, base_clock=0.0)
+        # Slept ~0.25s, then published exactly once.
+        self.assertEqual(len(c.sleeps), 1)
+        self.assertAlmostEqual(c.sleeps[0], 0.25)
+        self.assertEqual(len(pub.calls), 1)
+        self.assertEqual(pub.calls[0]["topic"], "projects/p/topics/t")
+
+    def test_does_not_sleep_when_behind_schedule(self):
+        bridge, pub, c = self._bridge()
+        c.t = 1.0  # already 1s past base
+        bridge.publish_one(b'x', 250.0, base_clock=0.0)
+        # No sleep — we're already late; just publish immediately.
+        self.assertEqual(c.sleeps, [])
+        self.assertEqual(len(pub.calls), 1)
+        # Drift recorded as positive (late by 750ms).
+        s = bridge.report.summary()
+        self.assertEqual(s["late_count"], 1)
+        self.assertAlmostEqual(s["abs_drift_ms_max"], 750.0)
+
+    def test_drift_is_measured_after_server_accept(self):
+        # Make the server's accept take wall time (publish-side latency).
+        # The bridge measures actual_ms AFTER future.result() returns, so a
+        # slow accept must show up as positive drift in the report.
+        future = _FakeFuture()
+        bridge, pub, c = self._bridge([future])
+        # Patch the clock to advance during result() to simulate accept time.
+        original_result = future.result
+
+        def slow_result(timeout=None):
+            c.t += 0.020   # 20 ms server accept
+            return original_result(timeout=timeout)
+
+        future.result = slow_result
+        bridge.publish_one(b'x', 0.0, base_clock=0.0)
+        s = bridge.report.summary()
+        self.assertEqual(s["published"], 1)
+        # Drift ~20ms positive (late by accept time, not by scheduling).
+        self.assertGreaterEqual(s["abs_drift_ms_max"], 19.0)
+
+    def test_publish_failure_raises_loudly_no_silent_drop(self):
+        # Honest backpressure (#211 req 5): a server-side failure MUST
+        # propagate; we never swallow + continue (that would corrupt the
+        # benchmark's throughput claim by silently dropping a block).
+        boom = RuntimeError("pubsub publish: server unavailable")
+        bridge, pub, _ = self._bridge([_FakeFuture(outcome=boom)])
+        with self.assertRaises(RuntimeError) as cm:
+            bridge.publish_one(b'x', 0.0, base_clock=0.0)
+        self.assertIn("unavailable", str(cm.exception))
+        # And nothing was recorded as "published" — the report is honest.
+        self.assertEqual(bridge.report.summary(), {"published": 0})
+
+    def test_timeout_is_passed_to_future_result(self):
+        # The per-publish deadline MUST reach future.result(timeout=...);
+        # otherwise a hung publish would hang the benchmark indefinitely.
+        future = _FakeFuture()
+        bridge, pub, _ = self._bridge([future])
+        bridge.timeout_s = 7.5
+        bridge.publish_one(b'x', 0.0, base_clock=0.0)
+        self.assertEqual(future.timeouts_seen, [7.5])
+
+
+class TestPublishScheduledEvents(unittest.TestCase):
+    """The bridge over a multi-event schedule (the realistic path)."""
+
+    def _bridge(self, futures=None):
+        pub = _FakePublisher(futures)
+        c = _Clock()
+        bridge = feeder.PublisherBridge(
+            pub, "projects/p/topics/t", sleep=c.sleep, clock=c.clock)
+        return bridge, pub, c
+
+    def test_paces_to_each_events_ts_ms_offset(self):
+        # Schedule mirrors what replay_schedule / synth_schedule produce:
+        # ts_ms is the wall-clock target, sorted non-decreasing.
+        events = [
+            {"ts_ms": 1000, "height": 1, "tx_count": 100},
+            {"ts_ms": 1250, "height": 2, "tx_count": 200},
+            {"ts_ms": 1500, "height": 3, "tx_count": 300},
+        ]
+        bridge, pub, c = self._bridge()
+        feeder.publish_scheduled_events(bridge, events, base_clock=0.0)
+        # First event: offset 0 (its own ts_ms is the schedule zero) -> no sleep.
+        # Second event: +250ms after first. Third: +250ms after second.
+        # Cumulative slept ~= [0, 0.25, 0.25] (no sleep before the first).
+        # The 3 publish calls hit the topic with the right payloads:
+        wires = [c["data"] for c in pub.calls]
+        self.assertEqual(wires, [
+            b'{"height":1,"tx_count":100}',
+            b'{"height":2,"tx_count":200}',
+            b'{"height":3,"tx_count":300}',
+        ])
+        # Two sleeps of 0.25s each (not three; the first event runs immediately).
+        self.assertEqual(len(c.sleeps), 2)
+        for s in c.sleeps:
+            self.assertAlmostEqual(s, 0.25)
+
+    def test_failure_midstream_raises_with_partial_report(self):
+        # Two ok publishes, then a server error on the third. The error
+        # must propagate, and the bridge's report must reflect exactly the
+        # two successes (no fabricated third).
+        events = [
+            {"ts_ms": 0, "height": 1, "tx_count": 1},
+            {"ts_ms": 100, "height": 2, "tx_count": 1},
+            {"ts_ms": 200, "height": 3, "tx_count": 1},
+        ]
+        bridge, pub, c = self._bridge([
+            _FakeFuture(),
+            _FakeFuture(),
+            _FakeFuture(outcome=RuntimeError("publish failed")),
+        ])
+        with self.assertRaises(RuntimeError):
+            feeder.publish_scheduled_events(bridge, events, base_clock=0.0)
+        self.assertEqual(bridge.report.summary()["published"], 2)
+        self.assertEqual(len(pub.calls), 3)   # the third call was attempted
+
+    def test_progress_callback_called_per_success(self):
+        events = [
+            {"ts_ms": 0, "height": 1, "tx_count": 1},
+            {"ts_ms": 0, "height": 2, "tx_count": 1},
+        ]
+        bridge, _, _ = self._bridge()
+        seen = []
+        feeder.publish_scheduled_events(
+            bridge, events, base_clock=0.0, progress=seen.append)
+        self.assertEqual([e["height"] for e in seen], [1, 2])
+
+
+class TestPublishCLIWiring(unittest.TestCase):
+    """The CLI surface: --publish-to validation + dry-run mutex."""
+
+    def test_publish_to_requires_project(self):
+        rc, _ = run_cli(["synth-peak", "--rate", "11", "--duration", "1s",
+                         "--publish-to", "dispatch-topic"])
+        self.assertNotEqual(rc, 0)   # missing --project -> non-zero exit
+
+    def test_publish_to_rejects_dry_run(self):
+        rc, _ = run_cli(["synth-peak", "--rate", "11", "--duration", "1s",
+                         "--publish-to", "dispatch", "--project", "p",
+                         "--dry-run"])
+        self.assertNotEqual(rc, 0)
+
+    def test_replay_publish_to_requires_project(self):
+        rc, _ = run_cli(["replay", "--in", str(FIXTURE), "--target-rate",
+                         "11", "--publish-to", "dispatch-topic"])
+        self.assertNotEqual(rc, 0)
+
+    def test_replay_publish_to_rejects_dry_run(self):
+        rc, _ = run_cli(["replay", "--in", str(FIXTURE), "--target-rate",
+                         "11", "--publish-to", "d", "--project", "p",
+                         "--dry-run"])
+        self.assertNotEqual(rc, 0)
+
+
+class TestBuildPublisherBridgeWithStub(unittest.TestCase):
+    """build_publisher_bridge wiring with an injected fake pubsub_v1 module
+    — exercises the real glue path without google-cloud-pubsub installed."""
+
+    def test_constructs_with_injected_pubsub_v1(self):
+        class _StubPubSubV1:
+            class PublisherClient(_FakePublisher):
+                def __init__(self):
+                    super().__init__()
+        bridge = feeder.build_publisher_bridge(
+            "my-proj", "dispatch", pubsub_v1=_StubPubSubV1)
+        self.assertEqual(bridge.topic_path,
+                         "projects/my-proj/topics/dispatch")
+        self.assertIsInstance(bridge, feeder.PublisherBridge)
+
+
 if __name__ == "__main__":
     unittest.main()

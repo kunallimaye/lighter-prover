@@ -1,4 +1,9 @@
-# Network subcommands only (record, peak-hours). replay / synth-peak /
-# the offline test suite are pure stdlib.
+# Network subcommands only (record, peak-hours, tx-mix, and replay /
+# synth-peak with --publish-to). The offline test suite stays pure stdlib;
+# all of these are imported lazily so unused subcommands need no deps.
 websockets>=12
 requests>=2.31
+# Native Pub/Sub publisher bridge (#211) — replaces the per-message
+# `gcloud pubsub publish` shell-out so the publisher is not the bottleneck
+# at sustained mainnet rates (mean 11 blk/s, peak 41 blk/s; see #128).
+google-cloud-pubsub>=2.18
