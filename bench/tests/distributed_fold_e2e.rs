@@ -41,9 +41,18 @@
 //!      the library `circuit::` crate (the helpers themselves live in the
 //!      `bench` BINARY and are not reachable from an integration test).
 //!
+//!      Issue #193: the fold is run BOTH ways — the SERIAL fold (pre-#193) and
+//!      the PARALLEL per-level fold (the production coordinator's new
+//!      `fold_merge_tree` workers>1 path) — over the SAME k leaves, and the two
+//!      final proofs are asserted BIT-IDENTICAL (the determinism/equivalence
+//!      guarantee). L4 is then driven through the PARALLEL result so this gate
+//!      exercises the new parallel coordinator fold end to end.
+//!
 //! Assertions (all must hold):
 //!   - MULTI-CHUNK: k >= 2 so the merge tree actually fires (a single chunk
 //!     would not exercise `BlockTxChainMergeCircuit` recursion).
+//!   - DETERMINISM (issue #193): the serial and parallel folds over the same
+//!     leaves produce a BIT-IDENTICAL final proof (same public inputs).
 //!   - The final L4 `BlockCircuit` block proof VERIFIES (genuine, not stubbed).
 //!   - The MEASURED merge wall and L4 wall are both > 0 (real proving time).
 //!   - The BENCH_EVENT `CoordinatorFold` line emitted for this block is
@@ -92,6 +101,112 @@ const CHAIN_ID: u32 = 304;
 /// A merge-tree node: the proof plus whether it is a merge (`true`) or a leaf
 /// chain proof (`false`). Mirrors the binary's `TreeNode`.
 type TreeNode = (ProofWithPublicInputs<F, C, D>, bool);
+
+/// Issue #193: prove ONE pairwise merge. Mirrors the binary's shared
+/// `prove_merge_pair` helper (single source of truth for one merge) so both the
+/// serial and parallel test folds below invoke the exact same merge circuit.
+fn prove_pair(
+    merge_target: &circuit::block_tx_chain_merge_constraints::BlockTxChainMergeTarget,
+    merge_data: &plonky2::plonk::circuit_data::CircuitData<F, C, D>,
+    left: &TreeNode,
+    right: &TreeNode,
+) -> TreeNode {
+    let proof = BlockTxChainMergeCircuit::prove(
+        merge_target,
+        merge_data,
+        &left.0,
+        left.1,
+        &right.0,
+        right.1,
+    )
+    .expect("merge prove");
+    (proof, true)
+}
+
+/// Issue #193: SERIAL coordinator fold — byte-for-byte the pre-#193 path. Folds
+/// `leaves` into one block-chain proof, returning `(final_node, depth, merges)`.
+fn fold_serial(
+    merge_target: &circuit::block_tx_chain_merge_constraints::BlockTxChainMergeTarget,
+    merge_data: &plonky2::plonk::circuit_data::CircuitData<F, C, D>,
+    leaves: &[ProofWithPublicInputs<F, C, D>],
+) -> (TreeNode, usize, usize) {
+    let mut level: Vec<TreeNode> = leaves.iter().map(|p| (p.clone(), false)).collect();
+    let mut depth = 0usize;
+    let mut merges = 0usize;
+    while level.len() > 1 {
+        depth += 1;
+        let mut iter = level.into_iter();
+        let mut next: Vec<TreeNode> = Vec::new();
+        while let Some(left) = iter.next() {
+            match iter.next() {
+                Some(right) => {
+                    next.push(prove_pair(merge_target, merge_data, &left, &right));
+                    merges += 1;
+                }
+                None => next.push(left),
+            }
+        }
+        level = next;
+    }
+    let node = level.pop().expect("serial fold produced a final proof");
+    (node, depth, merges)
+}
+
+/// Issue #193: PARALLEL coordinator fold — folds each LEVEL concurrently across
+/// an owned rayon pool (mirrors the binary's `fold_merge_tree` workers>1 path:
+/// collect the level's pairs preserving odd carry-up, prove with
+/// `into_par_iter`, then RE-SORT by the stable in-level index for determinism).
+/// Returns `(final_node, depth, merges)`. The KEY correctness property the
+/// determinism test asserts: this produces a bit-identical final proof to
+/// [`fold_serial`] over the same leaves regardless of worker scheduling.
+fn fold_parallel(
+    merge_target: &circuit::block_tx_chain_merge_constraints::BlockTxChainMergeTarget,
+    merge_data: &plonky2::plonk::circuit_data::CircuitData<F, C, D>,
+    leaves: &[ProofWithPublicInputs<F, C, D>],
+    workers: usize,
+) -> (TreeNode, usize, usize) {
+    use rayon::prelude::*;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .expect("build fold pool");
+    let mut level: Vec<TreeNode> = leaves.iter().map(|p| (p.clone(), false)).collect();
+    let mut depth = 0usize;
+    let mut merges = 0usize;
+    while level.len() > 1 {
+        depth += 1;
+        let mut pairs: Vec<(TreeNode, Option<TreeNode>)> = Vec::with_capacity(level.len() / 2 + 1);
+        let mut iter = level.into_iter();
+        while let Some(left) = iter.next() {
+            match iter.next() {
+                Some(right) => pairs.push((left, Some(right))),
+                None => pairs.push((left, None)),
+            }
+        }
+        let mut indexed: Vec<(usize, TreeNode, bool)> = pool.install(|| {
+            pairs
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, (left, right_opt))| match right_opt {
+                    Some(right) => (i, prove_pair(merge_target, merge_data, &left, &right), true),
+                    None => (i, left, false),
+                })
+                .collect()
+        });
+        // Determinism: restore in-level order regardless of completion order.
+        indexed.sort_by_key(|(i, _, _)| *i);
+        let mut next: Vec<TreeNode> = Vec::with_capacity(indexed.len());
+        for (_, node, was_merge) in indexed {
+            if was_merge {
+                merges += 1;
+            }
+            next.push(node);
+        }
+        level = next;
+    }
+    let node = level.pop().expect("parallel fold produced a final proof");
+    (node, depth, merges)
+}
 
 fn enabled() -> bool {
     std::env::var("DIST_FOLD_E2E")
@@ -381,41 +496,57 @@ fn run_e2e() {
     }
     assert_eq!(leaves.len(), k, "must download all k leaf proofs");
 
-    // FOLD: REAL BlockTxChainMergeCircuit pairwise tree, sequential (the
-    // coordinator's fold). Measure the wall.
-    let merge_start = Instant::now();
-    let mut level: Vec<TreeNode> = leaves.into_iter().map(|p| (p, false)).collect();
-    let mut depth = 0usize;
-    let mut merges = 0usize;
-    while level.len() > 1 {
-        depth += 1;
-        let mut iter = level.into_iter();
-        let mut next: Vec<TreeNode> = Vec::new();
-        while let Some(left) = iter.next() {
-            match iter.next() {
-                Some(right) => {
-                    let merged = BlockTxChainMergeCircuit::prove(
-                        &merge_target,
-                        &merge_data,
-                        &left.0,
-                        left.1,
-                        &right.0,
-                        right.1,
-                    )
-                    .expect("merge prove");
-                    merges += 1;
-                    next.push((merged, true));
-                }
-                None => next.push(left),
-            }
-        }
-        level = next;
-    }
-    let merge_ms = merge_start.elapsed().as_millis() as u64;
-    let (final_proof, final_is_merge) = level.pop().expect("fold produced a final proof");
+    // FOLD: REAL BlockTxChainMergeCircuit pairwise tree (the coordinator's
+    // fold). Issue #193 — run BOTH the serial fold AND the parallel fold over
+    // the SAME leaves, measure each wall, and assert they produce a
+    // BIT-IDENTICAL final proof (the determinism/equivalence guarantee that
+    // makes the parallel scheduling safe). The parallel result is then driven
+    // through L4 so the e2e exercises the NEW parallel path end to end.
+    let serial_start = Instant::now();
+    let ((serial_proof, serial_is_merge), serial_depth, serial_merges) =
+        fold_serial(&merge_target, &merge_data, &leaves);
+    let serial_merge_ms = serial_start.elapsed().as_millis() as u64;
+
+    // workers>1 parallelism: cap at k to avoid idle threads on tiny trees.
+    let fold_workers = std::cmp::min(std::cmp::max(2, k), 8);
+    let parallel_start = Instant::now();
+    let ((parallel_proof, parallel_is_merge), parallel_depth, parallel_merges) =
+        fold_parallel(&merge_target, &merge_data, &leaves, fold_workers);
+    let parallel_merge_ms = parallel_start.elapsed().as_millis() as u64;
+
+    // ---- DETERMINISM / EQUIVALENCE (issue #193 KEY CHECK): serial == parallel.
+    assert_eq!(
+        serial_depth, parallel_depth,
+        "serial vs parallel fold disagree on tree depth ({serial_depth} != {parallel_depth})"
+    );
+    assert_eq!(
+        serial_merges, parallel_merges,
+        "serial vs parallel fold disagree on merge count ({serial_merges} != {parallel_merges})"
+    );
+    assert_eq!(
+        serial_is_merge, parallel_is_merge,
+        "serial vs parallel fold disagree on final_is_merge"
+    );
+    assert_eq!(
+        serial_proof.public_inputs, parallel_proof.public_inputs,
+        "DETERMINISM VIOLATION: serial and parallel folds produced DIFFERENT final proof \
+         public inputs — parallel scheduling must be bit-identical to the serial fold"
+    );
+    println!(
+        "[e2e]   DETERMINISM OK: serial fold ({serial_merge_ms} ms) == parallel fold \
+         ({parallel_merge_ms} ms, workers={fold_workers}) — identical final proof public inputs \
+         (depth={serial_depth} merges={serial_merges})"
+    );
+
+    // Drive L4 with the PARALLEL fold result (exercise the new path e2e). The
+    // reported merge wall is the parallel fold's realized wall.
+    let merge_ms = parallel_merge_ms;
+    let (final_proof, final_is_merge) = (parallel_proof, parallel_is_merge);
+    let depth = parallel_depth;
+    let merges = parallel_merges;
     println!(
         "[e2e]   FOLD done: depth={depth} merges={merges} final_is_merge={final_is_merge} \
-         merge_ms={merge_ms}"
+         serial_merge_ms={serial_merge_ms} parallel_merge_ms={merge_ms}"
     );
     assert!(
         merges >= 1,
