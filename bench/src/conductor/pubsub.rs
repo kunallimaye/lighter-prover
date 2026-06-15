@@ -133,9 +133,97 @@ pub struct ChunkResultMessage {
     pub proof_object: Option<String>,
 }
 
+/// One MERGE-TASK message body (issue #198 — cross-machine fold fan-out).
+/// The leader (the block's owning coordinator) emits one of these per merge
+/// pair to the merge-task plane; any idle coordinator competing-pulls it,
+/// downloads the two input proofs by key from the proof store, proves the
+/// merge with the SHARED merge circuit, uploads the output, and publishes a
+/// [`MergeResultMessage`].
+///
+/// Carries **references not bytes** (the ~412 KB proof never travels the bus;
+/// it transits the proof store keyed by `{height}/m/{level}/{index}` — see
+/// [`super::storage::merge_object_key`]):
+/// `{ "height": u64, "level": u64, "index": u64,
+///    "left_key": String, "right_key": String }`.
+///
+/// `level` is the 1-based merge level and `index` is the stable in-level pair
+/// index — the SAME index the #193 determinism re-sort keys on, so the
+/// consumer's output lands at a deterministic position regardless of which
+/// worker proved it. `left_key`/`right_key` are the proof-store keys of the
+/// two inputs (leaf keys at level 1, merge keys above); `left_is_merge` /
+/// `right_is_merge` are the inputs' merge-VK flags (the merge circuit needs to
+/// know which child VK each input carries — identical to the in-process
+/// `TreeNode`'s `is_merge` bit), so the worker never has to GUESS it from the
+/// key shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeTaskMessage {
+    pub height: u64,
+    pub level: u64,
+    pub index: u64,
+    pub left_key: String,
+    pub right_key: String,
+    /// Whether the left input is itself a merge proof (carries the merge VK).
+    /// `#[serde(default)]` => legacy producers (none yet) decode as `false`.
+    #[serde(default)]
+    pub left_is_merge: bool,
+    /// Whether the right input is itself a merge proof (carries the merge VK).
+    #[serde(default)]
+    pub right_is_merge: bool,
+}
+
+/// One MERGE-RESULT message body (issue #198 — worker → leader). Reports the
+/// outcome of one merge task. Carries the OUTPUT proof's store key
+/// (`proof_object`, e.g. `{height}/m/{level}/{index}`) — a reference, never
+/// the bytes — plus the measured per-merge prove wall for instrumentation.
+///
+/// `ok = false` reports an HONEST FAILURE: the worker could not download an
+/// input, prove the merge, or upload the output. No proof is ever fabricated
+/// (the #179 honest-failure rule, mirrored from [`ChunkResultMessage`]); the
+/// leader marks the block partial and never carries a bad node up.
+///
+/// `{ "height": u64, "level": u64, "index": u64, "ok": bool,
+///    "cell": String, "proof_object": String | null,
+///    "prove_ms": u64 | null }`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeResultMessage {
+    pub height: u64,
+    pub level: u64,
+    pub index: u64,
+    pub ok: bool,
+    /// Reporting worker identity (hostname) — for attribution only.
+    pub cell: String,
+    /// Reference (proof-store object key) to the OUTPUT merge proof BYTES this
+    /// worker uploaded. `None` on an honest failure (`ok = false`).
+    #[serde(default)]
+    pub proof_object: Option<String>,
+    /// Measured `BlockTxChainMergeCircuit::prove` wall (ms) — surfaced as a
+    /// per-distributed-worker prove-wall metric (issue #198 instrumentation;
+    /// measured, not gated). `None` on failure.
+    #[serde(default)]
+    pub prove_ms: Option<u64>,
+}
+
 impl BlockMessage {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("BlockMessage serializes")
+    }
+    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
+}
+
+impl MergeTaskMessage {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("MergeTaskMessage serializes")
+    }
+    pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(s)
+    }
+}
+
+impl MergeResultMessage {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("MergeResultMessage serializes")
     }
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(s)
@@ -187,6 +275,16 @@ pub struct PubSubConfig {
     pub results_topic: String,
     /// Results subscription (coordinator pulls chunk results).
     pub results_subscription: String,
+    /// MERGE-TASK topic (leader → fold workers; issue #198). The leader
+    /// publishes one [`MergeTaskMessage`] per merge pair here; idle
+    /// coordinators competing-pull from `merge_task_subscription`.
+    pub merge_task_topic: String,
+    /// MERGE-TASK subscription (fold workers competing-pull; issue #198).
+    pub merge_task_subscription: String,
+    /// MERGE-RESULT topic (fold workers → leader; issue #198).
+    pub merge_result_topic: String,
+    /// MERGE-RESULT subscription (leader pulls merge results; issue #198).
+    pub merge_result_subscription: String,
     /// `gcloud` binary path (default `gcloud`; overridable for the emulator
     /// or a vendored CLI).
     pub gcloud_bin: String,
@@ -293,6 +391,36 @@ impl GcloudPubSub {
 
     pub fn publish_result(&self, msg: &ChunkResultMessage) -> std::io::Result<String> {
         self.publish(&self.cfg.results_topic, &msg.to_json())
+    }
+
+    // ---- merge-task plane wrappers (issue #198) ----
+
+    pub fn publish_merge_task(&self, msg: &MergeTaskMessage) -> std::io::Result<String> {
+        self.publish(&self.cfg.merge_task_topic, &msg.to_json())
+    }
+
+    pub fn publish_merge_result(&self, msg: &MergeResultMessage) -> std::io::Result<String> {
+        self.publish(&self.cfg.merge_result_topic, &msg.to_json())
+    }
+
+    /// Pull up to `limit` merge tasks from the merge-task subscription
+    /// (fold workers compete; issue #198).
+    pub fn pull_merge_tasks(&self, limit: u32) -> std::io::Result<Vec<MergeTaskMessage>> {
+        let msgs = self.pull(&self.cfg.merge_task_subscription, limit)?;
+        Ok(msgs
+            .into_iter()
+            .filter_map(|m| MergeTaskMessage::from_json(&m.data).ok())
+            .collect())
+    }
+
+    /// Pull up to `limit` merge results from the merge-result subscription
+    /// (the leader collects a level's results; issue #198).
+    pub fn pull_merge_results(&self, limit: u32) -> std::io::Result<Vec<MergeResultMessage>> {
+        let msgs = self.pull(&self.cfg.merge_result_subscription, limit)?;
+        Ok(msgs
+            .into_iter()
+            .filter_map(|m| MergeResultMessage::from_json(&m.data).ok())
+            .collect())
     }
 
     /// Pull one block from the dispatch subscription (competing-pull,
@@ -469,6 +597,10 @@ mod tests {
             chunk_subscription: "chunk-s".into(),
             results_topic: "res-t".into(),
             results_subscription: "res-s".into(),
+            merge_task_topic: "mt-t".into(),
+            merge_task_subscription: "mt-s".into(),
+            merge_result_topic: "mr-t".into(),
+            merge_result_subscription: "mr-s".into(),
             gcloud_bin: "gcloud".into(),
         }
     }
@@ -541,6 +673,92 @@ mod tests {
         assert_eq!(decoded.proof_object, None);
         assert!(decoded.ok);
         assert_eq!(decoded.cell, "cell-old");
+    }
+
+    #[test]
+    fn merge_task_message_roundtrip() {
+        let m = MergeTaskMessage {
+            height: 186_974_616,
+            level: 2,
+            index: 3,
+            left_key: "186974616/m/1/6".into(),
+            right_key: "186974616/m/1/7".into(),
+            left_is_merge: true,
+            right_is_merge: true,
+        };
+        let json = m.to_json();
+        assert!(json.contains("\"level\":2"));
+        assert!(json.contains("\"index\":3"));
+        assert!(json.contains("\"left_key\":\"186974616/m/1/6\""));
+        assert!(json.contains("\"right_key\":\"186974616/m/1/7\""));
+        assert!(json.contains("\"left_is_merge\":true"));
+        assert_eq!(MergeTaskMessage::from_json(&json).unwrap(), m);
+
+        // Level-1 task: leaf inputs (is_merge=false).
+        let leaf_task = MergeTaskMessage {
+            height: 7,
+            level: 1,
+            index: 0,
+            left_key: "7/0".into(),
+            right_key: "7/1".into(),
+            left_is_merge: false,
+            right_is_merge: false,
+        };
+        assert_eq!(
+            MergeTaskMessage::from_json(&leaf_task.to_json()).unwrap(),
+            leaf_task
+        );
+
+        // Legacy compat: a producer without the is_merge fields decodes false.
+        let legacy =
+            r#"{"height":7,"level":1,"index":0,"left_key":"7/0","right_key":"7/1"}"#;
+        let decoded = MergeTaskMessage::from_json(legacy).unwrap();
+        assert!(!decoded.left_is_merge);
+        assert!(!decoded.right_is_merge);
+    }
+
+    #[test]
+    fn merge_result_message_roundtrip_ok_and_failure() {
+        let ok = MergeResultMessage {
+            height: 100,
+            level: 1,
+            index: 0,
+            ok: true,
+            cell: "coord-a".into(),
+            proof_object: Some("100/m/1/0".into()),
+            prove_ms: Some(1560),
+        };
+        let json = ok.to_json();
+        assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("\"proof_object\":\"100/m/1/0\""));
+        assert!(json.contains("\"prove_ms\":1560"));
+        assert_eq!(MergeResultMessage::from_json(&json).unwrap(), ok);
+
+        let fail = MergeResultMessage {
+            height: 100,
+            level: 1,
+            index: 1,
+            ok: false,
+            cell: "coord-b".into(),
+            proof_object: None,
+            prove_ms: None,
+        };
+        let jf = fail.to_json();
+        assert!(jf.contains("\"ok\":false"));
+        assert!(jf.contains("\"proof_object\":null"));
+        assert!(jf.contains("\"prove_ms\":null"));
+        assert_eq!(MergeResultMessage::from_json(&jf).unwrap(), fail);
+    }
+
+    #[test]
+    fn merge_result_backward_compatible_without_new_fields() {
+        // A producer that predates the optional fields must still deserialize
+        // (rolling-deploy compat; mirrors the chunk-result compat guard).
+        let legacy = r#"{"height":7,"level":1,"index":0,"ok":true,"cell":"c"}"#;
+        let decoded = MergeResultMessage::from_json(legacy).unwrap();
+        assert_eq!(decoded.proof_object, None);
+        assert_eq!(decoded.prove_ms, None);
+        assert!(decoded.ok);
     }
 
     #[test]

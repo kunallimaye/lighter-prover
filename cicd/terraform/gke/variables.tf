@@ -233,6 +233,49 @@ variable "results_subscription" {
   default     = "lighter-prover-results-sub"
 }
 
+# ── Cross-machine fold fan-out: the MERGE-TASK plane (issue #198) ──
+# To shard ONE block's merge tree across separate coordinator machines, the
+# leader emits merge tasks here and independent fold-worker pods competing-pull
+# them, transiting intermediate proofs through the proof store. Gated behind
+# enable_merge_plane so smoke automation is unchanged by default; the scale
+# tfvars turn it on alongside enable_chunk_plane + enable_proof_store.
+
+variable "enable_merge_plane" {
+  description = "Create the MERGE-TASK + MERGE-RESULT Pub/Sub topic/subscription pairs (issue #198 — cross-machine fold fan-out). false by default; true to run the distributed fold across separate coordinator/fold-worker machines."
+  type        = bool
+  default     = false
+}
+
+variable "merge_task_topic" {
+  description = "Pub/Sub topic the leader publishes MERGE TASKS to (leader -> fold workers; issue #198). Maps to the leader's --merge-task-topic / LIGHTER_MERGE_TASK_TOPIC."
+  type        = string
+  default     = "lighter-prover-merge-task"
+}
+
+variable "merge_task_subscription" {
+  description = "Pub/Sub subscription the fold-worker pods competing-pull merge tasks from. Maps to the workers' LIGHTER_MERGE_TASK_SUBSCRIPTION."
+  type        = string
+  default     = "lighter-prover-merge-task-sub"
+}
+
+variable "merge_ack_deadline_seconds" {
+  description = "Ack deadline for the merge-task subscription. A single merge prove is ~1.6 s on a c4a-standard-4 (issue #198 pilot fact); give workers ample headroom so an in-flight merge is not redelivered mid-prove."
+  type        = number
+  default     = 600
+}
+
+variable "merge_result_topic" {
+  description = "Pub/Sub topic the fold workers publish MERGE RESULTS to (fold workers -> leader; issue #198). Maps to the workers' --merge-result-topic / LIGHTER_MERGE_RESULT_TOPIC."
+  type        = string
+  default     = "lighter-prover-merge-result"
+}
+
+variable "merge_result_subscription" {
+  description = "Pub/Sub subscription the leader pulls merge results from (the per-level barrier; issue #198). Maps to the leader's LIGHTER_MERGE_RESULT_SUBSCRIPTION."
+  type        = string
+  default     = "lighter-prover-merge-result-sub"
+}
+
 # ── Shared proof store (issue #179, slice 1 / WS1) ──
 # The fan-IN half of the distributed prover needs a SHARED proof store so
 # cells can ship their L2 leaf proof BYTES back to the coordinator (Pub/Sub

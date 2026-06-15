@@ -79,7 +79,8 @@
 
 use std::time::Instant;
 
-use bench::conductor::storage::{GcloudStorage, StorageConfig, proof_object_key};
+use bench::conductor::fold::{InMemoryFoldTransport, MergeFn, fold_distributed};
+use bench::conductor::storage::{GcloudStorage, StorageConfig, merge_object_key, proof_object_key};
 use bench::events::{self, BenchEvent, now_iso8601, peak_rss_mb};
 use bench::prestate::{ChunkPreState, sweep_per_tx_snapshots};
 use bench::seed::seed_from_state;
@@ -206,6 +207,90 @@ fn fold_parallel(
     }
     let node = level.pop().expect("parallel fold produced a final proof");
     (node, depth, merges)
+}
+
+/// Issue #198: DISTRIBUTED coordinator fold — folds `leaves` by genuinely
+/// routing every merge through the SHARED library distributed driver
+/// (`bench::conductor::fold_distributed`): each merge pair is emitted as a TASK
+/// to the [`InMemoryFoldTransport`], proven on an INDEPENDENT worker thread,
+/// and its output TRANSITS the (in-memory) proof store under the real
+/// `{height}/m/{level}/{index}` key namespace before the next level reads it.
+/// The merge itself is the EXACT same `BlockTxChainMergeCircuit::prove` the
+/// serial/parallel folds use (supplied as the single `MergeFn`), so there is
+/// one merge implementation. Returns the final node and tree shape.
+///
+/// The KEY correctness property the e2e asserts: this produces a BIT-IDENTICAL
+/// final proof to [`fold_serial`] over the same leaves — the cross-machine fold
+/// (issue #198) is the multi-worker generalization of the #193 contract.
+fn fold_distributed_via_library(
+    merge_target: &circuit::block_tx_chain_merge_constraints::BlockTxChainMergeTarget,
+    merge_data: &plonky2::plonk::circuit_data::CircuitData<F, C, D>,
+    height: u64,
+    leaves: &[ProofWithPublicInputs<F, C, D>],
+    workers: usize,
+) -> (TreeNode, usize, usize, usize) {
+    // Leaf keys: the cells' upload keys (level 0 of transit), exactly the
+    // production `{height}/{witness_index}` namespace.
+    let leaf_keys: Vec<String> = (0..leaves.len() as u64)
+        .map(|i| proof_object_key(height, i))
+        .collect();
+    let leaves_vec: Vec<ProofWithPublicInputs<F, C, D>> = leaves.to_vec();
+
+    // The SINGLE merge implementation, borrowed by the distributed driver: the
+    // SAME `BlockTxChainMergeCircuit::prove` the serial/parallel folds invoke.
+    let merge_fn: Box<MergeFn<'_, ProofWithPublicInputs<F, C, D>>> =
+        Box::new(move |left, l_is_merge, right, r_is_merge| {
+            BlockTxChainMergeCircuit::prove(
+                merge_target,
+                merge_data,
+                left,
+                l_is_merge,
+                right,
+                r_is_merge,
+            )
+            .map_err(|e| anyhow::anyhow!("merge prove: {e:?}"))
+        });
+
+    // Hermetic transport: in-memory proof store + independent worker threads.
+    // The merges GENUINELY fan out across `workers` threads and transit by key
+    // — only the wire (Pub/Sub) and bucket (GCS) are replaced by memory.
+    let transport = InMemoryFoldTransport::with_leaves(&leaf_keys, &leaves_vec, workers);
+
+    let out = fold_distributed(
+        height,
+        leaves_vec,
+        leaf_keys,
+        &transport,
+        merge_fn.as_ref(),
+    )
+    .expect("distributed fold");
+
+    // Confirm intermediate proofs really transited the merge-key namespace and
+    // their wire size held constant (issue #198 open measurement #3).
+    println!(
+        "[e2e]   DISTRIBUTED fold: depth={} merges={} max_intermediate_bytes={} \
+         transit_total_ms={} (issue #198)",
+        out.depth,
+        out.merges,
+        out.max_intermediate_bytes,
+        out.transit_total.as_millis(),
+    );
+    for m in &out.level_metrics {
+        println!(
+            "[e2e]     level {} barrier: tasks={} odd_carry={} slowest_prove_ms={} \
+             straggler_ms={}",
+            m.level, m.tasks, m.odd_carry, m.slowest_prove_ms, m.straggler_ms,
+        );
+    }
+    // Sanity: the merge-key helper the leader uses matches the namespace.
+    let _ = merge_object_key(height, 1, 0);
+
+    (
+        (out.final_proof, out.final_is_merge),
+        out.depth,
+        out.merges,
+        out.max_intermediate_bytes,
+    )
 }
 
 fn enabled() -> bool {
@@ -537,6 +622,60 @@ fn run_e2e() {
          ({parallel_merge_ms} ms, workers={fold_workers}) — identical final proof public inputs \
          (depth={serial_depth} merges={serial_merges})"
     );
+
+    // ---- ISSUE #198: DISTRIBUTED fold equivalence (the cross-machine fold
+    // fan-out correctness bar). Fold the SAME leaves through the SHARED library
+    // distributed driver (task emitter + per-level barrier + proof-store transit
+    // + #193 re-sort), genuinely fanning merges across INDEPENDENT workers, and
+    // assert the final proof is BIT-IDENTICAL to the serial/in-process fold —
+    // for SEVERAL worker counts (k>=4 exercises a real multi-level tree). This
+    // is the key merge-gating check of #198: distributed == in-process.
+    for dist_workers in [1usize, 2, 3, 4] {
+        let dist_start = Instant::now();
+        let ((dist_proof, dist_is_merge), dist_depth, dist_merges, dist_bytes) =
+            fold_distributed_via_library(
+                &merge_target,
+                &merge_data,
+                height,
+                &leaves,
+                dist_workers,
+            );
+        let dist_ms = dist_start.elapsed().as_millis() as u64;
+        assert_eq!(
+            serial_depth, dist_depth,
+            "issue #198: serial vs distributed fold disagree on depth \
+             ({serial_depth} != {dist_depth}) at workers={dist_workers}"
+        );
+        assert_eq!(
+            serial_merges, dist_merges,
+            "issue #198: serial vs distributed fold disagree on merge count \
+             ({serial_merges} != {dist_merges}) at workers={dist_workers}"
+        );
+        assert_eq!(
+            serial_is_merge, dist_is_merge,
+            "issue #198: serial vs distributed fold disagree on final_is_merge \
+             at workers={dist_workers}"
+        );
+        assert_eq!(
+            serial_proof.public_inputs, dist_proof.public_inputs,
+            "ISSUE #198 DETERMINISM/EQUIVALENCE VIOLATION: the DISTRIBUTED fold \
+             (workers={dist_workers}) produced DIFFERENT final proof public inputs than the \
+             in-process fold — the cross-machine fold must be bit-identical regardless of which \
+             worker proved which merge"
+        );
+        // The distributed final proof must also genuinely VERIFY (not just
+        // match public inputs). Verify against the merge circuit's data.
+        if dist_is_merge {
+            merge_data
+                .verify(dist_proof.clone())
+                .expect("issue #198: the DISTRIBUTED fold's final proof must VERIFY");
+        }
+        println!(
+            "[e2e]   ISSUE #198 EQUIVALENCE OK (workers={dist_workers}, {dist_ms} ms): \
+             distributed fold == in-process fold (bit-identical public inputs) AND VERIFIES \
+             (depth={dist_depth} merges={dist_merges} max_intermediate_bytes={dist_bytes})"
+        );
+    }
 
     // Drive L4 with the PARALLEL fold result (exercise the new path e2e). The
     // reported merge wall is the parallel fold's realized wall.

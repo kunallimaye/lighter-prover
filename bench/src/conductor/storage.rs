@@ -52,6 +52,27 @@ pub fn proof_object_key(height: u64, witness_index: u64) -> String {
     format!("{height}/{witness_index}")
 }
 
+/// Construct the proof-store OBJECT KEY for an INTERMEDIATE MERGE proof
+/// (issue #198, cross-machine fold fan-out).
+///
+/// In the distributed fold a merge proven on coordinator A must be readable
+/// by coordinator B at the next tree level. Every merge OUTPUT is uploaded
+/// to the proof store under this key so the next level's task can fetch it.
+///
+/// The key is `{height}/m/{level}/{index}`. The `/m/` segment guarantees it
+/// can **never collide** with a LEAF key, which is `{height}/{witness_index}`
+/// ([`proof_object_key`]): a leaf key's second path segment is always a
+/// decimal number, never the literal `m`, so the two namespaces are disjoint.
+///
+/// `level` is the 1-based merge level (level 1 folds the leaves, level 2
+/// folds level-1 outputs, …) and `index` is the stable in-level pair index
+/// (the same index the #193 determinism re-sort keys on). Keep this the
+/// single source of truth for the key so the producing and consuming
+/// coordinators can never drift — exactly like [`proof_object_key`].
+pub fn merge_object_key(height: u64, level: u64, index: u64) -> String {
+    format!("{height}/m/{level}/{index}")
+}
+
 /// Resolved configuration for the gcloud-backed proof store. Mirrors
 /// [`super::pubsub::PubSubConfig`]: the binary resolves the values from a
 /// flag/env var and hands the struct over, so the transport reads no globals.
@@ -238,6 +259,51 @@ mod tests {
         assert_eq!(proof_object_key(186_974_616, 3), "186974616/3");
         assert_eq!(proof_object_key(0, 0), "0/0");
         assert_eq!(proof_object_key(100, 55), "100/55");
+    }
+
+    #[test]
+    fn merge_object_key_is_height_slash_m_slash_level_slash_index() {
+        // The EXACT merge-transit key scheme both producing and consuming
+        // coordinators must mirror (issue #198). Guard it.
+        assert_eq!(merge_object_key(186_974_616, 1, 0), "186974616/m/1/0");
+        assert_eq!(merge_object_key(0, 1, 0), "0/m/1/0");
+        assert_eq!(merge_object_key(100, 3, 7), "100/m/3/7");
+    }
+
+    #[test]
+    fn merge_key_never_collides_with_leaf_key() {
+        // The `/m/` segment makes the merge namespace disjoint from the leaf
+        // namespace: a leaf key's second segment is always a decimal index,
+        // never the literal `m`. Exhaustively spot-check the boundary cases
+        // that a naive `{height}/{level}/{index}` scheme would have collided
+        // on (e.g. leaf {height}/1 vs a merge at level 1).
+        let height = 42u64;
+        // Every leaf key for this height.
+        let leaf_keys: Vec<String> = (0..32).map(|i| proof_object_key(height, i)).collect();
+        // Every merge key across several levels/indices for this height.
+        let mut merge_keys: Vec<String> = Vec::new();
+        for level in 1..=6u64 {
+            for index in 0..32u64 {
+                merge_keys.push(merge_object_key(height, level, index));
+            }
+        }
+        for lk in &leaf_keys {
+            assert!(
+                !merge_keys.contains(lk),
+                "leaf key {lk} collided with a merge key — namespaces must be disjoint"
+            );
+            // Structural guarantee: a leaf key has exactly one '/'; a merge
+            // key has exactly three and its second segment is the literal 'm'.
+            assert_eq!(lk.matches('/').count(), 1, "leaf key shape: {lk}");
+        }
+        for mk in &merge_keys {
+            assert_eq!(mk.matches('/').count(), 3, "merge key shape: {mk}");
+            assert_eq!(
+                mk.split('/').nth(1),
+                Some("m"),
+                "merge key's second segment must be the literal 'm': {mk}"
+            );
+        }
     }
 
     #[test]

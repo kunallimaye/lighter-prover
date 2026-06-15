@@ -62,15 +62,21 @@
 //!   on a fleet over varied (G2) witnesses. No fetch-cost number is invented.
 
 pub mod dispatch;
+pub mod fold;
 pub mod pubsub;
 pub mod queue;
 pub mod storage;
 pub mod witness;
 
 pub use dispatch::{Coordinator, CoordinatorPool, InnerDispatchOutcome};
+pub use fold::{
+    fold_distributed, FoldTransport, InMemoryFoldTransport, MergeFn, MergeProof,
+    DistributedFoldOutcome, LevelBarrierMetric,
+};
 pub use pubsub::{
-    BlockMessage, ChunkMessage, ChunkResultMessage, GcloudPubSub, PubSubConfig, PulledMessage,
+    BlockMessage, ChunkMessage, ChunkResultMessage, GcloudPubSub, MergeResultMessage,
+    MergeTaskMessage, PubSubConfig, PulledMessage,
 };
 pub use queue::{BlockJob, BlockQueue, LocalBlockQueue};
-pub use storage::{proof_object_key, GcloudStorage, StorageConfig};
+pub use storage::{merge_object_key, proof_object_key, GcloudStorage, StorageConfig};
 pub use witness::{MountedCorpus, ResolvedWitness, WitnessKey, WitnessResolver, WitnessSlice};

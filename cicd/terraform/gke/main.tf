@@ -142,6 +142,61 @@ resource "google_pubsub_subscription" "results" {
   ack_deadline_seconds = 60
 }
 
+# ─── 2c-bis. Pub/Sub: the MERGE-TASK plane (issue #198) ──────────────
+# Cross-machine fold fan-out: to shard ONE block's merge tree across separate
+# coordinator machines, the block's owning coordinator (the leader) emits one
+# MergeTaskMessage per merge pair to this topic; idle fold-worker pods
+# competing-pull the merge-task subscription, prove ONE merge each on their
+# FULL core budget (no thread rationing), upload the output to the proof store
+# under {height}/m/{level}/{index}, and report on the merge-RESULT plane.
+# Scale the fold by adding MORE fold workers, not bigger boxes (the governing
+# principle). Gated by `enable_merge_plane` so smoke automation that does not
+# exercise the distributed fold can skip provisioning it.
+
+resource "google_pubsub_topic" "merge_task" {
+  count   = var.enable_merge_plane ? 1 : 0
+  name    = var.merge_task_topic
+  project = var.project_id
+  labels  = var.resource_labels
+}
+
+resource "google_pubsub_subscription" "merge_task" {
+  count   = var.enable_merge_plane ? 1 : 0
+  name    = var.merge_task_subscription
+  topic   = google_pubsub_topic.merge_task[0].id
+  project = var.project_id
+  labels  = var.resource_labels
+
+  # A single merge prove is ~1.6 s on a c4a-standard-4 (the pilot fact); give
+  # workers ample ack headroom so an in-flight merge is not redelivered
+  # mid-prove. A future native manual-ack client tightens this.
+  ack_deadline_seconds = var.merge_ack_deadline_seconds
+}
+
+# ─── 2c-ter. Pub/Sub: the MERGE-RESULT plane (issue #198) ────────────
+# Fold workers report each proven (or honestly-failed) merge back to the
+# leader over this topic; the leader pulls the merge-result subscription to
+# barrier each tree level (level n+1 releases only once every level-n result
+# has landed) and re-sort by stable in-level index for the #193 determinism
+# contract.
+
+resource "google_pubsub_topic" "merge_result" {
+  count   = var.enable_merge_plane ? 1 : 0
+  name    = var.merge_result_topic
+  project = var.project_id
+  labels  = var.resource_labels
+}
+
+resource "google_pubsub_subscription" "merge_result" {
+  count   = var.enable_merge_plane ? 1 : 0
+  name    = var.merge_result_subscription
+  topic   = google_pubsub_topic.merge_result[0].id
+  project = var.project_id
+  labels  = var.resource_labels
+
+  ack_deadline_seconds = 60
+}
+
 # ─── 2d. Shared proof store: the L2-leaf-proof bucket (issue #179) ────
 # The fan-IN half of the distributed prover (issue #179) needs proof BYTES
 # to cross from cells to the coordinator. Pub/Sub message-size limits make
