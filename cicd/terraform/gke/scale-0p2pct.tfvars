@@ -49,27 +49,26 @@ cell_machine_family = "c4a"
 cell_arch           = "arm64"
 cell_cpu_request    = "43"   # whole c4a-highcpu-64 minus Autopilot system reservation
 cell_memory_request = "44Gi" # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L4/L5 keys + headroom
-# DEPENDENCY: replace with the REAL arm64 prover image tag
-# (<sha>-neoverse-v2) emitted by cicd/cloudbuild.yaml. Placeholder until built.
-cell_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+# Issue #216: a REAL arm64 (neoverse-v2/Axion) bench image that already EXISTS
+# in Artifact Registry — no build needed, just this pinned SHA. Re-pin to a
+# newer cicd/cloudbuild.yaml output as the bench binary advances.
+cell_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:944794880a1df0718ed5237a67b864718e94d7ab-neoverse-v2"
 # /usr/local/bin/prover is the bench binary, symlinked in cicd/Containerfile
 # (#172). The cell pulls chunk refs and publishes results over the inner
-# planes; the Pub/Sub config is passed as flags (the binary also accepts the
-# equivalent LIGHTER_* env vars). Replace PROJECT with the real project id.
-# Issue #209: the cell ships its REAL L2 leaf proof to the shared proof
-# store (--proof-bucket / LIGHTER_PROOF_BUCKET) so the coordinator can
-# DOWNLOAD it and run the REAL merge tree + L4. The bucket name follows the
-# deterministic default in variables.tf (proof_store_bucket = "" =>
-# "<project_id>-lighter-prover-proofs"). --proof-mount-path is the gcsfuse
-# mount enable_proof_mount = true creates (issue #206 transport, faster
-# than the gcloud-cp fallback). REPLACE "PROJECT" with the real project id
-# at apply time (same placeholder convention as --project, above).
+# planes; the Pub/Sub config is passed as flags.
+# Issue #209: the cell ships its REAL L2 leaf proof to the shared proof store
+# so the coordinator can DOWNLOAD it and run the REAL merge tree + L4.
+# Issue #216: --project and --proof-bucket are NO LONGER literal placeholders
+# here — terraform injects LIGHTER_PROJECT (= var.project_id) and
+# LIGHTER_PROOF_BUCKET (= the resolved proof-store bucket name) as env vars the
+# bench binary reads (main.tf local.prover_wiring_env). So this command needs
+# no per-arg PROJECT/bucket hand-editing. --proof-mount-path is the gcsfuse
+# mount enable_proof_mount = true creates (issue #206 transport, faster than
+# the gcloud-cp fallback).
 cell_command = [
   "/usr/local/bin/prover", "--mode", "cell",
-  "--project", "PROJECT",
   "--chunk-subscription", "lighter-prover-scale-0p2pct-chunk-sub",
   "--results-topic", "lighter-prover-scale-0p2pct-results",
-  "--proof-bucket", "PROJECT-lighter-prover-proofs",
   "--proof-mount-path", "/mnt/proof-store",
   "--tx-per-proof", "9",
   "--poll-interval-s", "2",
@@ -88,8 +87,8 @@ coordinator_machine_family = "c4a"
 coordinator_arch           = "arm64"
 coordinator_cpu_request    = "43"   # whole box; coordinator-specific profile UNMODELED (#113) — proxy
 coordinator_memory_request = "44Gi" # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
-# DEPENDENCY: same real arm64 prover image tag from cicd/cloudbuild.yaml.
-coordinator_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+# Issue #216: same REAL arm64 (neoverse-v2) bench image as the cells.
+coordinator_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:944794880a1df0718ed5237a67b864718e94d7ab-neoverse-v2"
 # The coordinator pulls blocks from the dispatch subscription, fans chunk refs
 # to the chunk topic, and gathers results from the results subscription (#172).
 # Issue #209: --proof-bucket / --proof-mount-path point the coordinator at
@@ -101,15 +100,15 @@ coordinator_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA
 # (--allow-accounting-only-fold), not the silent default. --fold-distributed
 # selects the cross-machine FoldTopology::Distributed (issue #198: leader
 # emits merge tasks, fold workers competing-pull) so the merge plane
-# enable_merge_plane creates is actually used. REPLACE "PROJECT" with the
-# real project id at apply time.
+# enable_merge_plane creates is actually used.
+# Issue #216: --project and --proof-bucket are injected as LIGHTER_PROJECT /
+# LIGHTER_PROOF_BUCKET env vars by terraform (main.tf local.prover_wiring_env)
+# from var.project_id + the resolved bucket name — no literal placeholders.
 coordinator_command = [
   "/usr/local/bin/prover", "--mode", "coordinator",
-  "--project", "PROJECT",
   "--dispatch-subscription", "lighter-prover-scale-0p2pct-dispatch-sub",
   "--chunk-topic", "lighter-prover-scale-0p2pct-chunk",
   "--results-subscription", "lighter-prover-scale-0p2pct-results-sub",
-  "--proof-bucket", "PROJECT-lighter-prover-proofs",
   "--proof-mount-path", "/mnt/proof-store",
   "--fold-distributed",
   "--tx-per-proof", "9",

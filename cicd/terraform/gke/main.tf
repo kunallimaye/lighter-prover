@@ -36,6 +36,26 @@ locals {
   # deterministic project-derived name (bucket names are globally unique).
   proof_store_bucket_name = var.proof_store_bucket != "" ? var.proof_store_bucket : "${var.project_id}-lighter-prover-proofs"
 
+  # Issue #216 (Problem B): the proof-store bucket location FOLLOWS the cluster
+  # region by default so a single `region` override keeps the bucket co-regional
+  # with the coordinator that folds the proofs (a cross-region bucket taxes the
+  # serial L4 fetch stage). A non-empty proof_store_location is an explicit
+  # opt-out for deliberately cross-region placement. (TF variable defaults
+  # cannot reference other variables, so the region-follow is resolved here.)
+  proof_store_location = var.proof_store_location != "" ? var.proof_store_location : var.region
+
+  # Issue #216 (Problem A): the project + proof bucket are wired into the
+  # cell/coordinator pods from REAL terraform values (project_id + the resolved
+  # bucket name) as the LIGHTER_PROJECT / LIGHTER_PROOF_BUCKET env vars the
+  # bench binary reads (bench/src/bin/bench.rs `#[arg(long, env = ...)]`),
+  # instead of literal `PROJECT`/`PROJECT-lighter-prover-proofs` placeholders
+  # hand-edited into the command args. So an unedited scale tfvars deploys pods
+  # that can PROVE on first apply — no per-arg token substitution.
+  prover_wiring_env = {
+    LIGHTER_PROJECT      = var.project_id
+    LIGHTER_PROOF_BUCKET = local.proof_store_bucket_name
+  }
+
   # Issue #206: gcsfuse-mount the proof bucket into the coordinator pod. Only
   # meaningful when the bucket + pod-GSA permission exist (enable_proof_store),
   # so AND the two so a stray enable_proof_mount can't try to mount a bucket
@@ -227,7 +247,7 @@ resource "google_storage_bucket" "proof_store" {
 
   name     = local.proof_store_bucket_name
   project  = var.project_id
-  location = var.proof_store_location
+  location = local.proof_store_location
   labels   = var.resource_labels
 
   # IAM-only access; no object ACLs (the pod GSA is granted objectAdmin via
@@ -314,6 +334,18 @@ resource "kubernetes_deployment" "cells" {
           image   = var.cell_image
           command = length(var.cell_command) > 0 ? var.cell_command : null
 
+          # Issue #216: wire the project + proof bucket from REAL terraform
+          # values as the env vars the bench binary reads (LIGHTER_PROJECT /
+          # LIGHTER_PROOF_BUCKET), so the cell ships its L2 leaf proof to the
+          # right bucket without literal PROJECT/bucket tokens in the command.
+          dynamic "env" {
+            for_each = local.prover_wiring_env
+            content {
+              name  = env.key
+              value = env.value
+            }
+          }
+
           resources {
             requests = {
               cpu    = var.cell_cpu_request
@@ -384,6 +416,19 @@ resource "kubernetes_deployment" "coordinator" {
           name    = "coordinator"
           image   = var.coordinator_image
           command = length(var.coordinator_command) > 0 ? var.coordinator_command : null
+
+          # Issue #216: wire the project + proof bucket from REAL terraform
+          # values as the env vars the bench binary reads (LIGHTER_PROJECT /
+          # LIGHTER_PROOF_BUCKET), so the coordinator downloads the cells' L2
+          # leaf proofs from the right bucket and runs the REAL merge tree + L4
+          # without literal PROJECT/bucket tokens hand-edited into the command.
+          dynamic "env" {
+            for_each = local.prover_wiring_env
+            content {
+              name  = env.key
+              value = env.value
+            }
+          }
 
           # Issue #206: point the bench binary at the gcsfuse mount so
           # storage.rs selects mount-mode file I/O (LIGHTER_PROOF_MOUNT).

@@ -308,9 +308,9 @@ variable "proof_store_pod_gsa_email" {
 }
 
 variable "proof_store_location" {
-  description = "Location for the proof-store bucket. Defaults to the cluster region so proofs stay co-located with the coordinator that folds them (minimizes fetch latency in the serial L4 stage)."
+  description = "Location for the proof-store bucket. Empty (the default) tracks var.region so the bucket is co-regional with the cluster — a SINGLE region override suffices and proofs stay co-located with the coordinator that folds them (minimizes fetch latency in the serial L4 stage). Set a non-empty value only to deliberately place the bucket in a DIFFERENT location than the cluster (a cross-region tax on the serial L4 stage)."
   type        = string
-  default     = "us-central1"
+  default     = ""
 }
 
 variable "proof_store_force_destroy" {

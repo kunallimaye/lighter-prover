@@ -68,6 +68,40 @@ existing Cloud-Build-drives-Terraform idiom). `terraform fmt` and
 `terraform validate` are clean; see `cicd/cloudbuild-gke-smoke.yaml` and
 `cicd/cloudbuild-gke-teardown.yaml`.
 
+## Tier-2 scale run — set region + project ONCE (issue #216)
+
+The `scale-0p2pct.tfvars` / `scale-0p3pct.tfvars` / `scale-0p5pct.tfvars`
+configs deploy a **real proving** run. They carry **no** literal
+`PROJECT`/`SHA` tokens to hand-edit:
+
+- **Image SHA is pinned.** `cell_image`/`coordinator_image` point at a REAL
+  arm64 (`-neoverse-v2`/Axion) `bench` image that already EXISTS in Artifact
+  Registry — **no build needed**. Currently pinned:
+  `us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:944794880a1df0718ed5237a67b864718e94d7ab-neoverse-v2`.
+  Re-pin to a newer `cicd/cloudbuild.yaml` output as the bench binary advances
+  (`gcloud artifacts docker tags list .../lighter-prover/bench --filter="tag~neoverse-v2"`).
+- **Project + proof bucket are auto-wired.** `--project` and `--proof-bucket`
+  are **not** in the command args; Terraform injects `LIGHTER_PROJECT`
+  (= `var.project_id`) and `LIGHTER_PROOF_BUCKET` (= the resolved proof-store
+  bucket name) as container env vars the `bench` binary reads
+  (`main.tf` `local.prover_wiring_env`).
+- **The proof bucket is co-regional.** `proof_store_location` defaults to
+  empty and **follows `var.region`** — a single `region` override keeps the
+  bucket co-located with the coordinator that folds the proofs (a cross-region
+  bucket taxes the serial L4 stage). Override `proof_store_location` only to
+  deliberately place the bucket elsewhere.
+
+So a us-east4 Tier-2 apply needs only the region + project set **once**:
+
+```sh
+terraform apply \
+  -var-file=scale-0p2pct.tfvars \
+  -var="project_id=<proj>" \
+  -var="region=us-east4"
+# bucket co-regional in us-east4; pods get the real project + bucket via env;
+# image SHA already pinned -> pods PROVE on first deploy.
+```
+
 ## Scope guard
 
 Does **NOT** run real proving load (gated on G2) and does **NOT**
