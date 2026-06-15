@@ -36,10 +36,14 @@ stream-replay: ## Replay a trace: TRACE=... [SPEED=N | RATE=TXS] [DURATION=15m]
 	  $(if $(RATE),--target-rate $(RATE),) \
 	  $(if $(DURATION),--duration $(DURATION),)
 
-stream-peak: ## Synthesize peak-load trace: RATE=TXS DURATION=15m
-	@test -n "$(RATE)" || { echo "error: RATE=<tx/s> required"; exit 1; }
+stream-peak: ## Synthesize peak-load trace (two axes): [RATE=TXS | BLOCK_RATE=blk/s] [TX_COUNT=N] DURATION=15m
+	@test -n "$(RATE)$(BLOCK_RATE)" || { echo "error: RATE=<tx/s> or BLOCK_RATE=<blk/s> required"; exit 1; }
 	@test -n "$(DURATION)" || { echo "error: DURATION=<15m|900s> required"; exit 1; }
-	$(FEEDER) synth-peak --rate $(RATE) --duration $(DURATION)
+	$(FEEDER) synth-peak \
+	  $(if $(BLOCK_RATE),--block-rate $(BLOCK_RATE),) \
+	  $(if $(RATE),--rate $(RATE),) \
+	  $(if $(TX_COUNT),--tx-count $(TX_COUNT),) \
+	  --duration $(DURATION)
 
 feeder-test: ## Run the offline feeder test suite (no network, <1 min)
 	python3 -m unittest discover -s feeder/tests -v

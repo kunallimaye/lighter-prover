@@ -331,14 +331,31 @@ def replay_schedule(expanded, speed, base_ts_ms, loop_seam_ms=None,
         iteration += 1
 
 
-def synth_schedule(rate, duration_s, base_ts_ms):
-    """Back-to-back BLOCK_TX_CAP-tx blocks at cadence = cap/rate seconds."""
-    cadence_ms = BLOCK_TX_CAP / rate * 1000.0
+def synth_schedule(duration_s, base_ts_ms, *, tx_count=BLOCK_TX_CAP,
+                   block_rate):
+    """Fabricate a sustained synthetic block stream on TWO independent axes.
+
+    Load is configured by two orthogonal knobs (issue #217):
+      * block_rate -- blocks/sec; sets the cadence between blocks
+        (cadence_ms = 1000 / block_rate), INDEPENDENT of tx_count.
+      * tx_count   -- txns per block; every block carries exactly this many
+        transactions (constant -> no height jumps, no nulls).
+
+    Decoupling these axes is what lets synth-peak drive a fixed-k stream:
+    the coordinator splits k = ceil(tx_count / S), so a constant tx_count
+    pins k regardless of how fast blocks arrive. (The legacy single-axis
+    form coupled cadence to tx/s with tx_count fixed at BLOCK_TX_CAP, so
+    every block was 500 tx -> k = 56 only.)
+
+    tx_count is capped at BLOCK_TX_CAP (the chain per-block tx cap, spec
+    §6.2); callers validate the 1..BLOCK_TX_CAP range before calling.
+    """
+    cadence_ms = 1000.0 / block_rate
     n = math.floor(duration_s * 1000.0 / cadence_ms) + 1
     for i in range(n):
         yield {"ts_ms": base_ts_ms + int(round(i * cadence_ms)),
                "height": SYNTH_HEIGHT_BASE + i,
-               "tx_count": BLOCK_TX_CAP}
+               "tx_count": int(tx_count)}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -673,7 +690,21 @@ def cmd_replay(args, out=None):
 def cmd_synth_peak(args, out=None):
     out = out or sys.stdout
     duration_s = parse_duration(args.duration)
-    params = {"peak_rate": args.rate, "duration_s": duration_s}
+
+    # Two independent load axes (issue #217). Cadence comes from --block-rate
+    # directly; if only --rate (aggregate tx/s) is given, derive the block
+    # rate as rate / tx_count so the default tx_count=500 reproduces the
+    # legacy cadence = 500/rate exactly (back-compat).
+    tx_count = args.tx_count
+    if args.block_rate is not None:
+        block_rate = args.block_rate
+    else:
+        block_rate = args.rate / tx_count
+
+    params = {"block_rate": block_rate, "tx_count": tx_count,
+              "duration_s": duration_s}
+    if args.rate is not None:
+        params["peak_rate"] = args.rate  # legacy axis, when --rate was used
     if args.dry_run:
         params["dry_run"] = True
 
@@ -692,7 +723,8 @@ def cmd_synth_peak(args, out=None):
 
     print(provenance_line("synth-peak", params), file=out, flush=True)
     base_ts = 0 if args.dry_run else int(time.time() * 1000)
-    sched = synth_schedule(args.rate, duration_s, base_ts)
+    sched = synth_schedule(duration_s, base_ts,
+                           tx_count=tx_count, block_rate=block_rate)
     if publish_to:
         bridge = build_publisher_bridge(project, publish_to)
         try:
@@ -1406,6 +1438,15 @@ def positive_float(text):
     return v
 
 
+def block_tx_count(text):
+    """argparse type: txns/block in 1..BLOCK_TX_CAP (the chain per-block cap)."""
+    v = int(text)
+    if v < 1 or v > BLOCK_TX_CAP:
+        raise argparse.ArgumentTypeError(
+            f"must be in 1..{BLOCK_TX_CAP} (chain per-block tx cap), got {text}")
+    return v
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="feeder.py",
@@ -1448,10 +1489,27 @@ def build_parser():
     pp.set_defaults(func=cmd_replay)
 
     ps = sub.add_parser("synth-peak",
-                        help="fabricate idealized trace from a rate "
-                             "(offline, no inputs)")
-    ps.add_argument("--rate", type=positive_float, required=True,
-                    help="target tx/s (cadence = 500/rate seconds)")
+                        help="fabricate idealized trace on two load axes "
+                             "(blocks/sec + txns/block; offline, no inputs)")
+    # Two independent load axes (issue #217):
+    #   --block-rate (blocks/sec) sets cadence; --tx-count sets txns/block.
+    # The rate axis is mutually exclusive: pick the block cadence directly
+    # (--block-rate) OR specify an aggregate tx/s budget (--rate) that is
+    # split across blocks of size --tx-count. At least one is required.
+    rate_axis = ps.add_mutually_exclusive_group(required=True)
+    rate_axis.add_argument("--block-rate", type=positive_float, default=None,
+                           metavar="B",
+                           help="blocks/sec; cadence = 1000/B ms, independent "
+                                "of --tx-count")
+    rate_axis.add_argument("--rate", type=positive_float, default=None,
+                           help="aggregate target tx/s; cadence derived as "
+                                "tx_count/rate seconds (back-compat: with the "
+                                "default tx_count=500 this is 500/rate)")
+    ps.add_argument("--tx-count", "--block-size", dest="tx_count",
+                    type=block_tx_count, default=BLOCK_TX_CAP, metavar="N",
+                    help=f"txns per block, 1..{BLOCK_TX_CAP} "
+                         f"(default {BLOCK_TX_CAP}); constant -> pins "
+                         "k = ceil(N/S) for a fixed-k stream")
     ps.add_argument("--duration", required=True,
                     help="trace duration (e.g. 15m, 900s)")
     ps.add_argument("--dry-run", action="store_true",

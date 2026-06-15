@@ -72,6 +72,33 @@ how the trace was generated. Exactly one header line; always first.
 Synthesized / renormalized traces:
 
 ```json
+{"provenance": {"generator": "synth-peak", "params": {"block_rate": 1.0, "tx_count": 216, "duration_s": 60.0}, "generated_at": "2026-06-11T08:00:00Z"}}
+```
+
+`synth-peak` is configured on **two independent load axes** (issue #217):
+
+- `block_rate` — blocks/sec; sets the cadence between blocks
+  (`cadence_ms = 1000 / block_rate`), independent of `tx_count`.
+- `tx_count` — txns per block; every block carries exactly this many
+  transactions.
+
+These axes are orthogonal: the coordinator splits work into
+`k = ceil(tx_count / S)` chunks, so a **constant `tx_count`** pins `k`
+regardless of how fast blocks arrive — the canonical way to drive a
+fixed-k stream (e.g. `tx_count=216` → k=24, `tx_count=288` → k=32 at
+S=9). Because `tx_count` is constant and heights advance by exactly 1
+per block, constant-`tx_count` synth traces have **no height jumps**
+(no P2 expansion) and **no nulls** (no P1 fill).
+
+When `synth-peak --rate` (aggregate tx/s) is used instead of
+`--block-rate`, the block rate is derived as `rate / tx_count` and the
+legacy `peak_rate` axis is recorded in `params` too (back-compat: with
+the default `tx_count=500` this reproduces the old `cadence = 500/rate`).
+
+The earlier single-axis form (only `peak_rate`, `tx_count` fixed at 500)
+remains valid provenance:
+
+```json
 {"provenance": {"generator": "synth-peak", "params": {"peak_rate": 9000, "duration_s": 300}, "source_trace": "gs://kunal-scratch-bench-fleet-runs/traces/2026-06-11T0204Z-15m-offpeak/trace_15m.jsonl", "generated_at": "2026-06-11T08:00:00Z"}}
 ```
 

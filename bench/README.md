@@ -155,15 +155,58 @@ data itself.
 |---|---|---|
 | `record` | network | Capture live chain cadence: WS height channel (`wss://mainnet.zklighter.elliot.ai/stream?readonly=true`) merged with explorer tx counts via a ~4 s late-bind watermark; unmatched heights emit `tx_count: null` |
 | `replay` | offline | Re-emit a recorded trace retimed (`--speed N` or `--target-rate TXS`; `--loop`, `--duration`, `--dry-run`) |
-| `synth-peak` | offline, no inputs | Fabricate an idealized trace from a rate: back-to-back 500-tx blocks at cadence `500/rate` s |
+| `synth-peak` | offline, no inputs | Fabricate an idealized trace on **two independent load axes** — blocks/sec (`--block-rate`) and txns/block (`--tx-count`, 1..500); a constant `tx_count` pins `k = ceil(tx_count/S)` for a fixed-k stream. Back-compat: `--rate TXS` alone derives `block_rate = rate/tx_count` with the default `tx_count=500` (legacy cadence `500/rate` s) |
 | `peak-hours` | analysis helper | Locate peak windows from the explorer hourly tx stats (top-N hours by tx/s) |
 | `tx-mix` | network (geo-sensitive) | Capture the per-block tx-type mix (#128) from the zklighter `blockTxs` API — the only HTTP source carrying per-tx `tx_type`. Geo-blocks some regions (observed: US); **run from Tokyo / ap-northeast** (see recipe below). `--sample-block` reads the in-repo sample-size-1 block offline |
 
 Make targets (from `bench/`): `stream-record OUT=... [DURATION=...]`,
 `stream-replay TRACE=... [SPEED=N | RATE=TXS] [DURATION=...]`,
-`stream-peak RATE=... DURATION=...`, `stream-tx-mix [BLOCKS=N | HEIGHTS="LO
-HI"] | SAMPLE=1`, and `feeder-test` (offline suite, no network, <1 min;
-also wired into the repo-root `make local-test`).
+`stream-peak [RATE=TXS | BLOCK_RATE=blk/s] [TX_COUNT=N] DURATION=...`,
+`stream-tx-mix [BLOCKS=N | HEIGHTS="LO HI"] | SAMPLE=1`, and `feeder-test`
+(offline suite, no network, <1 min; also wired into the repo-root
+`make local-test`).
+
+### Two load axes: driving a fixed-k stream (issue #217)
+
+The coordinator splits each block into `k = ceil(tx_count / S)` chunks, so
+`tx_count` (not block cadence) is what determines `k`. `synth-peak`
+exposes the two axes independently:
+
+- `--block-rate B` — blocks/sec; cadence is `1000/B` ms, independent of
+  `tx_count`.
+- `--tx-count N` — txns per block (1..500); constant across every block, so
+  `k` is pinned. At the canonical **S=9**: `N=216 → k=24`, `N=288 → k=32`,
+  `N=500 → k=56`.
+
+Two committed Tier-2 fixtures are deterministic `--dry-run` artifacts of
+this code path (base ts=0, `--block-rate 1 --duration 60s`, ~61 blocks each,
+header on line 1, constant `tx_count`, no height jumps, no nulls):
+
+- `bench/feeder/fixtures/synth_k24_tx216.jsonl` — every block `tx_count=216` (k=24)
+- `bench/feeder/fixtures/synth_k32_tx288.jsonl` — every block `tx_count=288` (k=32)
+
+```bash
+# Regenerate a fixture (byte-deterministic except generated_at):
+python3 bench/feeder/feeder.py synth-peak --tx-count 216 --block-rate 1 \
+  --duration 60s --dry-run > bench/feeder/fixtures/synth_k24_tx216.jsonl
+
+# Drive a k=24 / k=32 dispatch stream by replaying a fixture into the
+# dispatch topic (pacing honored via the native publisher bridge, #211):
+python3 bench/feeder/feeder.py replay \
+  --in bench/feeder/fixtures/synth_k24_tx216.jsonl \
+  --target-rate <r> --publish-to <dispatch-topic> --project kunal-scratch
+python3 bench/feeder/feeder.py replay \
+  --in bench/feeder/fixtures/synth_k32_tx288.jsonl \
+  --target-rate <r> --publish-to <dispatch-topic> --project kunal-scratch
+
+# Or generate + publish a live fixed-k stream directly (no fixture):
+python3 bench/feeder/feeder.py synth-peak --block-rate 8 --tx-count 216 \
+  --duration 5m --publish-to <dispatch-topic> --project kunal-scratch
+```
+
+Each fixture carries `BlockMessage {height, tx_count}` so the coordinator
+splits k=24 / k=32 at S=9. Use `--block-rate` to control how fast blocks
+arrive without changing `k`.
 
 Dependencies: `record`, `peak-hours`, and `tx-mix` need
 `bench/feeder/requirements.txt` (`websockets`, `requests`); `replay`,
