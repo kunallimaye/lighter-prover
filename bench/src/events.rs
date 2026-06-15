@@ -156,6 +156,17 @@ pub enum BenchEvent<'a> {
     },
     /// Stream mode: rolling aggregates. Emitted every 60s
     /// (`phase = "periodic"`) and once at exit (`phase = "final"`).
+    ///
+    /// The distributed coordinator (`bench --mode coordinator`) ALSO reuses
+    /// this event shape as its per-block completion record, with
+    /// `phase = "block_complete"` (or `"block_partial"`). On that per-block
+    /// path it carries `height` + `block_wall_ms` (issue #222): the REAL
+    /// measured coordinator GATHER wall (block-arrival -> all-chunks-proven,
+    /// the L1->L2 gather wall anchored at coordinator-DEQUEUE), keyed by the
+    /// block height so a downstream consumer can JOIN it on `height`. The
+    /// periodic/final rolling summaries leave both `None` (no single block to
+    /// key on); `skip_serializing_if` keeps those lines byte-identical to
+    /// pre-#222 output.
     StreamSummary {
         phase: &'a str,
         throughput_tx_s: f64,
@@ -167,6 +178,23 @@ pub enum BenchEvent<'a> {
         gaps_skipped: u64,
         chunks_proven: u64,
         elapsed_s: f64,
+        /// Issue #222: block height for the per-block coordinator completion
+        /// record (`phase = "block_complete"`/`"block_partial"`), so the
+        /// lag-verdict tool can JOIN the real measured gather wall on height.
+        /// `None` (skipped from JSON) for the periodic/final rolling
+        /// summaries, which aggregate across all blocks. Additive and
+        /// consumer-safe: pre-#222 readers never saw this field.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        height: Option<u64>,
+        /// Issue #222: the REAL measured per-block GATHER wall in ms (the
+        /// coordinator's block-arrival -> all-chunks-proven wall, equal to
+        /// `lag_p50_ms`/`lag_p95_ms` on the per-block record but named
+        /// explicitly so the tool reads a first-class gather wall rather than
+        /// reinterpreting a percentile field). `None` (skipped from JSON) on
+        /// the periodic/final summaries. NEVER an estimate: it is the
+        /// coordinator's own `block_wall_ms` measurement.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        block_wall_ms: Option<u64>,
         ts: String,
     },
     /// 8-way L5 segment-scheduler batch summary (issue #78). Carries the
@@ -538,12 +566,55 @@ mod tests {
             gaps_skipped: 0,
             chunks_proven: 254,
             elapsed_s: 20.5,
+            // Issue #222: the rolling final summary has no per-block height
+            // or gather wall -- both None, both skipped from JSON.
+            height: None,
+            block_wall_ms: None,
             ts: "2026-06-11T00:00:21Z".into(),
         };
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("\"event\":\"stream_summary\""));
         assert!(json.contains("\"phase\":\"final\""));
         assert!(json.contains("\"throughput_tx_s\":49.6"));
+        // Issue #222: the rolling summary omits the per-block join keys
+        // (byte-identical to pre-#222 output).
+        assert!(
+            !json.contains("height"),
+            "rolling summary must skip the per-block height key: {json}"
+        );
+        assert!(
+            !json.contains("block_wall_ms"),
+            "rolling summary must skip the per-block block_wall_ms key: {json}"
+        );
+    }
+
+    #[test]
+    fn stream_summary_per_block_carries_gather_wall() {
+        // Issue #222: the coordinator's per-block completion record reuses the
+        // StreamSummary shape but carries `height` + `block_wall_ms` -- the
+        // REAL measured GATHER wall keyed by height, so the lag-verdict tool
+        // joins the true measured wall instead of the slowest-chunk PROXY.
+        let per_block = BenchEvent::StreamSummary {
+            phase: "block_complete",
+            throughput_tx_s: 55.0,
+            lag_p50_ms: 8200,
+            lag_p95_ms: 8200,
+            peak_rss_mb: Some(2600),
+            dropped_chunks: 0,
+            arrivals: 1,
+            gaps_skipped: 0,
+            chunks_proven: 4,
+            elapsed_s: 8.2,
+            height: Some(260_138_266),
+            block_wall_ms: Some(8200),
+            ts: "2026-06-15T00:00:08Z".into(),
+        };
+        let json = serde_json::to_string(&per_block).unwrap();
+        assert!(json.contains("\"event\":\"stream_summary\""));
+        assert!(json.contains("\"phase\":\"block_complete\""));
+        // Issue #222: the join keys are present on the per-block record.
+        assert!(json.contains("\"height\":260138266"));
+        assert!(json.contains("\"block_wall_ms\":8200"));
     }
 
     #[test]

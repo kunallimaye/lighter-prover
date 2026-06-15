@@ -1,41 +1,59 @@
 # Synthetic coordinator BENCH_EVENT stream for scripts/lag-slo-verdict.py
-# (issue #215). Hand-written; the parser ignores non-event/non-BENCH lines
-# so these '#' comments are inert. GROUND TRUTH (pinned here AND in
-# scripts/tests/test_lag_slo_verdict.py):
+# (issue #215; gather provenance per issue #222). Hand-written; the parser
+# ignores non-event/non-BENCH lines so these '#' comments are inert. GROUND
+# TRUTH (pinned here AND in scripts/tests/test_lag_slo_verdict.py):
 #
-#   lag_block = chunk_proven.lag_ms (GATHER) + fold.merge_ms + fold.l4_ms
-#   (gather_source=auto -> chunk_proven, since no block_complete summaries)
+#   lag_block = GATHER + fold.merge_ms + fold.l4_ms
 #
-#   height  gather  merge   l4     lag_ms
-#   100     8000    3000    4000   15000   (measured)
-#   101     7000    3500    4500   15000   (measured)
-#   102     9000    3000    4000   16000   (measured)
-#   103     9000    3200    4300   16500   (measured)
-#   104    10000    3300    4400   17700   (measured)
-#   105    11000    3400    4600   19000   (measured)
-#   106    12000       0       0       -   (MODELED -> EXCLUDED, not counted)
+#   Issue #222: GATHER is the coordinator's REAL measured gather wall, read
+#   from the per-block `stream_summary` block_complete record's `block_wall_ms`
+#   keyed by height -- NOT the slowest-chunk-lag proxy. Every measured block
+#   below carries a `block_complete` summary, so gather_source == "measured"
+#   for all of them (gather_source=auto picks the real measured wall). The
+#   chunk_proven.lag_ms values are LOWER than block_wall_ms on purpose: they
+#   are the slowest single cell's lag, which the proxy would have used; the
+#   measured wall is higher because it includes coordination time after the
+#   last cell lands. Asserting the lag uses block_wall_ms (not lag_ms) proves
+#   the measured path, not the proxy, is taken.
+#
+#   height  gather(meas)  chunk_lag(proxy)  merge   l4     lag_ms  gsrc
+#   100     8000          7600              3000    4000   15000   measured
+#   101     7000          6500              3500    4500   15000   measured
+#   102     9000          8600              3000    4000   16000   measured
+#   103     9000          8700              3200    4300   16500   measured
+#   104    10000          9600              3300    4400   17700   measured
+#   105    11000         10600              3400    4600   19000   measured
+#   106    12000         11500                 0       0       -   MODELED->EXCLUDED
 #
 #   sorted measured lags (ms): [15000,15000,16000,16500,17700,19000] n=6
 #   nearest-rank p50 = idx round(0.50*6)-1 = 2 -> 16000 ms = 16.000 s
 #   nearest-rank p99 = idx round(0.99*6)-1 = 5 -> 19000 ms = 19.000 s
 #   excluded modeled count = 1 (height 106)
+#   proxy_gather_count = 0 (every measured block uses the real measured wall)
 #   throughput_tx_s (last/final stream_summary) = 56.0
 #   observed blocks/s = 6 / elapsed_s(final=1.2) = 5.000 >= 5  -> keep-pace
 #   verdict vs 20/40 s @ >=5 blk/s = PASS  (p50 16 < 18, p99 19 < 38)
 #   BENCH_METRIC: one each of fold_barrier / fold_transit / fold_storage
-BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3000,"cpu_ms":48000,"rss_mb_peak":2100,"rss_mb_after":900,"height":100,"lag_ms":8000,"queue_depth":3,"ts":"2026-06-15T00:00:01Z","witness_fetch_ms":120}
+BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3000,"cpu_ms":48000,"rss_mb_peak":2100,"rss_mb_after":900,"height":100,"lag_ms":7600,"queue_depth":3,"ts":"2026-06-15T00:00:01Z","witness_fetch_ms":120}
+BENCH_EVENT {"event":"stream_summary","phase":"block_complete","throughput_tx_s":56.0,"lag_p50_ms":8000,"lag_p95_ms":8000,"peak_rss_mb":2600,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":8.0,"height":100,"block_wall_ms":8000,"ts":"2026-06-15T00:00:08Z"}
 BENCH_EVENT {"event":"coordinator_fold","height":100,"merge_source":"measured","l4_source":"measured","leaves":4,"depth":2,"merges":3,"merge_ms":3000,"l4_ms":4000,"merge_s":3.0,"l4_s":4.0,"rss_mb_peak":2600,"ts":"2026-06-15T00:00:08Z"}
-BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3100,"cpu_ms":49000,"rss_mb_peak":2150,"rss_mb_after":910,"height":101,"lag_ms":7000,"queue_depth":3,"ts":"2026-06-15T00:00:02Z","witness_fetch_ms":130}
+BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3100,"cpu_ms":49000,"rss_mb_peak":2150,"rss_mb_after":910,"height":101,"lag_ms":6500,"queue_depth":3,"ts":"2026-06-15T00:00:02Z","witness_fetch_ms":130}
+BENCH_EVENT {"event":"stream_summary","phase":"block_complete","throughput_tx_s":56.0,"lag_p50_ms":7000,"lag_p95_ms":7000,"peak_rss_mb":2650,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":7.0,"height":101,"block_wall_ms":7000,"ts":"2026-06-15T00:00:09Z"}
 BENCH_EVENT {"event":"coordinator_fold","height":101,"merge_source":"measured","l4_source":"measured","leaves":4,"depth":2,"merges":3,"merge_ms":3500,"l4_ms":4500,"merge_s":3.5,"l4_s":4.5,"rss_mb_peak":2650,"ts":"2026-06-15T00:00:09Z"}
-BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3050,"cpu_ms":48500,"rss_mb_peak":2120,"rss_mb_after":905,"height":102,"lag_ms":9000,"queue_depth":3,"ts":"2026-06-15T00:00:03Z","witness_fetch_ms":125}
+BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3050,"cpu_ms":48500,"rss_mb_peak":2120,"rss_mb_after":905,"height":102,"lag_ms":8600,"queue_depth":3,"ts":"2026-06-15T00:00:03Z","witness_fetch_ms":125}
+BENCH_EVENT {"event":"stream_summary","phase":"block_complete","throughput_tx_s":56.0,"lag_p50_ms":9000,"lag_p95_ms":9000,"peak_rss_mb":2620,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":9.0,"height":102,"block_wall_ms":9000,"ts":"2026-06-15T00:00:10Z"}
 BENCH_EVENT {"event":"coordinator_fold","height":102,"merge_source":"measured","l4_source":"measured","leaves":4,"depth":2,"merges":3,"merge_ms":3000,"l4_ms":4000,"merge_s":3.0,"l4_s":4.0,"rss_mb_peak":2620,"ts":"2026-06-15T00:00:10Z"}
-BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3080,"cpu_ms":49200,"rss_mb_peak":2160,"rss_mb_after":912,"height":103,"lag_ms":9000,"queue_depth":2,"ts":"2026-06-15T00:00:04Z","witness_fetch_ms":118}
+BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3080,"cpu_ms":49200,"rss_mb_peak":2160,"rss_mb_after":912,"height":103,"lag_ms":8700,"queue_depth":2,"ts":"2026-06-15T00:00:04Z","witness_fetch_ms":118}
+BENCH_EVENT {"event":"stream_summary","phase":"block_complete","throughput_tx_s":56.0,"lag_p50_ms":9000,"lag_p95_ms":9000,"peak_rss_mb":2640,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":9.0,"height":103,"block_wall_ms":9000,"ts":"2026-06-15T00:00:11Z"}
 BENCH_EVENT {"event":"coordinator_fold","height":103,"merge_source":"measured","l4_source":"measured","leaves":4,"depth":2,"merges":3,"merge_ms":3200,"l4_ms":4300,"merge_s":3.2,"l4_s":4.3,"rss_mb_peak":2640,"ts":"2026-06-15T00:00:11Z"}
-BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3070,"cpu_ms":49100,"rss_mb_peak":2155,"rss_mb_after":908,"height":104,"lag_ms":10000,"queue_depth":2,"ts":"2026-06-15T00:00:05Z","witness_fetch_ms":122}
+BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3070,"cpu_ms":49100,"rss_mb_peak":2155,"rss_mb_after":908,"height":104,"lag_ms":9600,"queue_depth":2,"ts":"2026-06-15T00:00:05Z","witness_fetch_ms":122}
+BENCH_EVENT {"event":"stream_summary","phase":"block_complete","throughput_tx_s":56.0,"lag_p50_ms":10000,"lag_p95_ms":10000,"peak_rss_mb":2660,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":10.0,"height":104,"block_wall_ms":10000,"ts":"2026-06-15T00:00:12Z"}
 BENCH_EVENT {"event":"coordinator_fold","height":104,"merge_source":"measured","l4_source":"measured","leaves":4,"depth":2,"merges":3,"merge_ms":3300,"l4_ms":4400,"merge_s":3.3,"l4_s":4.4,"rss_mb_peak":2660,"ts":"2026-06-15T00:00:12Z"}
-BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3090,"cpu_ms":49300,"rss_mb_peak":2165,"rss_mb_after":915,"height":105,"lag_ms":11000,"queue_depth":1,"ts":"2026-06-15T00:00:06Z","witness_fetch_ms":128}
+BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3090,"cpu_ms":49300,"rss_mb_peak":2165,"rss_mb_after":915,"height":105,"lag_ms":10600,"queue_depth":1,"ts":"2026-06-15T00:00:06Z","witness_fetch_ms":128}
+BENCH_EVENT {"event":"stream_summary","phase":"block_complete","throughput_tx_s":56.0,"lag_p50_ms":11000,"lag_p95_ms":11000,"peak_rss_mb":2680,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":11.0,"height":105,"block_wall_ms":11000,"ts":"2026-06-15T00:00:13Z"}
 BENCH_EVENT {"event":"coordinator_fold","height":105,"merge_source":"measured","l4_source":"measured","leaves":4,"depth":2,"merges":3,"merge_ms":3400,"l4_ms":4600,"merge_s":3.4,"l4_s":4.6,"rss_mb_peak":2680,"ts":"2026-06-15T00:00:13Z"}
-BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3060,"cpu_ms":49000,"rss_mb_peak":2150,"rss_mb_after":906,"height":106,"lag_ms":12000,"queue_depth":1,"ts":"2026-06-15T00:00:07Z","witness_fetch_ms":121}
+BENCH_EVENT {"event":"chunk_proven","layer":2,"name":"BlockTxChainCircuit","chunk_idx":0,"chunk_total":4,"tx_per_proof":9,"wall_ms":3060,"cpu_ms":49000,"rss_mb_peak":2150,"rss_mb_after":906,"height":106,"lag_ms":11500,"queue_depth":1,"ts":"2026-06-15T00:00:07Z","witness_fetch_ms":121}
+BENCH_EVENT {"event":"stream_summary","phase":"block_complete","throughput_tx_s":56.0,"lag_p50_ms":12000,"lag_p95_ms":12000,"peak_rss_mb":0,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":12.0,"height":106,"block_wall_ms":12000,"ts":"2026-06-15T00:00:14Z"}
 BENCH_EVENT {"event":"coordinator_fold","height":106,"merge_source":"modeled","l4_source":"modeled","leaves":0,"depth":0,"merges":0,"merge_ms":0,"l4_ms":0,"merge_s":0.4764,"l4_s":5.155,"rss_mb_peak":0,"ts":"2026-06-15T00:00:14Z"}
 BENCH_METRIC fold_barrier height=100 level=1 tasks=2 odd_carry=0 barrier_ms=410 slowest_prove_ms=1500 median_prove_ms=1450 straggler_ms=50 (issue #198)
 BENCH_METRIC fold_transit height=100 transit_total_ms=2800 max_intermediate_bytes=421888 depth=2 merges=3 (issue #198)
