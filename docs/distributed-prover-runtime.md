@@ -327,10 +327,17 @@ gcloud pubsub subscriptions create lighter-prover-results-sub  --topic lighter-p
 
 # 3. Publish a block, run a coordinator (1 block) and a cell (a few chunks)
 gcloud pubsub topics publish lighter-prover-dispatch --message='{"height":260138266,"tx_count":16}' --project test
-prover --mode coordinator --project test \
+prover --mode coordinator --project test --allow-accounting-only-fold \
   --dispatch-subscription lighter-prover-dispatch-sub \
   --chunk-topic lighter-prover-chunk \
   --results-subscription lighter-prover-results-sub --max-units 1 &
+# --allow-accounting-only-fold: this emulator wiring example exercises the
+# coordinator without a proof-store bucket, so the REAL merge+L4 path stays
+# off. Post-#209 the coordinator REFUSES that path silently — pass the flag
+# to explicitly opt in (the run emits a loud WARN banner so the inert path
+# can never be mistaken for a real measurement). For the REAL distributed
+# fold, replace this with `--proof-bucket <name>` pointing at the bucket
+# the cells upload their L2 leaf proofs to.
 prover --mode cell --project test \
   --chunk-subscription lighter-prover-chunk-sub \
   --results-topic lighter-prover-results --max-units 4
@@ -351,14 +358,20 @@ prove the wiring end-to-end before the GKE deploy.)
 2. **Coordinator L2→L4 merge measured only on a LOCAL hermetic e2e, not yet a
    LIVE k=56 fleet run (Assumption 7):** issue #179 WIRED the real cross-cell
    fan-in — the coordinator runs the REAL `BlockTxChainMergeCircuit` fold + REAL
-   `BlockCircuit` L4 prove+verify (opt-in via `--proof-bucket`), emitting a
+   `BlockCircuit` L4 prove+verify (gated by `--proof-bucket`), emitting a
    `coordinator_fold` BENCH_EVENT with `merge_source`/`l4_source = "measured"`.
    The remaining risk is provenance scope: those measured `merge_ms`/`l4_ms`
    numbers come from the `make e2e` LOCAL hermetic run (small k, no live
    GCP/GCS/Pub/Sub), NOT yet from a LIVE multi-cell k=56 fold on real Axion
-   infra. Without `--proof-bucket` the coordinator still falls back to the
-   accounting-only model (`merge_source: "modeled"`), so a live measured k=56
-   merge+L4 is the next slice to confirm on real hardware.
+   infra. Issue #209 made the REAL fold the DEFAULT in the committed scale
+   tfvars (`enable_proof_store` + `enable_proof_mount` + `enable_merge_plane`
+   plus `--proof-bucket` / `--proof-mount-path` / `--fold-distributed` wired
+   into the workload commands) AND made the coordinator refuse to silently
+   run the accounting-only fold — `--mode coordinator` without
+   `--proof-bucket` now exits unless `--allow-accounting-only-fold` is
+   explicitly passed, and even then a prominent WARN banner fires on startup
+   and on every block completion. The next slice is the live measured k=56
+   merge+L4 on real Axion hardware.
 3. **`gcloud` auth in-pod:** cells/coordinators need a service account with
    `roles/pubsub.subscriber` + `roles/pubsub.publisher` via Workload Identity.
    Add that binding when applying the scale tfvars (the smoke config only

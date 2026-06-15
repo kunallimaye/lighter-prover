@@ -165,6 +165,30 @@ struct Args {
     #[arg(long, env = "LIGHTER_PROOF_MOUNT", default_value = "")]
     proof_mount_path: String,
 
+    /// Issue #209: explicit opt-in to the COORDINATOR'S accounting-only
+    /// fold path (the legacy `--mode coordinator` behavior when no
+    /// `--proof-bucket` is set: no real merge tree, no real `BlockCircuit`
+    /// L4 — the coordinator just sums per-chunk `prove_ms` and emits a
+    /// completion event with `merge_ms` / `l4_ms` = 0 and
+    /// `merge_source` / `l4_source` = `"modeled"`).
+    ///
+    /// BEFORE #209 this was the SILENT DEFAULT — a `terraform apply` from
+    /// the committed GKE scale tfvars would deploy a fleet whose
+    /// coordinator NEVER ran the heaviest, coordinator-side half of the
+    /// pipeline, and an operator could read "blocks completing / SLO held"
+    /// as a whole-system result when the coordinator did NO merge and NO
+    /// L4. AFTER #209 the coordinator REFUSES to run that path silently:
+    /// `--mode coordinator` without `--proof-bucket` exits with an honest
+    /// error unless this flag is passed (env
+    /// `LIGHTER_ALLOW_ACCOUNTING_ONLY_FOLD`). When the flag IS passed
+    /// alongside an empty bucket, the coordinator emits a prominent WARN
+    /// banner on startup AND on EVERY block completion so the inert path
+    /// can never be mistaken for a real run. The flag is a no-op when a
+    /// real `--proof-bucket` is configured (real fold wins). Other modes
+    /// (cell, fold-worker, batch) are unaffected.
+    #[arg(long, env = "LIGHTER_ALLOW_ACCOUNTING_ONLY_FOLD", default_value_t = false)]
+    allow_accounting_only_fold: bool,
+
     /// Distributed modes: how many blocks the coordinator proves before
     /// exiting, OR how many chunks the cell proves before exiting. `0` =
     /// run forever (until SIGINT/SIGTERM). Bounded values make a single
@@ -2423,6 +2447,41 @@ fn run_coordinator(args: &Args) {
     });
     let real_fold_enabled = proof_store.config().enabled();
 
+    // ── Issue #209: REFUSE to silently run the accounting-only fold ──
+    // Before #209, --mode coordinator with an empty --proof-bucket silently
+    // fell back to the "accounting-only fold" — no real merge tree, no
+    // real BlockCircuit L4 (merge_source/l4_source = "modeled",
+    // merge_ms/l4_ms = 0) — and the committed GKE scale tfvars left the
+    // bucket unset by default, so a `terraform apply` measured only HALF
+    // the pipeline (the "true numbers, misleading conclusion" failure
+    // mode). The fix per #209: the accounting-only path is now reachable
+    // ONLY via the explicit --allow-accounting-only-fold opt-in (env
+    // LIGHTER_ALLOW_ACCOUNTING_ONLY_FOLD); without it, we exit with an
+    // honest error. The flag is a no-op when --proof-bucket is set (the
+    // real fold path wins; this guard is only checked when the real fold
+    // is disabled).
+    if !real_fold_enabled && !args.allow_accounting_only_fold {
+        eprintln!(
+            "error: --mode coordinator without --proof-bucket would run the ACCOUNTING-ONLY fold \
+             (no real BlockTxChainMergeCircuit merge tree, no real BlockCircuit L4 — merge_ms/l4_ms \
+             = 0, merge_source/l4_source = \"modeled\"). That path measures only HALF the \
+             pipeline (issue #209). As of #209 it is no longer the silent default.\n\
+             \n\
+             To run the REAL distributed fold (the intended whole-system measurement), pass:\n\
+               --proof-bucket <bucket-name>            (or set LIGHTER_PROOF_BUCKET)\n\
+             optionally with the mount + cross-machine fold:\n\
+               --proof-mount-path /mnt/proof-store     (or set LIGHTER_PROOF_MOUNT)\n\
+               --fold-distributed                      (or set LIGHTER_FOLD_DISTRIBUTED=true)\n\
+             \n\
+             To EXPLICITLY OPT IN to the accounting-only path (e.g. local dev, smoke \
+             validation, or replicating pre-#179 behavior), pass:\n\
+               --allow-accounting-only-fold            (or set LIGHTER_ALLOW_ACCOUNTING_ONLY_FOLD=true)\n\
+             A run started that way emits a prominent WARN banner on startup and on every \
+             block completion so the inert path can never be mistaken for a real run."
+        );
+        std::process::exit(2);
+    }
+
     info!(
         "coordinator: starting dispatch_sub={} chunk_topic={} results_sub={} S={} max_units={}",
         bus.config().dispatch_subscription,
@@ -2451,10 +2510,31 @@ fn run_coordinator(args: &Args) {
         );
         Some(CoordinatorRealFold::build(args))
     } else {
-        info!(
-            "coordinator: REAL distributed fold DISABLED (no --proof-bucket) -- the real merge \
-             is SKIPPED because no proof store is configured; falling back to accounting-only \
-             fold (behavior identical to pre-#179 WS4/WS5; off-by-default opt-in path)"
+        // Issue #209: only reachable because --allow-accounting-only-fold was
+        // explicitly passed (the guard above exits otherwise). Emit a LOUD,
+        // unmissable WARN banner so an operator cannot mistake the inert path
+        // for a real run. The banner is also re-emitted per block completion
+        // (see emit_block_complete event path) — see issue #209 acceptance
+        // criterion #3 ("an accidental accounting-only coordinator run is
+        // loudly flagged").
+        log::warn!(
+            "\n\
+             ╔══════════════════════════════════════════════════════════════════════════════╗\n\
+             ║ ⚠  COORDINATOR RUNNING IN ACCOUNTING-ONLY FOLD MODE (issue #209)             ║\n\
+             ║                                                                              ║\n\
+             ║  --allow-accounting-only-fold was passed (or LIGHTER_ALLOW_ACCOUNTING_ONLY_  ║\n\
+             ║  FOLD=true). The coordinator will NOT run the real BlockTxChainMergeCircuit  ║\n\
+             ║  merge tree and will NOT prove BlockCircuit L4. It will only SUM per-chunk   ║\n\
+             ║  prove_ms and emit completion events with merge_ms / l4_ms = 0 and           ║\n\
+             ║  merge_source / l4_source = \"modeled\".                                       ║\n\
+             ║                                                                              ║\n\
+             ║  THIS MEASURES ONLY HALF THE PIPELINE.                                       ║\n\
+             ║  Do NOT read \"blocks completing / SLO held\" from this run as a whole-system  ║\n\
+             ║  result — the heaviest coordinator-side stages are not running.              ║\n\
+             ║                                                                              ║\n\
+             ║  To run the REAL fold, restart with --proof-bucket pointed at the SAME       ║\n\
+             ║  bucket the cells upload their L2 leaf proofs to (LIGHTER_PROOF_BUCKET).     ║\n\
+             ╚══════════════════════════════════════════════════════════════════════════════╝"
         );
         None
     };
@@ -2662,6 +2742,24 @@ fn run_coordinator(args: &Args) {
             block.height, complete, k, dispatched, collected, ok_count,
             block_wall_ms, total_prove_ms, total_witness_fetch_ms, merge_ms, l4_ms
         );
+
+        // Issue #209: re-emit the accounting-only WARN per block completion
+        // (in addition to the startup banner above) so the inert path is
+        // visible in EVERY block's log line, not only at process start —
+        // a long-lived coordinator's startup banner scrolls out of view
+        // and an operator tailing later could otherwise mistake the
+        // accounting-only stream for a real fold run. No-op when the real
+        // fold ran (`measured == true`).
+        if !measured {
+            log::warn!(
+                "coordinator: block height={} ACCOUNTING-ONLY fold (issue #209) -- merge_ms=0 \
+                 l4_ms=0 merge_source=\"modeled\" l4_source=\"modeled\"; the real merge tree and \
+                 BlockCircuit L4 were NOT run. This measures only HALF the pipeline. Re-run \
+                 with --proof-bucket for the REAL fold.",
+                block.height,
+            );
+        }
+
         blocks_done += 1;
     }
     info!("coordinator: done, {} blocks dispatched", blocks_done);
