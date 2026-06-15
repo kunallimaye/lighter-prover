@@ -1605,14 +1605,22 @@ fn run_cell(args: &Args) {
             account_delta_tree_root: block.old_account_delta_tree_root,
             market_tree_root: block.old_market_tree_root,
         };
+        // The sweep proves SINGLE-tx steps, so it needs an S=1 L1 circuit --
+        // NOT the cell's serving circuit `data` (built at S=tx_per_proof). A
+        // single-tx BlockTx fed to the S=9 circuit trips the in-circuit
+        // `zip_eq` (the circuit expects exactly tx_per_proof txs). This is a
+        // separate, transient circuit used only for the one-time sweep.
+        let sweep_circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, 1, CHAIN_ID);
+        let sweep_bt = sweep_circuit.target;
+        let sweep_data = sweep_circuit.builder.build::<C>();
         let sweep_t = Instant::now();
         let snaps = sweep_per_tx_snapshots(
             block.block_number,
             created_at,
             initial,
             &block.txs[..effective_limit],
-            &data,
-            &bt,
+            &sweep_data,
+            &sweep_bt,
             |_pos, _wall_ms| {},
         );
         info!(
