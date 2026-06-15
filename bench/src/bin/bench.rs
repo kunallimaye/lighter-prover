@@ -20,7 +20,9 @@ use circuit::block_pre_execution_constraints::{BlockPreExecutionCircuit, Circuit
 use circuit::block_tx::{BlockTx, BlockTxWitness};
 use circuit::block_tx_chain::BlockTxChainWitness;
 use circuit::block_tx_chain_constraints::{BlockTxChainCircuit, BlockTxChainTarget, Circuit as _};
-use circuit::block_tx_chain_merge_constraints::{BlockTxChainMergeCircuit, Circuit as _};
+use circuit::block_tx_chain_merge_constraints::{
+    BlockTxChainMergeCircuit, BlockTxChainMergeTarget, Circuit as _,
+};
 use circuit::block_tx_constraints::{BlockTxCircuit, BlockTxTarget, Circuit as _};
 use circuit::builder::custom::cyclic_base_proof;
 use circuit::keccak::helpers::keccak;
@@ -1942,6 +1944,224 @@ fn run_cell(args: &Args) {
     info!("cell: done, {} chunks proven", proven);
 }
 
+/// Issue #179 WS4/WS5: the resident circuits + witness the coordinator needs
+/// to run the REAL distributed fold and L4. Built ONCE at coordinator start
+/// (only when a proof bucket is configured), identical to what the cell and
+/// the single-process tree path build.
+struct CoordinatorRealFold {
+    /// Leaf chain circuit data — the merge circuit's self-shape and the L4's
+    /// `chain_like_data` for a single-leaf block.
+    chain_data: CircuitData<F, C, D>,
+    /// The merge circuit's target + built data, shared with `fold_merge_tree`.
+    merge_target: BlockTxChainMergeTarget,
+    merge_data: CircuitData<F, C, D>,
+    /// L3 (pre-exec) circuit data and the block's pre-exec proof for L4.
+    pre_exec_data: CircuitData<F, C, D>,
+    pre_proof: ProofWithPublicInputs<F, C, D>,
+    /// The block witness (baked `bench_test.json`) L4 patches its `new_*`
+    /// fields against. Same fixture the cells resolve leaf slices from.
+    block: Block<F>,
+    /// `tx_per_proof` (S) — used only for the L4 event's `tx_per_proof` field.
+    tx_per_proof: usize,
+}
+
+impl CoordinatorRealFold {
+    /// Build the resident merge + L4 circuits and the block pre-exec proof.
+    /// This mirrors the cell's `run_cell` circuit setup so the coordinator's
+    /// merge circuit builds into the cells' leaf chain shape (the cyclic fixed
+    /// point) and the L4 takes the same L3 input.
+    fn build(args: &Args) -> Self {
+        info!("coordinator: building REAL fold circuits (BlockTxChainCircuit + merge + L4)...");
+        let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, CHAIN_ID);
+        let data = circuit.builder.build::<C>();
+
+        let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+        let pbt = pre_exec_circuit.target;
+        let pre_exec_data = pre_exec_circuit.builder.build::<C>();
+
+        let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &data, args.tx_per_proof, 1);
+        let chain_data = chain_circuit.builder.build::<C>();
+
+        // Merge circuit: define against the leaf chain data and assert the
+        // cyclic fixed point (same invariant the single-process path checks).
+        let merge_circuit = BlockTxChainMergeCircuit::define(CIRCUIT_CONFIG, &chain_data, 1);
+        let merge_target = merge_circuit.target;
+        let merge_data = merge_circuit.builder.build::<C>();
+        assert!(
+            merge_data.common == chain_data.common,
+            "coordinator: BlockTxChainMergeCircuit must build into the leaf chain circuit's exact \
+             self-shape (issue #67/#179 cyclic fixed point)"
+        );
+
+        // Pre-exec proof (L3 input to L4) over the baked block witness.
+        let block = get_test_block_json_file("bench_test.json");
+        let block_pre_exec = BlockPreExec::from_block(&block);
+        let pre_proof = BlockPreExecutionCircuit::prove(&pre_exec_data, &block_pre_exec, &pbt)
+            .unwrap_or_else(|err| panic!("coordinator: block pre-exec failed to prove: {err:?}"));
+
+        info!("coordinator: REAL fold circuits resident");
+        Self {
+            chain_data,
+            merge_target,
+            merge_data,
+            pre_exec_data,
+            pre_proof,
+            block,
+            tx_per_proof: args.tx_per_proof,
+        }
+    }
+}
+
+/// Outcome of a successful coordinator REAL fold + L4 (issue #179 WS4+WS5).
+struct CoordinatorFoldOutcome {
+    leaves: usize,
+    depth: usize,
+    merges: usize,
+    /// Measured merge-tree wall-time (ms). WS6 handoff: route into BENCH_EVENT
+    /// and replace the model constant `merge_s`.
+    merge_ms: u64,
+    /// Measured L4 wall-time (ms). WS6 handoff: route into BENCH_EVENT and
+    /// replace the model constant `l4_s`.
+    l4_ms: u64,
+}
+
+/// Issue #179 WS4 (PURE gather→key-list step, unit-tested without GCS or
+/// circuits): validate the gathered chunk results and return their
+/// `proof_object` keys ORDERED by `witness_index` (chunk order, so the merge
+/// tree folds adjacent ranges left-before-right).
+///
+/// Honest-partial: a result with `ok == false`, a missing `proof_object`, or
+/// an empty gather set returns `Err` — the coordinator must NOT fold a partial
+/// tree or fabricate a result. A key that disagrees with the shared
+/// [`proof_object_key`] scheme is logged but the REPORTED key is used (the cell
+/// is the authority on where it actually stored the bytes); the equality is
+/// guarded so the two sides can never silently drift.
+fn coordinator_leaf_keys_ordered(
+    block_results: &[bench::conductor::ChunkResultMessage],
+    height: u64,
+) -> anyhow::Result<Vec<String>> {
+    use bench::conductor::proof_object_key;
+
+    if block_results.is_empty() {
+        anyhow::bail!("no chunk results gathered for height {height}; nothing to fold");
+    }
+
+    let mut ordered: Vec<&bench::conductor::ChunkResultMessage> = block_results.iter().collect();
+    ordered.sort_by_key(|r| r.witness_index);
+
+    let mut keys: Vec<String> = Vec::with_capacity(ordered.len());
+    for r in &ordered {
+        if !r.ok {
+            anyhow::bail!(
+                "chunk height={} witness_index={} reported ok=false; refusing to fold an honest \
+                 failure",
+                r.height, r.witness_index,
+            );
+        }
+        let key = match &r.proof_object {
+            Some(k) => k.clone(),
+            None => anyhow::bail!(
+                "chunk height={} witness_index={} has no proof_object reference; its bytes are not \
+                 in the proof store (honest-partial — coordinator cannot fold without them)",
+                r.height, r.witness_index,
+            ),
+        };
+        let expected = proof_object_key(r.height, r.witness_index);
+        if key != expected {
+            log::warn!(
+                "coordinator: proof_object key '{key}' != expected '{expected}' for \
+                 height={} witness_index={}; downloading by the reported key",
+                r.height, r.witness_index,
+            );
+        }
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+/// Issue #179 WS4+WS5: gather the cells' REAL L2 leaf proofs by their
+/// `proof_object` keys, DOWNLOAD + deserialize them, fold them with the shared
+/// `fold_merge_tree` (`BlockTxChainMergeCircuit`), then prove+verify the L4
+/// `BlockCircuit` over the folded chain proof via the shared
+/// `prove_block_l4_from_chain`. Returns the measured merge/L4 wall-times.
+///
+/// Honest-failure throughout: a missing key, a failed download, a bad
+/// deserialize, a failed merge, or a failed L4 all return `Err` — the caller
+/// marks the block partial. No proof is ever fabricated (issue #179 rule).
+fn coordinator_real_fold(
+    real: &CoordinatorRealFold,
+    proof_store: &bench::conductor::GcloudStorage,
+    block_results: &[bench::conductor::ChunkResultMessage],
+    height: u64,
+) -> anyhow::Result<CoordinatorFoldOutcome> {
+    // GATHER → key list: validate every chunk reported ok + carried a
+    // proof_object, and order the keys by witness_index (chunk order). This
+    // pure step is unit-tested WITHOUT GCS or circuits.
+    let keys = coordinator_leaf_keys_ordered(block_results, height)?;
+
+    // DOWNLOAD → DESERIALIZE every leaf, in chunk order. The bytes are the
+    // EXACT `serde_json` of `ProofWithPublicInputs` the cell uploaded (issue
+    // #117 export format), so the round-trip never drifts.
+    let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(keys.len());
+    for key in &keys {
+        let bytes = proof_store
+            .download(key)
+            .map_err(|e| anyhow::anyhow!("download of proof_object '{key}' failed: {e}"))?;
+        let leaf: ProofWithPublicInputs<F, C, D> = serde_json::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("deserialize of proof_object '{key}' failed: {e}"))?;
+        leaves.push(leaf);
+    }
+
+    let leaves_count = leaves.len();
+    info!(
+        "coordinator: downloaded + deserialized {leaves_count} REAL L2 leaf proofs for \
+         height={height}; folding with BlockTxChainMergeCircuit (issue #179 WS4)"
+    );
+
+    // FOLD (WS4): shared single-source merge tree.
+    let merge_start = Instant::now();
+    let fold = fold_merge_tree(&real.merge_target, &real.merge_data, leaves)?;
+    let merge_ms = merge_start.elapsed().as_millis() as u64;
+    info!(
+        "coordinator: folded {leaves_count} leaves for height={height}: depth={} merges={} \
+         merge_wall_ms={} sum_merge_prove_ms={} (issue #179 WS4)",
+        fold.depth,
+        fold.merges,
+        merge_ms,
+        fold.merge_prove_total.as_millis(),
+    );
+
+    // L4 (WS5): shared single-source block proof over the folded chain proof.
+    // A single-leaf block did not merge, so L4 verifies against the leaf chain
+    // VK; otherwise against the merge VK (the merge built into the chain shape,
+    // so both use chain_data as the chain_like_data).
+    let chain_like_data = &real.chain_data;
+    let l4_start = Instant::now();
+    let t = prove_block_l4_from_chain(
+        &real.pre_exec_data,
+        chain_like_data,
+        &real.block,
+        &real.pre_proof,
+        &fold.final_proof,
+    )
+    .map_err(|e| anyhow::anyhow!("L4 BlockCircuit prove/verify failed: {e}"))?;
+    let l4_ms = l4_start.elapsed().as_millis() as u64;
+    info!(
+        "coordinator: L4 BlockCircuit proved+verified for height={height} \
+         (build {} ms, prove {} ms, verify {} ms; final_is_merge={}) (issue #179 WS5)",
+        t.build_ms, t.prove_ms, t.verify_ms, fold.final_is_merge,
+    );
+    let _ = real.tx_per_proof;
+
+    Ok(CoordinatorFoldOutcome {
+        leaves: leaves_count,
+        depth: fold.depth,
+        merges: fold.merges,
+        merge_ms,
+        l4_ms,
+    })
+}
+
 /// The coordinator pod (`bench --mode coordinator`, ADR-0006 §1.1/§1.2).
 ///
 /// One coordinator per pod; per-coordinator vertical concurrency stays 1
@@ -1949,13 +2169,15 @@ fn run_cell(args: &Args) {
 /// dispatch subscription (competing-pull), SPLIT it into `k = ceil(tx/S)`
 /// chunks (reusing `conductor::dispatch::split_k`), publish the `k` chunk
 /// REFERENCES (not bytes; ADR-0008 §1.2) to the chunk topic, collect the `k`
-/// chunk results from the results subscription, FOLD/merge the accounting,
-/// then emit a per-block completion + lag BENCH_EVENT.
+/// chunk results from the results subscription, FOLD/merge — REALLY when a
+/// proof store is configured (issue #179 WS4+WS5: download + merge + L4),
+/// otherwise accounting-only — then emit a per-block completion + lag
+/// BENCH_EVENT.
 fn run_coordinator(args: &Args) {
     use std::time::Instant;
 
     use bench::conductor::dispatch::split_k;
-    use bench::conductor::{ChunkMessage, GcloudPubSub};
+    use bench::conductor::{ChunkMessage, ChunkResultMessage, GcloudPubSub, GcloudStorage, StorageConfig};
 
     let mut cfg = resolve_pubsub_config(args);
     if cfg.dispatch_subscription.is_empty() {
@@ -1977,6 +2199,18 @@ fn run_coordinator(args: &Args) {
     cfg.chunk_subscription.clear();
     let bus = GcloudPubSub::new(cfg);
 
+    // Proof store (issue #179 WS4/WS5). OPT-IN: the REAL distributed fold +
+    // L4 path activates ONLY when the coordinator is pointed at the SAME
+    // bucket the cells uploaded their L2 leaf proofs to (--proof-bucket /
+    // LIGHTER_PROOF_BUCKET). With no bucket the coordinator behaves EXACTLY
+    // as before this slice — accounting-only fold, no circuit prove — so
+    // existing benchmark runs are byte-for-byte unchanged.
+    let proof_store = GcloudStorage::new(StorageConfig {
+        bucket: args.proof_bucket.clone(),
+        gcloud_bin: args.gcloud_bin.clone(),
+    });
+    let real_fold_enabled = proof_store.config().enabled();
+
     info!(
         "coordinator: starting dispatch_sub={} chunk_topic={} results_sub={} S={} max_units={}",
         bus.config().dispatch_subscription,
@@ -1985,6 +2219,33 @@ fn run_coordinator(args: &Args) {
         args.tx_per_proof,
         args.max_units,
     );
+
+    // ---- Build the REAL merge + L4 resources ONCE (only when the real fold
+    // is enabled). These are the SAME circuits the single-process path builds;
+    // the coordinator reuses the shared `fold_merge_tree` + `run_l4_check`
+    // helpers so there is one merge implementation and one L4 implementation.
+    //
+    // The coordinator owns SPLIT (ADR-0006 §1.2) but NOT the witness; for L4 it
+    // needs the block witness to patch the `new_*` fields. It uses the SAME
+    // baked `bench_test.json` fixture the cells resolve from (k=1 mounted
+    // corpus, ADR-0008 §1.4) — the cells proved leaves over slices of exactly
+    // this block, so its pre-exec proof is the L3 input L4 expects.
+    let real_fold = if real_fold_enabled {
+        info!(
+            "coordinator: REAL distributed fold ENABLED -- will DOWNLOAD L2 leaf proofs from \
+             gs://{} (keyed by {{height}}/{{witness_index}}), fold with BlockTxChainMergeCircuit, \
+             and prove BlockCircuit L4 (issue #179 WS4+WS5)",
+            proof_store.config().bucket,
+        );
+        Some(CoordinatorRealFold::build(args))
+    } else {
+        info!(
+            "coordinator: REAL distributed fold DISABLED (no --proof-bucket) -- the real merge \
+             is SKIPPED because no proof store is configured; falling back to accounting-only \
+             fold (behavior identical to pre-#179 WS4/WS5; off-by-default opt-in path)"
+        );
+        None
+    };
 
     let mut blocks_done: u64 = 0;
     loop {
@@ -2036,6 +2297,10 @@ fn run_coordinator(args: &Args) {
         let mut ok_count: u64 = 0;
         let mut total_prove_ms: u64 = 0;
         let mut total_witness_fetch_ms: u64 = 0;
+        // Retain the full result messages for THIS block so the real fold can
+        // read each `proof_object` key (issue #179 WS4). Indexed-by-arrival;
+        // the fold below sorts by `witness_index` to fold in chunk order.
+        let mut block_results: Vec<ChunkResultMessage> = Vec::with_capacity(dispatched as usize);
         while collected < dispatched && Instant::now() < gather_deadline {
             match bus.pull_results(dispatched as u32) {
                 Ok(results) => {
@@ -2055,6 +2320,7 @@ fn run_coordinator(args: &Args) {
                         }
                         total_prove_ms += r.prove_ms;
                         total_witness_fetch_ms += r.witness_fetch_ms.unwrap_or(0);
+                        block_results.push(r);
                     }
                 }
                 Err(e) => {
@@ -2065,7 +2331,41 @@ fn run_coordinator(args: &Args) {
         }
 
         let block_wall_ms = block_start.elapsed().as_millis() as u64;
-        let complete = collected >= dispatched && ok_count == collected && dispatched > 0;
+        let mut complete = collected >= dispatched && ok_count == collected && dispatched > 0;
+
+        // ---- REAL distributed fold + L4 (issue #179 WS4+WS5). Only when a
+        // proof store is configured. The merge is now AUTHORITATIVE: if the
+        // bytes are present and the circuits run, the coordinator produces a
+        // REAL per-block proof; if anything is missing or fails, it fails the
+        // block HONESTLY (logs + marks incomplete) and NEVER fabricates.
+        let mut merge_ms: u64 = 0;
+        let mut l4_ms: u64 = 0;
+        if let Some(real) = real_fold.as_ref() {
+            match coordinator_real_fold(real, &proof_store, &block_results, block.height) {
+                Ok(outcome) => {
+                    merge_ms = outcome.merge_ms;
+                    l4_ms = outcome.l4_ms;
+                    info!(
+                        "coordinator: REAL fold+L4 height={} PASS -- folded {} leaf proofs \
+                         (depth={} merges={}) and proved+verified BlockCircuit L4 \
+                         (merge_ms={} l4_ms={}) (issue #179 WS4+WS5)",
+                        block.height, outcome.leaves, outcome.depth, outcome.merges,
+                        merge_ms, l4_ms,
+                    );
+                }
+                Err(e) => {
+                    // Honest failure: a missing/bad proof, a failed download,
+                    // deserialize, merge, or L4 marks the block NOT complete.
+                    // We do NOT fall back to a fabricated "merged" claim.
+                    complete = false;
+                    log::error!(
+                        "coordinator: REAL fold+L4 height={} FAILED honestly: {e}; block marked \
+                         partial (issue #179 — no fabricated proof)",
+                        block.height,
+                    );
+                }
+            }
+        }
 
         // FOLD/MERGE + emit per-block completion. We reuse the StreamSummary
         // event shape as the per-block completion record: it carries the
@@ -2090,11 +2390,15 @@ fn run_coordinator(args: &Args) {
             ts: now_iso8601(),
         });
 
+        // NOTE (issue #179 WS6 handoff): `merge_ms` and `l4_ms` are the
+        // MEASURED coordinator-side wall-times of the REAL fold and L4 (0 when
+        // the real path is disabled). The NEXT slice routes these into the
+        // BENCH_EVENT stream and replaces the model constants `merge_s`/`l4_s`.
         info!(
             "coordinator: block height={} COMPLETE={} k={} dispatched={} collected={} ok={} \
-             block_wall_ms={} sum_prove_ms={} sum_witness_fetch_ms={}",
+             block_wall_ms={} sum_prove_ms={} sum_witness_fetch_ms={} merge_ms={} l4_ms={}",
             block.height, complete, k, dispatched, collected, ok_count,
-            block_wall_ms, total_prove_ms, total_witness_fetch_ms
+            block_wall_ms, total_prove_ms, total_witness_fetch_ms, merge_ms, l4_ms
         );
         blocks_done += 1;
     }
@@ -2530,17 +2834,17 @@ fn run_tree_fold(
                 Some(right) => {
                     let merge_dt = Instant::now();
                     let merge_cpu_start = cpu_time_ms();
-                    let proof = BlockTxChainMergeCircuit::prove(
-                        &merge_target,
-                        &merge_data,
-                        &left.0,
-                        left.1,
-                        &right.0,
-                        right.1,
-                    )
-                    .unwrap_or_else(|err| {
-                        panic!("Merge pair #{i} (level {depth}) failed. err = {err:?}")
-                    });
+                    // Issue #179: route the actual circuit prove through the
+                    // shared `prove_merge_pair` helper so the single-process
+                    // tree fold and the distributed coordinator fold invoke
+                    // the EXACT same merge code. The `(proof, true)` node it
+                    // returns is destructured here; the single-process path
+                    // keeps its historical panic-on-error contract.
+                    let (proof, _is_merge) =
+                        prove_merge_pair(&merge_target, &merge_data, &left, &right)
+                            .unwrap_or_else(|err| {
+                                panic!("Merge pair #{i} (level {depth}) failed. err = {err:?}")
+                            });
                     let merge_dt = merge_dt.elapsed();
                     let wall_ms = merge_dt.as_millis() as u64;
                     events::emit(&BenchEvent::LayerProve {
@@ -2895,21 +3199,153 @@ fn wall_stats(walls: &[u64]) -> (u64, u64, u64) {
     (sum, mx, mn)
 }
 
-/// Issue #67 acceptance: define+build L4 (`BlockCircuit`) against the
-/// circuit that produced the final chain proof, patch the block's `new_*`
-/// fields to match the (possibly partial) chain run -- the `l45probe` trick
-/// archived on issue #10 -- then prove and verify L4 with the chain proof as
-/// `tx_chain_proof`.
-#[allow(clippy::too_many_arguments)]
-fn run_l4_check(
-    tx_per_proof: usize,
+/// Issue #179 (single source of truth for ONE pairwise merge): prove a single
+/// `BlockTxChainMergeCircuit` merge of `left` and `right` and return the merged
+/// node `(proof, is_merge=true)`. The `is_merge` flag of each child selects the
+/// conditional-VK verifier slot (leaf VK if `false`, merge VK if `true`).
+///
+/// Extracted so the single-process tree fold ([`run_tree_fold`]) and the
+/// distributed coordinator fold ([`fold_merge_tree`], called from
+/// `run_coordinator`) invoke the EXACT same merge circuit code — there is one
+/// merge implementation, never a copy-paste. Errors are returned (not
+/// panicked) so the distributed path can fail honestly on a bad pair without
+/// fabricating a result; the single-process caller keeps its historical
+/// `panic!`-on-error contract by unwrapping at the call site.
+fn prove_merge_pair(
+    merge_target: &BlockTxChainMergeTarget,
+    merge_data: &CircuitData<F, C, D>,
+    left: &TreeNode,
+    right: &TreeNode,
+) -> anyhow::Result<TreeNode> {
+    let proof = BlockTxChainMergeCircuit::prove(
+        merge_target,
+        merge_data,
+        &left.0,
+        left.1,
+        &right.0,
+        right.1,
+    )?;
+    Ok((proof, true))
+}
+
+/// Outcome of a distributed coordinator tree fold (issue #179 WS4).
+struct CoordinatorFold {
+    /// The single block-chain proof produced by folding the k leaf proofs.
+    final_proof: ProofWithPublicInputs<F, C, D>,
+    /// `true` when at least one merge fired (final proof carries the merge
+    /// VK); `false` for a single-leaf block (final proof carries the leaf VK).
+    final_is_merge: bool,
+    /// Tree depth (number of merge levels). `0` for a single leaf.
+    depth: usize,
+    /// Total merge nodes proven across all levels.
+    merges: usize,
+    /// Summed wall-clock spent inside `BlockTxChainMergeCircuit::prove`.
+    merge_prove_total: Duration,
+}
+
+/// Issue #179 WS4 (distributed coordinator fold — SEQUENTIAL): fold `leaves`
+/// (the k REAL L2 leaf proofs the cells produced and the coordinator fetched
+/// from the proof store) into ONE block-chain proof using the SAME
+/// `BlockTxChainMergeCircuit` pairwise tree the single-process path uses.
+///
+/// This reuses [`prove_merge_pair`] for the actual circuit prove, so the merge
+/// CIRCUIT logic is shared with [`run_tree_fold`] (single source of truth). The
+/// SCHEDULING differs by design: the single-process driver parallelizes each
+/// level across a rayon pool and emits the rich `L2TreeLevel`/`L2TreeSchedule`
+/// events; the coordinator runs the fold sequentially (one proof per core is
+/// already saturating) and returns timings for the caller to log. Odd proofs at
+/// any level carry up unchanged, exactly as the single-process tree does.
+///
+/// Honest-failure: a failed merge returns `Err` (no fabricated proof). The
+/// caller must mark the block partial/non-ok, never pretend it merged.
+fn fold_merge_tree(
+    merge_target: &BlockTxChainMergeTarget,
+    merge_data: &CircuitData<F, C, D>,
+    leaves: Vec<ProofWithPublicInputs<F, C, D>>,
+) -> anyhow::Result<CoordinatorFold> {
+    if leaves.is_empty() {
+        anyhow::bail!("coordinator fold: no leaf proofs to fold");
+    }
+
+    let mut level: Vec<TreeNode> = leaves.into_iter().map(|p| (p, false)).collect();
+    let mut depth = 0usize;
+    let mut merges = 0usize;
+    let mut merge_prove_total = Duration::ZERO;
+
+    while level.len() > 1 {
+        depth += 1;
+        let mut iter = level.into_iter();
+        let mut next: Vec<TreeNode> = Vec::new();
+        let mut pair_idx = 0usize;
+        while let Some(left) = iter.next() {
+            match iter.next() {
+                Some(right) => {
+                    let merge_dt = Instant::now();
+                    let node = prove_merge_pair(merge_target, merge_data, &left, &right)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "coordinator fold: merge pair #{pair_idx} (level {depth}) \
+                                 failed: {e}"
+                            )
+                        })?;
+                    let dt = merge_dt.elapsed();
+                    merge_prove_total += dt;
+                    merges += 1;
+                    info!(
+                        "coordinator fold: merge pair #{pair_idx} (level {depth}) \
+                         BlockTxChainMergeCircuit::prove time: {:?}",
+                        dt
+                    );
+                    next.push(node);
+                }
+                None => {
+                    info!(
+                        "coordinator fold: level {depth} odd proof at pair #{pair_idx} \
+                         carried up to the next level"
+                    );
+                    next.push(left);
+                }
+            }
+            pair_idx += 1;
+        }
+        level = next;
+    }
+
+    let (final_proof, final_is_merge) = level
+        .pop()
+        .expect("coordinator fold produced no final proof");
+    Ok(CoordinatorFold {
+        final_proof,
+        final_is_merge,
+        depth,
+        merges,
+        merge_prove_total,
+    })
+}
+
+/// Issue #179 (single source of truth for the L4 block proof): patch the
+/// block's `new_*` fields to match the (possibly partial) chain run (the
+/// `l45probe` trick archived on issue #10), define+build the L4
+/// (`BlockCircuit`) against the circuit that produced the final chain proof,
+/// then prove AND verify L4 with the chain proof as `tx_chain_proof`.
+///
+/// Extracted from [`run_l4_check`] so the single-process L4 check and the
+/// distributed coordinator's L4 ([`run_coordinator`] WS5) run the EXACT same
+/// `BlockCircuit` code — one L4 implementation, never a copy-paste. Returns
+/// the REAL verified block proof plus its split build/prove/verify timings.
+///
+/// Honest-failure: witness generation, prove, and verify all return `Err`
+/// (never fabricate a proof). The single-process caller [`run_l4_check`]
+/// preserves its historical `panic!`-on-error contract by unwrapping with a
+/// labelled message; the distributed caller surfaces the error and marks the
+/// block non-ok.
+fn prove_block_l4_from_chain(
     l3_data: &CircuitData<F, C, D>,
     chain_like_data: &CircuitData<F, C, D>,
     block: &Block<F>,
     pre_proof: &ProofWithPublicInputs<F, C, D>,
     chain_proof: &ProofWithPublicInputs<F, C, D>,
-    label: &str,
-) {
+) -> anyhow::Result<L4ProveTimings> {
     // Patch the block to match the PARTIAL chain run: L4 connects the
     // witness Block's final values to the chain proof's outputs, and our
     // chain proof may cover only --tx-limit txs.
@@ -2937,6 +3373,72 @@ fn run_l4_check(
     let l4_target = l4.target;
     let l4_data = l4.builder.build::<C>();
     let l4_build_ms = define_t.elapsed().as_millis() as u64;
+
+    // CPU span covers witness+prove+verify only (NOT build) to preserve the
+    // single-process path's historical `LayerProve` cpu_ms semantics.
+    let prove_cpu_start = cpu_time_ms();
+    let prove_t = Instant::now();
+    let pw = BlockCircuit::generate_witness(&l4_target, &pblock, pre_proof, chain_proof)?;
+    let l4_proof = l4_data.prove(pw)?;
+    // Issue #102: split timings. `l4_prove_ms` covers witness+prove,
+    // `l4_verify_ms` covers verify.
+    let l4_prove_ms = prove_t.elapsed().as_millis() as u64;
+    let verify_t = Instant::now();
+    l4_data.verify(l4_proof.clone())?;
+    let l4_verify_ms = verify_t.elapsed().as_millis() as u64;
+    let prove_verify_cpu_ms = diff_ms(prove_cpu_start, cpu_time_ms());
+    Ok(L4ProveTimings {
+        proof: l4_proof,
+        build_ms: l4_build_ms,
+        prove_ms: l4_prove_ms,
+        verify_ms: l4_verify_ms,
+        prove_verify_cpu_ms,
+    })
+}
+
+/// Issue #179: the REAL verified L4 block proof plus its split build/prove/
+/// verify timings, returned by [`prove_block_l4_from_chain`] (the single
+/// source of truth for the L4 block proof shared by the single-process check
+/// and the distributed coordinator).
+struct L4ProveTimings {
+    /// The REAL verified L4 block proof. Held so callers CAN persist/ship it
+    /// (a later slice); today both callers consume only the timings, so this
+    /// is intentionally retained-but-unread (the prove+verify already ran).
+    #[allow(dead_code)]
+    proof: ProofWithPublicInputs<F, C, D>,
+    build_ms: u64,
+    prove_ms: u64,
+    verify_ms: u64,
+    /// CPU span over witness+prove+verify only (build excluded), so callers
+    /// can reproduce the legacy `LayerProve` cpu_ms exactly. `None` when the
+    /// platform CPU clock is unavailable (matches `diff_ms`).
+    prove_verify_cpu_ms: Option<u64>,
+}
+
+/// Issue #67 acceptance: define+build L4 (`BlockCircuit`) against the
+/// circuit that produced the final chain proof, patch the block's `new_*`
+/// fields to match the (possibly partial) chain run -- the `l45probe` trick
+/// archived on issue #10 -- then prove and verify L4 with the chain proof as
+/// `tx_chain_proof`. Thin wrapper over the shared [`prove_block_l4_from_chain`]
+/// helper (issue #179) plus this path's historical event emission.
+#[allow(clippy::too_many_arguments)]
+fn run_l4_check(
+    tx_per_proof: usize,
+    l3_data: &CircuitData<F, C, D>,
+    chain_like_data: &CircuitData<F, C, D>,
+    block: &Block<F>,
+    pre_proof: &ProofWithPublicInputs<F, C, D>,
+    chain_proof: &ProofWithPublicInputs<F, C, D>,
+    label: &str,
+) {
+    // Wrap the shared helper, then re-emit this path's historical events. The
+    // helper returns the split build/prove/verify timings (issue #102) so we
+    // reconstruct the LEGACY `LayerProve` wall_ms = witness+prove+verify (which
+    // historically EXCLUDED the build span) and cpu_ms exactly, without
+    // re-timing.
+    let t = prove_block_l4_from_chain(l3_data, chain_like_data, block, pre_proof, chain_proof)
+        .unwrap_or_else(|err| panic!("L4_CHECK [{label}] failed: {err:?}"));
+    let (l4_build_ms, l4_prove_ms, l4_verify_ms) = (t.build_ms, t.prove_ms, t.verify_ms);
     events::emit(&BenchEvent::CircuitDefine {
         layer: 4,
         name: "BlockCircuit",
@@ -2944,37 +3446,17 @@ fn run_l4_check(
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
     });
-    info!(
-        "L4_CHECK [{label}] BlockCircuit defined+built in {:?} (degree 2^{})",
-        define_t.elapsed(),
-        l4_data.common.degree_bits()
-    );
-
-    let prove_t = Instant::now();
-    let l4_cpu_start = cpu_time_ms();
-    let pw = BlockCircuit::generate_witness(&l4_target, &pblock, pre_proof, chain_proof)
-        .unwrap_or_else(|err| panic!("L4_CHECK [{label}] witness generation failed: {err:?}"));
-    let l4_proof = l4_data
-        .prove(pw)
-        .unwrap_or_else(|err| panic!("L4_CHECK [{label}] prove failed: {err:?}"));
-    // Issue #102: split timings. `l4_prove_ms` covers witness+prove,
-    // `l4_verify_ms` covers verify; the combined `layer_prove` event below
-    // keeps its historical wall_ms = witness+prove+verify span unchanged.
-    let l4_prove_ms = prove_t.elapsed().as_millis() as u64;
-    let verify_t = Instant::now();
-    l4_data
-        .verify(l4_proof.clone())
-        .unwrap_or_else(|err| panic!("L4_CHECK [{label}] verify failed: {err:?}"));
-    let l4_verify_ms = verify_t.elapsed().as_millis() as u64;
-    let prove_dt = prove_t.elapsed();
+    info!("L4_CHECK [{label}] BlockCircuit defined+built in {l4_build_ms} ms");
+    // Historical layer-4 `wall_ms` = prove(+witness) + verify, build excluded.
+    let prove_verify_ms = l4_prove_ms + l4_verify_ms;
     events::emit(&BenchEvent::LayerProve {
         layer: 4,
         name: "BlockCircuit",
         chunk_idx: None,
         chunk_total: None,
         tx_per_proof,
-        wall_ms: prove_dt.as_millis() as u64,
-        cpu_ms: diff_ms(l4_cpu_start, cpu_time_ms()),
+        wall_ms: prove_verify_ms,
+        cpu_ms: t.prove_verify_cpu_ms,
         rss_mb_peak: peak_rss_mb(),
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
@@ -2995,9 +3477,9 @@ fn run_l4_check(
         ts: now_iso8601(),
     });
     info!(
-        "L4_CHECK [{label}] PASS: BlockCircuit proved+verified the final chain proof in {:?} \
-         (build {l4_build_ms} ms, prove {l4_prove_ms} ms, verify {l4_verify_ms} ms)",
-        prove_dt
+        "L4_CHECK [{label}] PASS: BlockCircuit proved+verified the final chain proof in \
+         {prove_verify_ms} ms (build {l4_build_ms} ms, prove {l4_prove_ms} ms, \
+         verify {l4_verify_ms} ms)",
     );
 }
 
@@ -4517,4 +4999,89 @@ fn read_mem_total() -> String {
         }
     }
     "unknown".to_string()
+}
+
+#[cfg(test)]
+mod coordinator_fold_tests {
+    //! Issue #179 WS4: hermetic unit tests for the coordinator's pure
+    //! gather→key-list step. These exercise the ordering + honest-failure
+    //! logic WITHOUT live GCS or any circuit proving, so they run in plain
+    //! `cargo test` / `make local-test`. The live download + real merge/L4
+    //! prove path is gated behind `--proof-bucket` and is NOT exercised here.
+
+    use bench::conductor::{proof_object_key, ChunkResultMessage};
+
+    use super::coordinator_leaf_keys_ordered;
+
+    /// Build a `ChunkResultMessage` with a proof_object set to the shared
+    /// key scheme (the success shape the cell publishes).
+    fn ok_result(height: u64, witness_index: u64) -> ChunkResultMessage {
+        ChunkResultMessage {
+            height,
+            witness_index,
+            prove_ms: 100,
+            witness_fetch_ms: Some(1),
+            ok: true,
+            cell: "cell-0".into(),
+            proof_object: Some(proof_object_key(height, witness_index)),
+        }
+    }
+
+    #[test]
+    fn keys_are_returned_in_witness_index_order() {
+        // Gather them out of order; the fold must sort by witness_index so
+        // the merge tree folds adjacent ranges left-before-right.
+        let results = vec![ok_result(100, 2), ok_result(100, 0), ok_result(100, 1)];
+        let keys = coordinator_leaf_keys_ordered(&results, 100).expect("all ok + keyed");
+        assert_eq!(keys, vec!["100/0", "100/1", "100/2"]);
+    }
+
+    #[test]
+    fn keys_use_the_shared_proof_object_key_scheme() {
+        // Reuse the cell's EXACT key scheme — never reinvent it.
+        let results = vec![ok_result(186_974_616, 3)];
+        let keys = coordinator_leaf_keys_ordered(&results, 186_974_616).unwrap();
+        assert_eq!(keys, vec![proof_object_key(186_974_616, 3)]);
+        assert_eq!(keys, vec!["186974616/3".to_string()]);
+    }
+
+    #[test]
+    fn empty_gather_fails_honestly() {
+        let err = coordinator_leaf_keys_ordered(&[], 100).unwrap_err();
+        assert!(err.to_string().contains("nothing to fold"));
+    }
+
+    #[test]
+    fn missing_proof_object_fails_honestly_not_fabricated() {
+        // A successful prove whose bytes never reached the store: the
+        // coordinator must REFUSE to fold (honest-partial), not invent bytes.
+        let mut bad = ok_result(100, 1);
+        bad.proof_object = None;
+        let results = vec![ok_result(100, 0), bad];
+        let err = coordinator_leaf_keys_ordered(&results, 100).unwrap_err();
+        assert!(err.to_string().contains("no proof_object"));
+    }
+
+    #[test]
+    fn ok_false_chunk_fails_honestly() {
+        // An honest prove failure (ok=false) must abort the fold, never be
+        // folded over.
+        let mut failed = ok_result(100, 1);
+        failed.ok = false;
+        failed.proof_object = None;
+        let results = vec![ok_result(100, 0), failed];
+        let err = coordinator_leaf_keys_ordered(&results, 100).unwrap_err();
+        assert!(err.to_string().contains("ok=false"));
+    }
+
+    #[test]
+    fn reported_key_is_used_even_if_it_disagrees_with_scheme() {
+        // The cell is the authority on where it stored the bytes; a key that
+        // disagrees with the scheme is logged (warning) but the REPORTED key
+        // is what we download by. Guard that the reported key passes through.
+        let mut custom = ok_result(100, 0);
+        custom.proof_object = Some("custom/path/0".into());
+        let keys = coordinator_leaf_keys_ordered(&[custom], 100).unwrap();
+        assert_eq!(keys, vec!["custom/path/0".to_string()]);
+    }
 }
