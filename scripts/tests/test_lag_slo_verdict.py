@@ -207,6 +207,76 @@ class TestThroughputKeepPace(unittest.TestCase):
         self.assertFalse(rep["keep_pace"]["keep_pace"])
 
 
+class TestKeepPaceBasis(unittest.TestCase):
+    """Keep-pace must label STRONG (finish-vs-arrival) vs WEAK (queue-only
+    proxy) and require --drive-rate-blocks-s for the strong path (issue #223).
+    """
+
+    # A small measured run: 4 blocks, non-growing queue, 1.0 s elapsed ->
+    # observed_blocks_s = 4.0. Reused across the strong/weak cases.
+    _RUN = (
+        'BENCH_EVENT {"event":"chunk_proven","height":1,"lag_ms":5000,"queue_depth":2}\n'
+        'BENCH_EVENT {"event":"coordinator_fold","height":1,"merge_source":"measured","l4_source":"measured","merge_ms":1000,"l4_ms":1000}\n'
+        'BENCH_EVENT {"event":"chunk_proven","height":2,"lag_ms":5000,"queue_depth":2}\n'
+        'BENCH_EVENT {"event":"coordinator_fold","height":2,"merge_source":"measured","l4_source":"measured","merge_ms":1000,"l4_ms":1000}\n'
+        'BENCH_EVENT {"event":"chunk_proven","height":3,"lag_ms":5000,"queue_depth":1}\n'
+        'BENCH_EVENT {"event":"coordinator_fold","height":3,"merge_source":"measured","l4_source":"measured","merge_ms":1000,"l4_ms":1000}\n'
+        'BENCH_EVENT {"event":"chunk_proven","height":4,"lag_ms":5000,"queue_depth":1}\n'
+        'BENCH_EVENT {"event":"coordinator_fold","height":4,"merge_source":"measured","l4_source":"measured","merge_ms":1000,"l4_ms":1000}\n'
+        'BENCH_EVENT {"event":"stream_summary","phase":"final","throughput_tx_s":10.0,"lag_p50_ms":7000,"lag_p95_ms":7000,"dropped_chunks":0,"arrivals":1,"gaps_skipped":0,"chunks_proven":4,"elapsed_s":1.0,"ts":"x"}\n'
+    )
+
+    # ---- WEAK / proxy-labeled path: no --drive-rate-blocks-s ----
+
+    def test_default_fixture_is_weak_proxy(self):
+        # The committed fixture is run without a drive rate -> weak proxy.
+        rep = _report()
+        keep = rep["keep_pace"]
+        self.assertEqual(keep["keep_pace_basis"], "queue-proxy")
+        self.assertFalse(keep["keep_pace_strong"])
+        self.assertTrue(keep["keep_pace_warning"])  # non-empty warning
+
+    def test_weak_proxy_warning_in_rendered_output(self):
+        out = lsv._render(_report())
+        self.assertIn("queue-proxy (WEAK", out)
+        self.assertIn("WARNING:", out)
+        self.assertIn("--drive-rate-blocks-s", out)
+
+    def test_weak_proxy_keep_pace_rests_on_backlog_only(self):
+        # With no drive rate, keep_pace must equal backlog_bounded.
+        rep = _report(self._RUN)
+        keep = rep["keep_pace"]
+        self.assertEqual(keep["keep_pace_basis"], "queue-proxy")
+        self.assertEqual(keep["keep_pace"], keep["backlog_bounded"])
+
+    # ---- STRONG / real-comparison path: --drive-rate-blocks-s supplied ----
+
+    def test_strong_basis_when_drive_rate_supplied_and_met(self):
+        # observed_blocks_s = 4.0 >= drive 3.0 -> keep-pace true, STRONG.
+        rep = _report(self._RUN, drive_rate_blocks_s=3.0)
+        keep = rep["keep_pace"]
+        self.assertEqual(keep["keep_pace_basis"], "finish-vs-arrival")
+        self.assertTrue(keep["keep_pace_strong"])
+        self.assertEqual(keep["keep_pace_warning"], "")
+        self.assertTrue(keep["rate_ok"])
+        self.assertTrue(keep["keep_pace"])
+
+    def test_strong_basis_keep_pace_false_when_rate_below_drive(self):
+        # observed_blocks_s = 4.0 < drive 6.0 -> keep-pace FALSE even though
+        # the queue is not growing. This is the real finish-vs-arrival check.
+        rep = _report(self._RUN, drive_rate_blocks_s=6.0)
+        keep = rep["keep_pace"]
+        self.assertEqual(keep["keep_pace_basis"], "finish-vs-arrival")
+        self.assertTrue(keep["keep_pace_strong"])
+        self.assertFalse(keep["rate_ok"])
+        self.assertFalse(keep["keep_pace"])
+
+    def test_strong_basis_label_in_rendered_output(self):
+        out = lsv._render(_report(self._RUN, drive_rate_blocks_s=3.0))
+        self.assertIn("finish-vs-arrival (STRONG", out)
+        self.assertNotIn("WARNING:", out)
+
+
 class TestVerdict(unittest.TestCase):
     def test_fixture_pass(self):
         rep = _report()

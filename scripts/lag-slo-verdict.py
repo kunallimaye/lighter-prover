@@ -305,9 +305,24 @@ def _keep_pace(
 ) -> dict[str, Any]:
     """Derive throughput + backlog trend + the boolean keep-pace result.
 
-    Keep-pace holds when the dispatch backlog is BOUNDED (not monotonically
-    growing) AND observed throughput >= drive rate (when a drive rate is
-    given). Backlog is read from queue_depth (chunk_proven), with
+    "Keep pace" means blocks are FINISHED at least as fast as they ARRIVE.
+    This function reports the result on one of two bases, and labels which
+    one was used so a verdict can never be over-read (issue #223):
+
+      - "finish-vs-arrival" (STRONG): when ``drive_rate_blocks_s`` is supplied
+        and an observed block rate is computable, keep-pace rests on the REAL
+        arrival-vs-finish comparison ``observed_blocks_s >= drive_rate_blocks_s``,
+        with backlog-bounded kept as a corroborating guard. This is the
+        primary signal.
+
+      - "queue-proxy" (WEAK): when no drive rate is supplied, keep-pace can
+        only rest on the non-growing ``queue_depth`` series. That is a HINT
+        ("the local queue isn't growing"), NOT a proof of finishing as fast
+        as arriving. This path is loudly labelled as a proxy and carries a
+        warning instructing the operator to pass ``--drive-rate-blocks-s``
+        for the strong check.
+
+    Backlog is read from queue_depth (chunk_proven), with
     num_undelivered_messages / dropped_chunks as additional signals when
     present (issue #215).
     """
@@ -359,11 +374,37 @@ def _keep_pace(
         observed_blocks_s = len(blocks) / elapsed_s
 
     backlog_bounded = not backlog_growing
+
+    # Strong basis requires BOTH a supplied drive rate AND an observable
+    # block rate to compare against it. Otherwise we can only fall back to
+    # the weak queue-only proxy. issue #223
+    have_real_comparison = (
+        drive_rate_blocks_s is not None and observed_blocks_s is not None
+    )
+
     rate_ok = True
-    if drive_rate_blocks_s is not None and observed_blocks_s is not None:
+    if have_real_comparison:
         rate_ok = observed_blocks_s >= drive_rate_blocks_s
 
-    keep_pace = backlog_bounded and rate_ok
+    if have_real_comparison:
+        # STRONG: keep-pace IS the finish-rate-vs-arrival-rate comparison,
+        # with backlog-bounded kept as a corroborating guard.
+        keep_pace_basis = "finish-vs-arrival"
+        keep_pace_strong = True
+        keep_pace = rate_ok and backlog_bounded
+        keep_pace_warning = ""
+    else:
+        # WEAK: no drive rate (or no observable block rate) -> we can only
+        # observe whether the local queue is growing. Label it loudly so the
+        # verdict is not mistaken for a true keep-pace measurement. issue #223
+        keep_pace_basis = "queue-proxy"
+        keep_pace_strong = False
+        keep_pace = backlog_bounded
+        keep_pace_warning = (
+            "keep-pace is the WEAK queue-only proxy (queue_depth not growing); "
+            "it does NOT prove blocks finish as fast as they arrive. Pass "
+            "--drive-rate-blocks-s for the real finish-rate-vs-arrival-rate check."
+        )
 
     return {
         "throughput_tx_s": throughput_tx_s,
@@ -374,6 +415,9 @@ def _keep_pace(
         "dropped_chunks": dropped,
         "rate_ok": rate_ok,
         "keep_pace": keep_pace,
+        "keep_pace_basis": keep_pace_basis,
+        "keep_pace_strong": keep_pace_strong,
+        "keep_pace_warning": keep_pace_warning,
     }
 
 
@@ -555,6 +599,22 @@ def _render(report: dict[str, Any]) -> str:
         f"dropped_chunks = {keep['dropped_chunks']}; "
         f"keep-pace = {keep['keep_pace']}"
     )
+    # Keep-pace basis: unmistakably label STRONG vs WEAK so a verdict can
+    # never be over-read as a true keep-pace measurement. issue #223
+    if keep.get("keep_pace_strong"):
+        lines.append(
+            "  keep-pace basis = finish-vs-arrival (STRONG: observed block "
+            "rate vs supplied drive rate)"
+        )
+    else:
+        lines.append(
+            "  keep-pace basis = queue-proxy (WEAK: queue_depth not growing "
+            "-- pass --drive-rate-blocks-s for the real finish-rate-vs-"
+            "arrival-rate check)"
+        )
+    warning = keep.get("keep_pace_warning")
+    if warning:
+        lines.append(f"  WARNING: {warning}")
     lines.append("")
 
     # Fold decomposition, when present.
