@@ -1,5 +1,21 @@
 # Live distributed GKE benchmark — 0.2% / 0.3% / 0.5% ladder (real Axion arm64)
 
+> **⚠️ SUPERSEDED — HISTORICAL RUN RECORD (build SHA ~`1d44b35`, PR #173).**
+> The measurements below are preserved verbatim as the ground-truth record of
+> the pre-fix #173 live Axion run; they were accurate AT THE TIME OF THAT RUN.
+> Two gaps this run surfaced have since been CLOSED on main:
+> - **FINDING D ("1 of 56 chunks prove") was FIXED in #177** (per-tx positional
+>   pre-state; every chunk now proves). Evidence:
+>   `docs/layer0-evidence/finding-d-gate.md`; design:
+>   `docs/per-tx-prestate-corpus.md`.
+> - **The coordinator "accounting-fold only" L2→L4 step was REPLACED by a real
+>   L2→L4 merge + L4 prove+verify in #179** (PRs #182/#183/#187/#188; opt-in via
+>   `--proof-bucket`, emitting a `coordinator_fold` BENCH_EVENT with measured
+>   `merge_ms`/`l4_ms`). Local end-to-end gate:
+>   `bench/tests/distributed_fold_e2e.rs` (`make e2e`).
+>
+> Read the numbers below as a dated snapshot, NOT the current capability.
+
 > **Refs #75 #172 #144 #95 #128 #113 #171.** This is the REAL, executed
 > run on live GKE Autopilot (Axion / neoverse-v2 / arm64) in project
 > `kunal-scratch`. Every number here is measured against ground truth
@@ -122,7 +138,13 @@ output of actually running on real infra (vs. the idealized model).
   the pivot is purely about getting ENOUGH Axion nodes.)
 
 - **FINDING D — The merged distributed prover (#173) fails 55 of 56 chunks per
-  500-tx block: only the slice-0 chunk proves.** On a real k=56 block, the cells
+  500-tx block: only the slice-0 chunk proves.**
+  > **SUPERSEDED:** this finding was FIXED in #177 — per-tx positional pre-state
+  > now lets ALL k chunks prove (evidence: `docs/layer0-evidence/finding-d-gate.md`;
+  > design: `docs/per-tx-prestate-corpus.md`). The description below records the
+  > pre-fix behaviour at build SHA ~`1d44b35`.
+  >
+  On a real k=56 block, the cells
   return `ok=true` for ONLY `witness_index ≡ 0 (mod pool_total)`; every other slice
   fails the circuit witness-consistency check:
   `Partition containing Wire(...) was set twice with different values`.
