@@ -348,8 +348,17 @@ prove the wiring end-to-end before the GKE deploy.)
    redeliver its chunk under the CLI. For a first scaled-down run this is
    acceptable (the coordinator reports `block_partial`); a native manual-ack
    client closes it.
-2. **Coordinator L2→L4 merge is accounting-only (Assumption 7):** the per-chunk
-   proofs are real; the cross-cell block-proof merge is the next slice.
+2. **Coordinator L2→L4 merge measured only on a LOCAL hermetic e2e, not yet a
+   LIVE k=56 fleet run (Assumption 7):** issue #179 WIRED the real cross-cell
+   fan-in — the coordinator runs the REAL `BlockTxChainMergeCircuit` fold + REAL
+   `BlockCircuit` L4 prove+verify (opt-in via `--proof-bucket`), emitting a
+   `coordinator_fold` BENCH_EVENT with `merge_source`/`l4_source = "measured"`.
+   The remaining risk is provenance scope: those measured `merge_ms`/`l4_ms`
+   numbers come from the `make e2e` LOCAL hermetic run (small k, no live
+   GCP/GCS/Pub/Sub), NOT yet from a LIVE multi-cell k=56 fold on real Axion
+   infra. Without `--proof-bucket` the coordinator still falls back to the
+   accounting-only model (`merge_source: "modeled"`), so a live measured k=56
+   merge+L4 is the next slice to confirm on real hardware.
 3. **`gcloud` auth in-pod:** cells/coordinators need a service account with
    `roles/pubsub.subscriber` + `roles/pubsub.publisher` via Workload Identity.
    Add that binding when applying the scale tfvars (the smoke config only
