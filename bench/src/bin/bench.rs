@@ -2099,7 +2099,7 @@ fn coordinator_real_fold(
     // so both use chain_data as the chain_like_data).
     let chain_like_data = &real.chain_data;
     let l4_start = Instant::now();
-    let (_l4_proof, _build_ms, l4_prove_ms, l4_verify_ms) = prove_block_l4_from_chain(
+    let t = prove_block_l4_from_chain(
         &real.pre_exec_data,
         chain_like_data,
         &real.block,
@@ -2110,8 +2110,8 @@ fn coordinator_real_fold(
     let l4_ms = l4_start.elapsed().as_millis() as u64;
     info!(
         "coordinator: L4 BlockCircuit proved+verified for height={height} \
-         (prove {l4_prove_ms} ms, verify {l4_verify_ms} ms; final_is_merge={}) (issue #179 WS5)",
-        fold.final_is_merge,
+         (build {} ms, prove {} ms, verify {} ms; final_is_merge={}) (issue #179 WS5)",
+        t.build_ms, t.prove_ms, t.verify_ms, fold.final_is_merge,
     );
     let _ = real.tx_per_proof;
 
@@ -3307,7 +3307,7 @@ fn prove_block_l4_from_chain(
     block: &Block<F>,
     pre_proof: &ProofWithPublicInputs<F, C, D>,
     chain_proof: &ProofWithPublicInputs<F, C, D>,
-) -> anyhow::Result<(ProofWithPublicInputs<F, C, D>, u64, u64, u64)> {
+) -> anyhow::Result<L4ProveTimings> {
     // Patch the block to match the PARTIAL chain run: L4 connects the
     // witness Block's final values to the chain proof's outputs, and our
     // chain proof may cover only --tx-limit txs.
@@ -3336,6 +3336,9 @@ fn prove_block_l4_from_chain(
     let l4_data = l4.builder.build::<C>();
     let l4_build_ms = define_t.elapsed().as_millis() as u64;
 
+    // CPU span covers witness+prove+verify only (NOT build) to preserve the
+    // single-process path's historical `LayerProve` cpu_ms semantics.
+    let prove_cpu_start = cpu_time_ms();
     let prove_t = Instant::now();
     let pw = BlockCircuit::generate_witness(&l4_target, &pblock, pre_proof, chain_proof)?;
     let l4_proof = l4_data.prove(pw)?;
@@ -3345,7 +3348,33 @@ fn prove_block_l4_from_chain(
     let verify_t = Instant::now();
     l4_data.verify(l4_proof.clone())?;
     let l4_verify_ms = verify_t.elapsed().as_millis() as u64;
-    Ok((l4_proof, l4_build_ms, l4_prove_ms, l4_verify_ms))
+    let prove_verify_cpu_ms = diff_ms(prove_cpu_start, cpu_time_ms());
+    Ok(L4ProveTimings {
+        proof: l4_proof,
+        build_ms: l4_build_ms,
+        prove_ms: l4_prove_ms,
+        verify_ms: l4_verify_ms,
+        prove_verify_cpu_ms,
+    })
+}
+
+/// Issue #179: the REAL verified L4 block proof plus its split build/prove/
+/// verify timings, returned by [`prove_block_l4_from_chain`] (the single
+/// source of truth for the L4 block proof shared by the single-process check
+/// and the distributed coordinator).
+struct L4ProveTimings {
+    /// The REAL verified L4 block proof. Held so callers CAN persist/ship it
+    /// (a later slice); today both callers consume only the timings, so this
+    /// is intentionally retained-but-unread (the prove+verify already ran).
+    #[allow(dead_code)]
+    proof: ProofWithPublicInputs<F, C, D>,
+    build_ms: u64,
+    prove_ms: u64,
+    verify_ms: u64,
+    /// CPU span over witness+prove+verify only (build excluded), so callers
+    /// can reproduce the legacy `LayerProve` cpu_ms exactly. `None` when the
+    /// platform CPU clock is unavailable (matches `diff_ms`).
+    prove_verify_cpu_ms: Option<u64>,
 }
 
 /// Issue #67 acceptance: define+build L4 (`BlockCircuit`) against the
@@ -3364,11 +3393,14 @@ fn run_l4_check(
     chain_proof: &ProofWithPublicInputs<F, C, D>,
     label: &str,
 ) {
-    let l4_cpu_start = cpu_time_ms();
-    let prove_t = Instant::now();
-    let (_l4_proof, l4_build_ms, l4_prove_ms, l4_verify_ms) =
-        prove_block_l4_from_chain(l3_data, chain_like_data, block, pre_proof, chain_proof)
-            .unwrap_or_else(|err| panic!("L4_CHECK [{label}] failed: {err:?}"));
+    // Wrap the shared helper, then re-emit this path's historical events. The
+    // helper returns the split build/prove/verify timings (issue #102) so we
+    // reconstruct the LEGACY `LayerProve` wall_ms = witness+prove+verify (which
+    // historically EXCLUDED the build span) and cpu_ms exactly, without
+    // re-timing.
+    let t = prove_block_l4_from_chain(l3_data, chain_like_data, block, pre_proof, chain_proof)
+        .unwrap_or_else(|err| panic!("L4_CHECK [{label}] failed: {err:?}"));
+    let (l4_build_ms, l4_prove_ms, l4_verify_ms) = (t.build_ms, t.prove_ms, t.verify_ms);
     events::emit(&BenchEvent::CircuitDefine {
         layer: 4,
         name: "BlockCircuit",
@@ -3376,18 +3408,17 @@ fn run_l4_check(
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
     });
-    info!(
-        "L4_CHECK [{label}] BlockCircuit defined+built in {l4_build_ms} ms",
-    );
-    let prove_dt = prove_t.elapsed();
+    info!("L4_CHECK [{label}] BlockCircuit defined+built in {l4_build_ms} ms");
+    // Historical layer-4 `wall_ms` = prove(+witness) + verify, build excluded.
+    let prove_verify_ms = l4_prove_ms + l4_verify_ms;
     events::emit(&BenchEvent::LayerProve {
         layer: 4,
         name: "BlockCircuit",
         chunk_idx: None,
         chunk_total: None,
         tx_per_proof,
-        wall_ms: prove_dt.as_millis() as u64,
-        cpu_ms: diff_ms(l4_cpu_start, cpu_time_ms()),
+        wall_ms: prove_verify_ms,
+        cpu_ms: t.prove_verify_cpu_ms,
         rss_mb_peak: peak_rss_mb(),
         rss_mb_after: current_rss_mb(),
         ts: now_iso8601(),
@@ -3408,9 +3439,9 @@ fn run_l4_check(
         ts: now_iso8601(),
     });
     info!(
-        "L4_CHECK [{label}] PASS: BlockCircuit proved+verified the final chain proof in {:?} \
-         (build {l4_build_ms} ms, prove {l4_prove_ms} ms, verify {l4_verify_ms} ms)",
-        prove_dt
+        "L4_CHECK [{label}] PASS: BlockCircuit proved+verified the final chain proof in \
+         {prove_verify_ms} ms (build {l4_build_ms} ms, prove {l4_prove_ms} ms, \
+         verify {l4_verify_ms} ms)",
     );
 }
 
