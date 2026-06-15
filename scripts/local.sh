@@ -145,6 +145,28 @@ lint() {
     log_warn "clippy reported issues (non-fatal in Phase 1)"
 }
 
+# Issue #179 acceptance: the LOCAL end-to-end distributed-fold gate. Proves
+# ONE small (but REAL) multi-chunk block through L1 -> L2(cells) -> fold ->
+# L4(coordinator), asserts the final L4 block proof VERIFIES, and asserts the
+# event stream carries MEASURED (not modeled) merge + L4 wall times. It is
+# hermetic (a local-filesystem proof store behind the real GcloudStorage
+# surface; no live GCP/GCS or Pub/Sub) but EXPENSIVE (real plonky2 proving), so
+# it is gated out of the fast `make local-test` lane and run only here.
+#
+# Tunables (env, with defaults): DIST_FOLD_E2E_S=4 DIST_FOLD_E2E_K=2 (keep
+# K >= 2 -- multi-chunk is required to exercise the merge tree).
+e2e() {
+  log_info "Running LOCAL end-to-end distributed-fold gate (issue #179)..."
+  log_info "  This REALLY proves a small multi-chunk block through merge + L4 -- it is slow."
+  (cd "${PROJECT_ROOT}" && \
+    DIST_FOLD_E2E=1 \
+    DIST_FOLD_E2E_S="${DIST_FOLD_E2E_S:-4}" \
+    DIST_FOLD_E2E_K="${DIST_FOLD_E2E_K:-2}" \
+    cargo test -p bench --release --test distributed_fold_e2e \
+      -- --ignored --nocapture --test-threads=1)
+  log_ok "End-to-end distributed-fold gate passed (L4 proof verified; measured walls emitted)"
+}
+
 # ─── Dispatch ─────────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -155,5 +177,6 @@ case "${1:-}" in
   bench)   bench    ;;
   fanout)  fanout   ;;
   lint)    lint     ;;
-  *)       die "Usage: $0 {init|clean|build|test|bench|fanout|lint}" ;;
+  e2e)     e2e      ;;
+  *)       die "Usage: $0 {init|clean|build|test|bench|fanout|lint|e2e}" ;;
 esac

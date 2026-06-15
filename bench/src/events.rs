@@ -20,6 +20,11 @@
 //!   dequeued chunk job.
 //! - `event = "stream_summary"`: rolling aggregates, every 60s
 //!   (`phase = "periodic"`) and once at exit (`phase = "final"`).
+//! - `event = "coordinator_fold"`: distributed-coordinator per-block FOLD +
+//!   L4 timings (issue #179 WS6). Carries the MEASURED `merge_ms`/`l4_ms`
+//!   when the real distributed fold ran, marked via
+//!   `merge_source`/`l4_source` = `"measured"`; `"modeled"` on the
+//!   accounting fallback.
 //!
 //! ## Platform note
 //!
@@ -258,6 +263,66 @@ pub enum BenchEvent<'a> {
         merge_avg_ms: u64,
         rss_mb_peak: Option<u64>,
         rss_mb_after: Option<u64>,
+        ts: String,
+    },
+    /// Distributed-coordinator per-block FOLD + L4 timings (issue #179 WS6).
+    ///
+    /// Emitted once per block by the distributed coordinator
+    /// (`bench --mode coordinator`) after it gathers the k chunk proofs and
+    /// either (a) runs the REAL `BlockTxChainMergeCircuit` merge tree +
+    /// `BlockCircuit` L4 over them (when pointed at a proof store via
+    /// `--proof-bucket`), or (b) falls back to the accounting-only path.
+    ///
+    /// The `merge_source` / `l4_source` fields make the provenance of the
+    /// numbers UNAMBIGUOUS to downstream consumers (fleet sizing, calibration):
+    ///
+    /// - `"measured"` — `merge_ms`/`l4_ms` are REAL wall-clock times of the
+    ///   coordinator actually proving + verifying the distributed fold and L4
+    ///   (the genuine distributed numbers this issue exists to measure). The
+    ///   `*_s` mirrors are an honest ms→s conversion of the same measurement.
+    /// - `"modeled"` — the coordinator did NOT run the real fold (no
+    ///   `--proof-bucket`); `merge_ms`/`l4_ms` are `0` and the single-machine
+    ///   MODEL constants (`merge_s`/`l4_s`) continue to be applied DOWNSTREAM
+    ///   by the fleet parser exactly as before this slice. The event records
+    ///   that the stream itself carries no measured merge/L4 for this block.
+    ///
+    /// This event is purely ADDITIVE: pre-#179 coordinator runs emitted no
+    /// merge/L4 event at all, so existing consumers are unaffected and the
+    /// modeled-path stream stays a strict superset (one extra clearly-labeled
+    /// line per block).
+    CoordinatorFold {
+        height: u64,
+        /// `"measured"` when the REAL distributed fold ran, `"modeled"`
+        /// otherwise. The single source of truth for "are these real
+        /// distributed numbers or model proxies?".
+        merge_source: &'a str,
+        /// Same provenance flag for the L4 stage. Tracked separately from
+        /// `merge_source` so a future partial path (real merge, modeled L4 or
+        /// vice-versa) can express it honestly; today they always agree.
+        l4_source: &'a str,
+        /// Number of L2 leaf proofs folded (= k chunks). `0` on the modeled
+        /// path (no fold ran).
+        leaves: u64,
+        /// Merge-tree depth (= number of merge levels). `0` on the modeled
+        /// path or a single-leaf block.
+        depth: u32,
+        /// Total merge nodes proven across all levels. `0` on the modeled path.
+        merges: u64,
+        /// MEASURED merge-tree wall (ms). `0` on the modeled path — never a
+        /// model constant masquerading as measured (issue #179 acceptance
+        /// rule).
+        merge_ms: u64,
+        /// MEASURED L4 `BlockCircuit` prove+verify wall (ms). `0` on the
+        /// modeled path.
+        l4_ms: u64,
+        /// `merge_ms` as seconds (honest ms→s, precision preserved). Mirrors
+        /// the `merge_s` shape the fleet parser consumes so a measured run can
+        /// feed the sizing model the REAL distributed merge wall instead of the
+        /// single-machine `merge_s` constant.
+        merge_s: f64,
+        /// `l4_ms` as seconds (honest ms→s). Mirrors the `l4_s` shape.
+        l4_s: f64,
+        rss_mb_peak: Option<u64>,
         ts: String,
     },
 }
@@ -651,5 +716,65 @@ mod tests {
         assert!(json.contains("\"workers\":4"));
         assert!(json.contains("\"realized_wall_ms\":1500"));
         assert!(json.contains("\"critical_path_ms\":1417"));
+    }
+
+    #[test]
+    fn coordinator_fold_measured_serialization() {
+        // Issue #179 WS6: the REAL distributed fold path emits MEASURED
+        // merge/L4 walls, explicitly labeled so consumers never confuse them
+        // with the single-machine model constants.
+        let ev = BenchEvent::CoordinatorFold {
+            height: 42,
+            merge_source: "measured",
+            l4_source: "measured",
+            leaves: 4,
+            depth: 2,
+            merges: 3,
+            merge_ms: 1234,
+            l4_ms: 5678,
+            merge_s: 1.234,
+            l4_s: 5.678,
+            rss_mb_peak: Some(4096),
+            ts: "2026-06-15T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"event\":\"coordinator_fold\""));
+        assert!(json.contains("\"merge_source\":\"measured\""));
+        assert!(json.contains("\"l4_source\":\"measured\""));
+        assert!(json.contains("\"merge_ms\":1234"));
+        assert!(json.contains("\"l4_ms\":5678"));
+        assert!(json.contains("\"merge_s\":1.234"));
+        assert!(json.contains("\"l4_s\":5.678"));
+        assert!(json.contains("\"leaves\":4"));
+        assert!(json.contains("\"depth\":2"));
+    }
+
+    #[test]
+    fn coordinator_fold_modeled_serialization() {
+        // Issue #179 WS6: the fallback (no --proof-bucket) path emits the SAME
+        // event shape but marked "modeled" with zeroed measured walls -- the
+        // model constants merge_s/l4_s are applied DOWNSTREAM by the fleet
+        // parser, never substituted here as if they were measured.
+        let ev = BenchEvent::CoordinatorFold {
+            height: 7,
+            merge_source: "modeled",
+            l4_source: "modeled",
+            leaves: 0,
+            depth: 0,
+            merges: 0,
+            merge_ms: 0,
+            l4_ms: 0,
+            merge_s: 0.0,
+            l4_s: 0.0,
+            rss_mb_peak: None,
+            ts: "2026-06-15T00:00:00Z".into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"event\":\"coordinator_fold\""));
+        assert!(json.contains("\"merge_source\":\"modeled\""));
+        assert!(json.contains("\"l4_source\":\"modeled\""));
+        assert!(json.contains("\"merge_ms\":0"));
+        assert!(json.contains("\"l4_ms\":0"));
+        assert!(json.contains("\"rss_mb_peak\":null"));
     }
 }
