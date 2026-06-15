@@ -89,6 +89,23 @@ impl StorageConfig {
             self.gcs_uri(key),
         ]
     }
+
+    /// Build the `gcloud storage cp gs://<bucket>/<key> <local_path>` argv
+    /// (pure — no process spawned), so it is unit-testable. This is the
+    /// EXACT mirror of [`cp_to_gcs_argv`](Self::cp_to_gcs_argv) with source
+    /// and destination swapped: it FETCHES an object the cell uploaded back
+    /// to a local path for the coordinator to deserialize + fold (issue #179
+    /// fan-IN). `--quiet` suppresses the interactive progress UI in non-tty
+    /// pods.
+    pub fn cp_from_gcs_argv(&self, key: &str, local_path: &str) -> Vec<String> {
+        vec![
+            "storage".into(),
+            "cp".into(),
+            "--quiet".into(),
+            self.gcs_uri(key),
+            local_path.into(),
+        ]
+    }
 }
 
 /// The gcloud-backed proof store. Holds the resolved [`StorageConfig`] and
@@ -147,6 +164,60 @@ impl GcloudStorage {
             )));
         }
         Ok(key.to_string())
+    }
+
+    /// Download the object stored under `key` in the configured bucket and
+    /// return its raw bytes — the coordinator's fan-IN read (issue #179).
+    /// Mirrors [`upload`](Self::upload)'s `gcloud storage cp` pattern with
+    /// source/destination reversed: it `cp`s `gs://<bucket>/<key>` to a
+    /// uniquely-named temp file (the CLI writes to a path, not stdout),
+    /// reads the bytes back, then removes the temp file.
+    ///
+    /// Errors are honest: a missing object or a failed `cp` returns `Err`
+    /// — the coordinator must NOT fabricate a proof when bytes are absent
+    /// (issue #179 honest-failure rule). The caller deserializes the bytes
+    /// into `ProofWithPublicInputs` with the SAME `serde_json` representation
+    /// the cell uploaded (issue #117 export format), so the two sides never
+    /// drift.
+    pub fn download(&self, key: &str) -> std::io::Result<Vec<u8>> {
+        if !self.cfg.enabled() {
+            return Err(std::io::Error::other(
+                "proof store disabled (no bucket configured); refusing to download",
+            ));
+        }
+
+        // Stage to a uniquely-named temp file. The key contains a '/', so
+        // flatten it for the temp filename to avoid creating subdirs in TMP.
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "lighter-proof-dl-{}-{}.bin",
+            key.replace('/', "_"),
+            std::process::id()
+        ));
+        let local_path = tmp.to_string_lossy().to_string();
+        let argv = self.cfg.cp_from_gcs_argv(key, &local_path);
+        let result = Command::new(&self.cfg.gcloud_bin).args(&argv).output();
+
+        let out = match result {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        };
+        if !out.status.success() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(std::io::Error::other(format!(
+                "gcloud storage cp from {} failed: {}",
+                self.cfg.gcs_uri(key),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+
+        // Read the fetched bytes, then clean up regardless of read outcome.
+        let bytes = std::fs::read(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        bytes
     }
 }
 
@@ -222,6 +293,41 @@ mod tests {
         // No bucket → upload must error WITHOUT shelling out, so the cell
         // path stays None and never claims bytes were stored.
         let err = store.upload("100/2", b"bytes").unwrap_err();
+        assert!(err.to_string().contains("disabled"));
+    }
+
+    #[test]
+    fn cp_from_argv_is_well_formed_and_mirrors_upload() {
+        // The coordinator's fan-IN fetch (issue #179): EXACT mirror of the
+        // upload argv with src/dst swapped. Guard the swap so the two sides
+        // never drift.
+        let key = proof_object_key(186_974_616, 3);
+        let argv = cfg().cp_from_gcs_argv(&key, "/tmp/proof.bin");
+        assert_eq!(
+            argv,
+            vec![
+                "storage".to_string(),
+                "cp".to_string(),
+                "--quiet".to_string(),
+                "gs://kunal-scratch-lighter-prover-proofs/186974616/3".to_string(),
+                "/tmp/proof.bin".to_string(),
+            ]
+        );
+        // Round-trip invariant: the download argv's source URI is the same
+        // URI the upload argv writes to (same key → same object).
+        let up = cfg().cp_to_gcs_argv("/tmp/proof.bin", &key);
+        assert_eq!(up[4], argv[3], "upload dest URI == download src URI");
+    }
+
+    #[test]
+    fn download_refused_when_disabled() {
+        let store = GcloudStorage::new(StorageConfig {
+            bucket: String::new(),
+            gcloud_bin: "gcloud".into(),
+        });
+        // No bucket → download must error WITHOUT shelling out, so the
+        // coordinator never invents bytes for a fold.
+        let err = store.download("100/2").unwrap_err();
         assert!(err.to_string().contains("disabled"));
     }
 }
