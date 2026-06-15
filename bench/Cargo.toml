@@ -14,6 +14,18 @@ path = "src/bin/bench.rs"
 default = ["parallel", "std"]
 parallel = ["plonky2/parallel"]
 std = ["plonky2/std"]
+# Issue #203: the NATIVE in-process Pub/Sub streaming-pull (manual-ack) client
+# for the merge-task plane. OPT-IN / off by default so the existing aarch64
+# cross-compile image path (cicd/Containerfile cross-compiles on x86 Cloud
+# Build via gcc-aarch64-linux-gnu — see bench/src/conductor/pubsub.rs) stays
+# byte-for-byte unchanged unless this feature is explicitly enabled. When on,
+# pulls in a minimal BLOCKING HTTP client with the rustls/ring TLS backend
+# (NOT openssl-sys, whose aarch64 system libs are absent on the cross host) so
+# the dependency stays cross-safe. The CLI poll remains the compiled-in
+# fallback when the feature is off. The `bench --mode fold-worker` /
+# `fold-leader-bench` paths choose the native client at RUNTIME via
+# `--native-merge-plane` only when this feature is compiled in.
+native-pubsub = ["dep:ureq"]
 
 [dependencies]
 num = { workspace = true }
@@ -40,6 +52,12 @@ paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
 c-kzg = { workspace = true }
 libc = "0.2"
+# Issue #203 (optional, behind the `native-pubsub` feature): a minimal BLOCKING
+# HTTP client for the native merge-task-plane streaming-pull client. rustls/ring
+# TLS only (default-features off drops the openssl-sys backend) to stay
+# cross-compile-safe on the x86->aarch64 image path. `json` enables the small
+# serde_json request/response helper.
+ureq = { version = "2.12", default-features = false, features = ["tls", "json", "gzip"], optional = true }
 
 [dev-dependencies]
 flate2 = "1.0"

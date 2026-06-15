@@ -64,6 +64,12 @@
 pub mod dispatch;
 pub mod fold;
 pub mod pubsub;
+/// Issue #203: the native in-process Pub/Sub streaming-pull (manual-ack) client
+/// for the merge-task plane. Behind the `native-pubsub` Cargo feature so the
+/// default aarch64 cross-compile image path stays unchanged (the CLI poll in
+/// [`pubsub`] is the compiled-in fallback when the feature is off).
+#[cfg(feature = "native-pubsub")]
+pub mod pubsub_native;
 pub mod queue;
 pub mod storage;
 pub mod witness;
@@ -76,6 +82,10 @@ pub use fold::{
 pub use pubsub::{
     BlockMessage, ChunkMessage, ChunkResultMessage, GcloudPubSub, MergeResultMessage,
     MergeTaskMessage, PubSubConfig, PulledMessage,
+};
+#[cfg(feature = "native-pubsub")]
+pub use pubsub_native::{
+    AckableMergeResult, AckableMergeTask, NativePubSub, NativePulledMessage,
 };
 pub use queue::{BlockJob, BlockQueue, LocalBlockQueue};
 pub use storage::{merge_object_key, proof_object_key, GcloudStorage, StorageConfig};
