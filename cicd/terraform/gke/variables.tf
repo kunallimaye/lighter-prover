@@ -233,6 +233,49 @@ variable "results_subscription" {
   default     = "lighter-prover-results-sub"
 }
 
+# ── Shared proof store (issue #179, slice 1 / WS1) ──
+# The fan-IN half of the distributed prover needs a SHARED proof store so
+# cells can ship their L2 leaf proof BYTES back to the coordinator (Pub/Sub
+# message-size limits make inline proof bytes impractical — ADR-0008 §1.2 /
+# issue #179 scope item 1). A GCS bucket is the natural fit: the cell writes
+# its L2 leaf proof keyed by {height, witness_index}, and ChunkResultMessage
+# carries a reference (the object key) to it. Gated behind enable_proof_store
+# so the smoke automation (topology + backlog HPA only) is unchanged by
+# default; the scale tfvars turn it on alongside enable_chunk_plane.
+#
+# NOTE: cell upload + coordinator fetch/merge are LATER slices of #179. This
+# slice only provisions the bucket + the pod-SA permission + the output ref.
+
+variable "enable_proof_store" {
+  description = "Create the shared proof-store GCS bucket + grant the pod GSA objectAdmin on it (issue #179). false at smoke scale; true for the real distributed coordinator/cell run that ships L2 leaf proofs."
+  type        = bool
+  default     = false
+}
+
+variable "proof_store_bucket" {
+  description = "Name of the shared proof-store GCS bucket cells write L2 leaf proofs to and the coordinator reads them from (issue #179). Empty = derive a deterministic name from project_id (\"<project_id>-lighter-prover-proofs\"). Bucket names are globally unique, so the project-derived default is collision-resistant."
+  type        = string
+  default     = ""
+}
+
+variable "proof_store_pod_gsa_email" {
+  description = "Email of the EXISTING pod Google Service Account that cells/coordinators run as (Workload Identity). It already holds the pubsub roles; this module additionally grants it roles/storage.objectAdmin on the proof-store bucket ONLY (bucket-scoped, not project-wide). The SA is NOT created here."
+  type        = string
+  default     = "lighter-prover-pods@kunal-scratch.iam.gserviceaccount.com"
+}
+
+variable "proof_store_location" {
+  description = "Location for the proof-store bucket. Defaults to the cluster region so proofs stay co-located with the coordinator that folds them (minimizes fetch latency in the serial L4 stage)."
+  type        = string
+  default     = "us-central1"
+}
+
+variable "proof_store_force_destroy" {
+  description = "Allow `terraform destroy` to delete the proof-store bucket even if it still contains objects. true for ephemeral smoke/scale validation runs so teardown is clean; set false for any bucket holding proofs you must retain."
+  type        = bool
+  default     = true
+}
+
 variable "hpa_target_class" {
   description = "Which workload the backlog HPA scales (cells | coordinator). Cells consume the block backlog at smoke scale."
   type        = string

@@ -40,6 +40,23 @@ output "chunk_plane" {
   }
 }
 
+output "proof_store" {
+  description = "The shared proof-store GCS bucket (issue #179) cells write L2 leaf proofs to and the coordinator reads them from. null fields when enable_proof_store = false."
+  value = {
+    enabled        = var.enable_proof_store
+    bucket         = var.enable_proof_store ? google_storage_bucket.proof_store[0].name : null
+    url            = var.enable_proof_store ? google_storage_bucket.proof_store[0].url : null
+    location       = var.enable_proof_store ? google_storage_bucket.proof_store[0].location : null
+    pod_gsa_member = var.enable_proof_store ? "serviceAccount:${var.proof_store_pod_gsa_email}" : null
+    pod_gsa_role   = var.enable_proof_store ? "roles/storage.objectAdmin (bucket-scoped)" : null
+  }
+}
+
+output "proof_store_bucket" {
+  description = "Convenience scalar: the proof-store bucket NAME (issue #179) downstream cell/coordinator config references via --proof-bucket. null when enable_proof_store = false."
+  value       = var.enable_proof_store ? google_storage_bucket.proof_store[0].name : null
+}
+
 output "hpa_target_class" {
   description = "Which machine class the backlog HPA scales."
   value       = var.hpa_target_class

@@ -53,7 +53,11 @@
 //!   `{ "height": u64, "witness_index": u64, "tx_count": u64 }`
 //! - **Chunk result message** → [`ChunkResultMessage`]:
 //!   `{ "height": u64, "witness_index": u64, "prove_ms": u64,
-//!      "witness_fetch_ms": u64 | null, "ok": bool, "cell": String }`
+//!      "witness_fetch_ms": u64 | null, "ok": bool, "cell": String,
+//!      "proof_object": String | null }`
+//!   where `proof_object` is the proof-store object key (e.g. a GCS path)
+//!   referencing the L2 leaf proof the cell shipped for the coordinator to
+//!   fold (issue #179). `null` on honest failure or until cell upload lands.
 //!
 //! ## What is unit-testable WITHOUT gcloud
 //!
@@ -117,6 +121,16 @@ pub struct ChunkResultMessage {
     pub ok: bool,
     /// Reporting cell identity (hostname) — for attribution only.
     pub cell: String,
+    /// Reference (proof-store object key, e.g. a GCS path) to the L2 leaf
+    /// proof BYTES this cell shipped for the coordinator to fold (issue #179
+    /// — the fan-IN half of the distributed prover). `None` on an honest
+    /// failure (`ok = false`) and, for now, on success too: cell upload is a
+    /// LATER slice of #179, so today's honest producers set this to `None`.
+    ///
+    /// Serialized as a scalar JSON field (`"proof_object": String | null`),
+    /// keeping the message wire-compatible with the existing serde transport.
+    #[serde(default)]
+    pub proof_object: Option<String>,
 }
 
 impl BlockMessage {
@@ -492,10 +506,12 @@ mod tests {
             witness_fetch_ms: Some(4),
             ok: true,
             cell: "cell-abc".into(),
+            proof_object: Some("proofs/100/2.l2".into()),
         };
         let json = m.to_json();
         assert!(json.contains("\"witness_fetch_ms\":4"));
         assert!(json.contains("\"ok\":true"));
+        assert!(json.contains("\"proof_object\":\"proofs/100/2.l2\""));
         assert_eq!(ChunkResultMessage::from_json(&json).unwrap(), m);
 
         let m2 = ChunkResultMessage {
@@ -505,11 +521,26 @@ mod tests {
             witness_fetch_ms: None,
             ok: false,
             cell: "cell-xyz".into(),
+            proof_object: None,
         };
         let json2 = m2.to_json();
         assert!(json2.contains("\"witness_fetch_ms\":null"));
         assert!(json2.contains("\"ok\":false"));
+        assert!(json2.contains("\"proof_object\":null"));
         assert_eq!(ChunkResultMessage::from_json(&json2).unwrap(), m2);
+    }
+
+    #[test]
+    fn chunk_result_backward_compatible_without_proof_object() {
+        // A message produced BEFORE this field existed (no `proof_object` key)
+        // must still deserialize — `#[serde(default)]` fills it with None.
+        // This guards rolling deploys where a not-yet-updated producer sends
+        // the legacy schema.
+        let legacy = r#"{"height":7,"witness_index":1,"prove_ms":1200,"witness_fetch_ms":null,"ok":true,"cell":"cell-old"}"#;
+        let decoded = ChunkResultMessage::from_json(legacy).unwrap();
+        assert_eq!(decoded.proof_object, None);
+        assert!(decoded.ok);
+        assert_eq!(decoded.cell, "cell-old");
     }
 
     #[test]
