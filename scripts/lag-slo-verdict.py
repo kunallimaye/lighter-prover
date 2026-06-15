@@ -351,9 +351,11 @@ def _keep_pace(
                 elapsed_s = float(es)
     observed_blocks_s = None
     if elapsed_s and elapsed_s > 0 and blocks:
-        # Count ALL blocks seen (measured + the heights that produced a
-        # gather wall) for a throughput figure -- exclusion is a lag-honesty
-        # gate, not a throughput gate. Use measured count as a floor.
+        # Observed block rate over the measured set: measured-block count
+        # divided by the run span. We deliberately use the MEASURED blocks
+        # (modeled blocks are excluded by the lag-honesty gate); on a
+        # measured `--proof-bucket` run every block has a measured fold, so
+        # this is the full block count. issue #215
         observed_blocks_s = len(blocks) / elapsed_s
 
     backlog_bounded = not backlog_growing
