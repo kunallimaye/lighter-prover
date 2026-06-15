@@ -265,6 +265,156 @@ COORD_FOLD_BENCH=1 COORD_FOLD_BENCH_S=4 COORD_FOLD_BENCH_K=16 \
 Look for the `[coord-fold-bench] RESULT ...` and
 `[coord-fold-bench] SPEEDUP ...` lines.
 
+## Multi-coordinator live fold measurement (k=4/8/16, c4a-standard-16, 1/2/3 workers)
+
+> **Status:** live cloud measurement record (issue #200, the M3 follow-up of
+> #198). These are the FIRST real cross-machine fold-wall numbers — the thing
+> the hermetic #198 tests structurally could not produce. Measured, not
+> modeled; not a gate (per #198, NFR is instrumented, never an acceptance
+> condition).
+
+### What was run
+
+The distributed fold path that PR #201 (#198 M1/M2) added was exercised on
+REAL infrastructure for the first time:
+
+- **Cluster:** 1 leader (`bench --mode fold-leader-bench`) + up to 3 fold
+  workers (`bench --mode fold-worker`), all on **`c4a-standard-16`** (ARM64
+  Axion, 16 vCPU / 64 GB), all in the **same zone** (`us-east1-b`, after a
+  `us-central1` stockout — c4a-16 is heavily contended). Each worker proves
+  **ONE merge at a time on its full 16 cores** — no thread rationing (the
+  deprecated per-merge cap is NOT on this path). Scale was by **worker COUNT**,
+  the #198 governing principle.
+- **Merge-task plane:** a REAL Pub/Sub topic/subscription pair
+  (`pilot200-merge-task` / `-result`), the leader publishing one
+  `MergeTaskMessage` per pair and workers competing-pulling (gcloud CLI
+  auto-ack).
+- **Proof store:** a REAL GCS bucket; intermediate proofs transit under the
+  `{height}/m/{level}/{index}` key namespace; leaves under `{height}/{idx}`.
+- **Experiment design:** for each `k ∈ {4, 8, 16}` a FIXED batch of `k` real
+  L2 leaf proofs was generated ONCE and **reused byte-for-byte** across the
+  1/2/3-worker configs (only the worker count changed between configs, so any
+  wall-time delta is purely the workers). The fold WALL-CLOCK timer starts with
+  the `k` leaves present in the store and stops when the final folded block
+  proof exists — **leaf generation is excluded** from the fold timer. Each
+  cell ran **3 reps**.
+
+### Measured fold-wall matrix (median ms, min/max in parens; 3 reps/cell)
+
+| k  | depth | merges | 1 worker        | 2 workers       | 3 workers       | speedup vs 1w (2w / 3w) |
+|----|-------|--------|-----------------|-----------------|-----------------|-------------------------|
+| 4  | 2     | 3      | **16880** (16102–16921) | **12770** (12295–12805) | **12277** (11952–12621) | 1.32× / 1.38× |
+| 8  | 3     | 7      | **43770** (43667–45609) | **25777** (25355–26690) | **24845** (24635–28051) | 1.70× / 1.76× |
+| 16 | 4     | 15     | **96661** (93092–99259) | **54406** (53894–58790) | **54303** (52206–55071) | 1.78× / 1.78× |
+
+**Fold wall DROPPED as workers increased at every k.** The win grows with k
+(more independent merges per level to keep multiple workers busy): ~1.38× at
+k=4, ~1.76× at k=8, ~1.78× at k=16. The **2→3 worker step adds almost
+nothing** (k=8: 1.70→1.76×; k=16: 1.78→1.78×) — at these k the widest level
+(k/2 merges) does not stay wide enough, long enough, for a 3rd worker to pay
+off once the per-level barrier overhead dominates (see below).
+
+### Correctness gate (the only HARD bar — passed)
+
+- **Every** final folded proof **VERIFIED** (`verified=true`, all 27 reps).
+- The final-proof public-input fingerprint was **bit-identical across 1/2/3
+  workers** for each k:
+  - k=4 → `0x0ec8cc0c99cfe8c4`
+  - k=8 → `0x185daa973ecbe576`
+  - k=16 → `0xebe451059f6ea21c`
+
+  i.e. the cross-machine fold is bit-identical regardless of which worker
+  proved which merge (the #193 determinism contract, generalized — confirmed
+  live, not just hermetically).
+
+### The per-level BARRIER / straggler cost (the key NEW figure)
+
+This is the number hermetic runs could not produce. Per-level barrier wall
+(`max(level merge finish) − level release`) and straggler delta
+(`slowest − median` prove in the level), at k=16 / 3 workers (representative):
+
+| level | tasks | barrier_ms (range over reps) | per-merge prove ms | straggler ms |
+|-------|-------|------------------------------|--------------------|--------------|
+| 1     | 8     | 16650–19569                  | ~510–530           | 7–17         |
+| 2     | 4     | 9416–10822                   | ~510–520           | 5–11         |
+| 3     | 2     | 5207–6411                    | ~510–526           | 0            |
+| 4     | 1     | 4385–5443                    | ~508–514           | 0            |
+
+**The dominant cost is the merge-plane round-trip, NOT prove and NOT
+stragglers:**
+
+- **Per-merge prove is only ~519 ms** (508–535 ms across the whole matrix),
+  flat across all tree levels — a single merge on a c4a-16's full cores.
+- **Straggler delta is negligible: 0–17 ms.** The independent workers finish
+  their merges within ~17 ms of each other; there is essentially **no
+  straggler problem** at the prove level on identical boxes.
+- **Yet a single level's barrier is ~4–20 s** — 8–40× the ~0.5 s prove. That
+  gap is **Pub/Sub task dispatch + the gcloud-CLI auto-ack pull poll loop**:
+  every worker poll spawns a fresh `gcloud pubsub pull` process (~1–2 s) and
+  the auto-ack pull frequently returns fewer than the available tasks, so
+  task pickup is paced by the poll interval rather than by prove throughput.
+  The barrier scales with the level's task count (level 1 with 8 tasks is the
+  most expensive) because more tasks need more poll cycles to all be picked up
+  and reported.
+
+### Transit / intermediate-proof size
+
+- `fold_transit`: transit total ~2.8 s (k=4) up to ~15–17 s (k=16, summed
+  across all PUT/GET of all merges) — again paced by the same CLI/GCS
+  round-trips, not payload.
+- **Intermediate-proof size is CONSTANT ~422 KB** (max observed 422,343 B)
+  at **every level through depth 4** (k=16). This **confirms to depth 4** the
+  pilot's ~412 KB constant-size fact (the pilot verified only to depth 3):
+  plonky2 recursive proofs are constant-size, so coordinator↔coordinator
+  payload does NOT grow up the tree.
+
+### Honest conclusion
+
+**Adding coordinator (fold) workers DOES reduce a single block's fold wall**
+at k=4/8/16 — by ~1.38× (k=4), ~1.76× (k=8), ~1.78× (k=16) at 3 workers — and
+the final proof stays VERIFIED and bit-identical. So the #198 cross-machine
+fan-out is real and correct, and the win materializes more at larger k.
+
+**But the realized speedup is well below the depth-bounded ideal, and the
+reason is measured, not modeled.** The ideal collapse is from `(k−1)` serial
+merges to `depth` serial merge-waves: at k=16 that's 15→4 ≈ 3.75× if prove
+dominated. We saw only ~1.78×. The gap is **entirely the per-level barrier
+overhead of the merge-task plane** — *not* prove contention (each merge gets
+full cores), *not* stragglers (≤17 ms), *not* payload (constant 422 KB). With
+a ~0.5 s merge, a ~4–20 s/level barrier dominated by gcloud-CLI poll latency
+swamps the prove savings. Concretely: the depth-bound predicts the 3-worker
+fold should approach `depth × (prove + one_barrier)`; instead each level pays
+a fixed multi-second poll-paced barrier, so going 2→3 workers barely helps
+once each level's tasks fit in ≲2 poll waves.
+
+**Actionable implication (consistent with #200's "optional native ack"
+item):** the fan-out is prove-correct and already net-faster, but to approach
+the depth-bounded ideal the merge plane needs a **native manual-ack Pub/Sub
+client** (streaming pull, ack-after-upload) replacing the per-poll gcloud-CLI
+spawn — that would cut the per-level barrier from seconds to the ~tens-of-ms
+straggler floor we already measured, at which point the prove-dominated
+`depth × per_merge` collapse becomes visible and larger k (where levels stay
+wide) would reward a 3rd+ worker. At the current CLI-paced plane, **2 workers
+capture most of the available win at k≤16; a 3rd is marginal.**
+
+### Reproduce
+
+The harness is `bench --mode fold-leader-bench` (added for #200). On an
+aarch64 (or any) coordinator box pointed at a real merge-task plane + proof
+bucket, with `N` `bench --mode fold-worker` pods alive:
+
+```sh
+bench --mode fold-leader-bench \
+  --project="$PROJECT" --proof-bucket="$BUCKET" \
+  --merge-task-topic=... --merge-result-subscription=... \
+  --bench-k=16 --bench-reps=3 --tx-per-proof=4
+```
+
+It stages the fixed `k`-leaf batch once (reused across worker counts) and
+emits `BENCH_METRIC fold_wall` / `fold_barrier` / `fold_transit` plus a final
+`fold_wall_summary` (median/min/max + the bit-identical public-input
+fingerprint). Worker count = number of live `fold-worker` pods.
+
 ## Refs
 
 - PR #194 — parallel fold implementation (stays merged; correct).
@@ -278,4 +428,9 @@ Look for the `[coord-fold-bench] RESULT ...` and
   blocked on cross-machine fan-out — this note's cluster section).
 - Issue #198 — implement cross-machine merge fan-out (the prerequisite the
   #197 experiment needs).
+- Issue #200 — the live multi-VM 1/2/3-coordinator fold-wall matrix (M3 of
+  #198); the "Multi-coordinator live fold measurement" section above is its
+  deliverable. The `fold-leader-bench` harness was added to drive it.
+- PR #201 — cross-machine fold fan-out M1/M2 (the capability this section
+  measured live).
 - ADR-0006 — distributed-prover-conductor (production topology source).

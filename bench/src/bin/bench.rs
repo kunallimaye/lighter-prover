@@ -159,6 +159,24 @@ struct Args {
     #[arg(long, env = "LIGHTER_POLL_INTERVAL_S", default_value_t = 2)]
     poll_interval_s: u64,
 
+    /// Issue #200 (`--mode fold-leader-bench`): number of leaf proofs in the
+    /// fixed fold batch (k). The leader folds these k leaves into one block
+    /// proof via a depth-`ceil(log2(k))` merge tree (k-1 merges). The batch is
+    /// staged ONCE in the proof store and REUSED across worker counts.
+    #[arg(long, env = "LIGHTER_BENCH_K", default_value_t = 4)]
+    bench_k: usize,
+
+    /// Issue #200 (`--mode fold-leader-bench`): how many timed fold reps to run
+    /// over the SAME fixed leaf batch (>=3 for a median + spread).
+    #[arg(long, env = "LIGHTER_BENCH_REPS", default_value_t = 3)]
+    bench_reps: usize,
+
+    /// Issue #200 (`--mode fold-leader-bench`): the synthetic block height the
+    /// fixed leaf batch is keyed under in the proof store (`{height}/{idx}`).
+    /// Distinct heights per k keep the k=4/8/16 batches from colliding.
+    #[arg(long, env = "LIGHTER_BENCH_HEIGHT", default_value_t = 0)]
+    bench_height: u64,
+
     /// Number of transactions proven per `BlockTxCircuit` chunk. Each
     /// value produces a different proving key.
     #[arg(long, env = "LIGHTER_TX_PER_PROOF", default_value_t = DEFAULT_TX_PER_PROOF)]
@@ -405,6 +423,19 @@ enum RunMode {
     /// output to the proof store, and publishes a merge result. This is how a
     /// single block's merge tree shards across separate machines.
     FoldWorker,
+    /// Issue #200 (M3 measurement harness): the FOLD-LEADER BENCH. Drives the
+    /// live cross-machine fold-wall measurement: generate (or reuse) a FIXED
+    /// batch of `k` real L2 leaf proofs in the GCS proof store ONCE, then run
+    /// the DISTRIBUTED leader fold (the same `fold_distributed` +
+    /// `GcloudFoldTransport` the production coordinator uses) over the merge-task
+    /// plane for `--bench-reps` reps, recording the fold WALL-CLOCK, the
+    /// `BENCH_METRIC fold_barrier`/`fold_transit` instrumentation, the final
+    /// proof's public-input fingerprint (for the bit-identical-across-worker-count
+    /// gate), and a VERIFY. The leaf batch is generated only if not already
+    /// present, so it is REUSED byte-for-byte across the 1/2/3-worker configs —
+    /// only the worker count changes between configs. This is a MEASUREMENT
+    /// driver only; it never gates and never fabricates.
+    FoldLeaderBench,
 }
 
 /// Issue #67: L2 fold strategy.
@@ -677,6 +708,10 @@ fn main() {
         }
         RunMode::FoldWorker => {
             run_fold_worker(&args);
+            return;
+        }
+        RunMode::FoldLeaderBench => {
+            run_fold_leader_bench(&args);
             return;
         }
     }
@@ -3974,6 +4009,372 @@ fn run_fold_worker(args: &Args) {
         merges_done += 1;
     }
     info!("fold-worker: done, {} merges proven", merges_done);
+}
+
+/// Issue #200 (M3 live measurement): generate a FIXED batch of `k` real L2 leaf
+/// proofs and stage them in the proof store under `{height}/{idx}`, REUSING any
+/// already-present leaf so the SAME batch is folded byte-for-byte across the
+/// 1/2/3-worker configs (only the worker count changes between configs).
+///
+/// The leaf circuit chain is built into the EXACT self-shape the leader's
+/// merge/L4 circuits ([`CoordinatorRealFold::build`]) build into (the closed
+/// cyclic fixed point), so the staged leaves verify under the leader's merge VK.
+/// This mirrors the proven cell-side sequence in `distributed_fold_e2e.rs`
+/// (real L1 `BlockTxCircuit` + real L2 `BlockTxChainCircuit` leaf prove seeded
+/// from each chunk's positional pre-state). Leaf generation is EXCLUDED from
+/// every fold timer — it happens here, before any fold runs.
+fn fold_bench_stage_leaves(
+    args: &Args,
+    proof_store: &bench::conductor::GcloudStorage,
+    height: u64,
+    k: usize,
+) -> anyhow::Result<Vec<String>> {
+    use bench::conductor::proof_object_key;
+
+    let s = args.tx_per_proof;
+    let n_tx = s * k;
+
+    // Resolve which leaf keys already exist in the store (idempotent reuse).
+    let keys: Vec<String> = (0..k as u64).map(|i| proof_object_key(height, i)).collect();
+    let mut missing: Vec<usize> = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        match proof_store.download(key) {
+            Ok(_) => info!(
+                "fold-leader-bench: leaf {i} already present in proof store as '{key}' — REUSING \
+                 (same fixed batch across worker counts)"
+            ),
+            Err(_) => missing.push(i),
+        }
+    }
+    if missing.is_empty() {
+        info!(
+            "fold-leader-bench: all {k} leaves for height={height} already staged — fold batch is \
+             REUSED byte-for-byte (issue #200 fixed-batch design)"
+        );
+        return Ok(keys);
+    }
+    info!(
+        "fold-leader-bench: staging {} missing leaf proof(s) of {k} (S={s}, height={height}); \
+         generating real L1+L2 leaves (EXCLUDED from the fold timer)",
+        missing.len()
+    );
+
+    // ---- Build the leaf circuits, matching the leader's merge self-shape. ----
+    let mut block = get_test_block_json_file("bench_test.json");
+    if block.txs.len() < n_tx {
+        anyhow::bail!(
+            "bench_test.json has only {} txs; need {} for S={s} k={k}",
+            block.txs.len(),
+            n_tx
+        );
+    }
+    block.txs.truncate(n_tx);
+    let created_at = block.created_at;
+
+    let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+    let pbt = pre_exec_circuit.target;
+    let pre_exec_data = pre_exec_circuit.builder.build::<C>();
+    let bpe = BlockPreExec::from_block(&block);
+    let pre_proof = BlockPreExecutionCircuit::prove(&pre_exec_data, &bpe, &pbt)
+        .map_err(|e| anyhow::anyhow!("pre-exec prove failed: {e:?}"))?;
+    let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
+    let state_metadata = pre_exec_witness.new_state_metadata.clone();
+
+    let l1 = BlockTxCircuit::define(CIRCUIT_CONFIG, s, CHAIN_ID);
+    let bt = l1.target;
+    let l1_data = l1.builder.build::<C>();
+
+    let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &l1_data, s, 1);
+    let chain_t = chain_circuit.target;
+    let chain_data = chain_circuit.builder.build::<C>();
+    let block_tx_witness_size = chain_circuit.block_tx_witness_size;
+    let dummy_chain = dummy_circuit(&chain_data.common);
+    let dummy_proof = cyclic_base_proof(
+        &chain_data.common,
+        &chain_data.verifier_only,
+        &dummy_chain,
+        Vec::<F>::new().iter().copied().enumerate().collect(),
+    )
+    .map_err(|e| anyhow::anyhow!("cyclic base proof failed: {e:?}"))?;
+
+    // S=1 positional pre-state sweep (the #177 FINDING D seam): one snapshot per
+    // tx position so each chunk seeds from its OWN positional pre-state.
+    let initial = ChunkPreState {
+        register_stack: block.register_stack_before,
+        all_assets: block.all_assets.clone(),
+        all_market_details: pre_exec_witness.new_market_details.clone(),
+        system_config: block.old_system_config,
+        account_tree_root: block.old_account_tree_root,
+        account_pub_data_tree_root: block.old_account_pub_data_tree_root,
+        account_delta_tree_root: block.old_account_delta_tree_root,
+        market_tree_root: block.old_market_tree_root,
+    };
+    let l1_s1 = BlockTxCircuit::define(CIRCUIT_CONFIG, 1, CHAIN_ID);
+    let bt_s1 = l1_s1.target;
+    let l1_s1_data = l1_s1.builder.build::<C>();
+    let snapshots = sweep_per_tx_snapshots(
+        height,
+        created_at,
+        initial,
+        &block.txs,
+        &l1_s1_data,
+        &bt_s1,
+        |_pos, _wall_ms| {},
+    );
+
+    // Prove + upload each MISSING leaf (real L1 + real L2 leaf chain).
+    for &chunk_idx in &missing {
+        let lo = chunk_idx * s;
+        let hi = lo + s;
+        let txs: Vec<_> = block.txs[lo..hi].to_vec();
+        let pos_pre = snapshots
+            .at_chunk(s, chunk_idx)
+            .ok_or_else(|| anyhow::anyhow!("snapshot for chunk {chunk_idx} (pos {lo}) missing"))?;
+
+        let block_tx = pos_pre.block_tx(created_at, txs.clone());
+        let l1_proof: ProofWithPublicInputs<F, C, D> =
+            BlockTxCircuit::prove(&l1_data, &block_tx, &bt)
+                .map_err(|e| anyhow::anyhow!("chunk {chunk_idx}: L1 prove failed: {e:?}"))?;
+
+        let seed = seed_from_state(
+            &pos_pre.register_stack,
+            pos_pre.account_tree_root,
+            pos_pre.account_pub_data_tree_root,
+            pos_pre.market_tree_root,
+            pos_pre.account_delta_tree_root,
+            &pos_pre.all_assets,
+            &pos_pre.all_market_details,
+            &state_metadata,
+            &pos_pre.system_config,
+        );
+        let base = BlockTxChainCircuit::cyclic_base_proof(
+            &chain_data,
+            &dummy_chain,
+            height,
+            created_at,
+            seed.pre_state_root,
+            seed.pre_state_root,
+            seed.pre_validium_root,
+            seed.pre_delta_root,
+            block_tx_witness_size,
+            &state_metadata,
+        );
+        let leaf_proof: ProofWithPublicInputs<F, C, D> =
+            BlockTxChainCircuit::prove(&chain_t, &chain_data, 0, &base, &dummy_proof, &l1_proof)
+                .map_err(|e| anyhow::anyhow!("chunk {chunk_idx}: L2 leaf prove failed: {e:?}"))?;
+
+        let bytes = serde_json::to_vec(&leaf_proof)
+            .map_err(|e| anyhow::anyhow!("serialize leaf {chunk_idx}: {e}"))?;
+        let key = proof_object_key(height, chunk_idx as u64);
+        proof_store
+            .upload(&key, &bytes)
+            .map_err(|e| anyhow::anyhow!("chunk {chunk_idx}: upload to proof store failed: {e}"))?;
+        info!(
+            "fold-leader-bench: staged real L1+L2 leaf {chunk_idx} as '{key}' ({} bytes)",
+            bytes.len()
+        );
+    }
+
+    Ok(keys)
+}
+
+/// Issue #200 (M3 live measurement harness): the FOLD-LEADER BENCH. Stages a
+/// FIXED `k`-leaf batch in the GCS proof store ONCE, then runs the DISTRIBUTED
+/// leader fold (`fold_distributed` over the real `GcloudFoldTransport` =
+/// merge-task Pub/Sub plane + GCS transit) `--bench-reps` times over the SAME
+/// batch, recording for each rep:
+///   - the fold WALL-CLOCK (timer starts with the k leaves present in the store,
+///     stops when the final folded block proof exists — leaf gen EXCLUDED);
+///   - the `BENCH_METRIC fold_barrier` / `fold_transit` instrumentation
+///     (emitted by `coordinator_distributed_fold`);
+///   - the final proof's PUBLIC-INPUT FINGERPRINT (a stable hash) so the caller
+///     can assert bit-identical across worker counts for a given k;
+///   - a VERIFY of the final folded chain proof against the merge VK.
+///
+/// The worker count is NOT set here — it is determined by how many
+/// `bench --mode fold-worker` pods are alive on the merge plane. Run this leader
+/// once per worker-count config (1/2/3 workers up); the staged batch is reused.
+///
+/// Honest-failure: any prove/transit/barrier error propagates and the rep is
+/// reported as FAILED; no proof is ever fabricated and no number is invented.
+fn run_fold_leader_bench(args: &Args) {
+    use bench::conductor::{GcloudPubSub, GcloudStorage, StorageConfig};
+
+    let k = args.bench_k;
+    let reps = args.bench_reps.max(1);
+    let height = if args.bench_height != 0 {
+        args.bench_height
+    } else {
+        // Derive a stable distinct height per k so the k=4/8/16 batches never
+        // collide in the proof store: 200_000 + k.
+        200_000 + k as u64
+    };
+    if k < 2 {
+        eprintln!("error: --mode fold-leader-bench requires --bench-k >= 2 (a tree must fold)");
+        std::process::exit(2);
+    }
+
+    let cfg = resolve_pubsub_config(args);
+    if cfg.merge_task_topic.is_empty() || cfg.merge_result_subscription.is_empty() {
+        eprintln!(
+            "error: --mode fold-leader-bench requires --merge-task-topic and \
+             --merge-result-subscription (the merge-task plane)"
+        );
+        std::process::exit(2);
+    }
+    let bus = GcloudPubSub::new(cfg);
+
+    let proof_store = GcloudStorage::new(StorageConfig {
+        bucket: args.proof_bucket.clone(),
+        gcloud_bin: args.gcloud_bin.clone(),
+    });
+    if !proof_store.config().enabled() {
+        eprintln!("error: --mode fold-leader-bench requires --proof-bucket (the proof-store transit)");
+        std::process::exit(2);
+    }
+
+    let depth = (usize::BITS - (k - 1).leading_zeros()) as usize; // ceil(log2(k))
+    info!(
+        "fold-leader-bench: START k={k} reps={reps} height={height} depth={depth} merges={} \
+         bucket={} merge_task_topic={} merge_result_sub={} (issue #200 — one proof per worker, \
+         scale by worker COUNT; worker count = live fold-worker pods)",
+        k - 1,
+        proof_store.config().bucket,
+        bus.config().merge_task_topic,
+        bus.config().merge_result_subscription,
+    );
+
+    // ---- Build the leader's merge + L4 circuits ONCE (resident). ----
+    let real = CoordinatorRealFold::build(args);
+
+    // ---- Stage the FIXED leaf batch ONCE (reused across worker counts). ----
+    let leaf_keys = match fold_bench_stage_leaves(args, &proof_store, height, k) {
+        Ok(keys) => keys,
+        Err(e) => {
+            log::error!("fold-leader-bench: leaf staging FAILED honestly: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Download the k leaves ONCE (the same Vec is cloned into every rep, so the
+    // INPUT is byte-identical across reps and across worker counts).
+    let mut leaves: Vec<ProofWithPublicInputs<F, C, D>> = Vec::with_capacity(k);
+    for key in &leaf_keys {
+        let bytes = match proof_store.download(key) {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!("fold-leader-bench: download of staged leaf '{key}' failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(leaf) => leaves.push(leaf),
+            Err(e) => {
+                log::error!("fold-leader-bench: deserialize of staged leaf '{key}' failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    info!("fold-leader-bench: {k} fixed leaves resident; running {reps} timed fold rep(s)");
+
+    let mut fold_wall_ms: Vec<u64> = Vec::with_capacity(reps);
+    let mut pi_fingerprints: Vec<u64> = Vec::with_capacity(reps);
+    let mut any_fail = false;
+
+    for rep in 1..=reps {
+        info!("fold-leader-bench: ===== rep {rep}/{reps} (k={k}) — fold timer START =====");
+        let t0 = Instant::now();
+        let outcome = coordinator_distributed_fold(
+            &real,
+            &proof_store,
+            &bus,
+            height,
+            leaves.clone(),
+            &leaf_keys,
+        );
+        let wall_ms = t0.elapsed().as_millis() as u64;
+
+        match outcome {
+            Ok(fold) => {
+                // VERIFY the final folded chain proof (genuine, not stubbed).
+                let verified = if fold.final_is_merge {
+                    real.merge_data.verify(fold.final_proof.clone()).is_ok()
+                } else {
+                    real.chain_data.verify(fold.final_proof.clone()).is_ok()
+                };
+                // Stable public-input fingerprint for the bit-identical gate.
+                let fp = fold_pi_fingerprint(&fold.final_proof);
+                pi_fingerprints.push(fp);
+                fold_wall_ms.push(wall_ms);
+                info!(
+                    "BENCH_METRIC fold_wall height={height} k={k} rep={rep} fold_wall_ms={wall_ms} \
+                     depth={} merges={} final_is_merge={} verified={} pi_fingerprint={:#018x} \
+                     (issue #200 — REAL distributed fold wall, leaf-gen excluded)",
+                    fold.depth, fold.merges, fold.final_is_merge, verified, fp,
+                );
+                if !verified {
+                    any_fail = true;
+                    log::error!(
+                        "fold-leader-bench: rep {rep} final proof FAILED to VERIFY — correctness \
+                         bug, reporting honestly (issue #200 correctness gate)"
+                    );
+                }
+            }
+            Err(e) => {
+                any_fail = true;
+                log::error!(
+                    "fold-leader-bench: rep {rep} (k={k}) FAILED honestly after {wall_ms} ms: {e}"
+                );
+            }
+        }
+    }
+
+    // ---- Summary: median + spread of the fold wall over the reps. ----
+    if !fold_wall_ms.is_empty() {
+        let mut sorted = fold_wall_ms.clone();
+        sorted.sort_unstable();
+        let median = sorted[sorted.len() / 2];
+        let min = *sorted.first().unwrap();
+        let max = *sorted.last().unwrap();
+        // Bit-identical gate WITHIN this run: all reps must agree on PI.
+        let all_same = pi_fingerprints.windows(2).all(|w| w[0] == w[1]);
+        info!(
+            "BENCH_METRIC fold_wall_summary height={height} k={k} depth={depth} merges={} \
+             reps_ok={} fold_wall_median_ms={median} fold_wall_min_ms={min} \
+             fold_wall_max_ms={max} pi_fingerprint={:#018x} all_reps_bit_identical={all_same} \
+             (issue #200)",
+            k - 1,
+            fold_wall_ms.len(),
+            pi_fingerprints.first().copied().unwrap_or(0),
+        );
+    } else {
+        log::error!(
+            "fold-leader-bench: NO successful reps for k={k} — all folds failed (reported honestly)"
+        );
+    }
+
+    if any_fail {
+        std::process::exit(1);
+    }
+    info!("fold-leader-bench: DONE k={k} ({} ok reps)", fold_wall_ms.len());
+}
+
+/// Issue #200: a stable, order-sensitive fingerprint of a proof's public inputs
+/// for the bit-identical-across-worker-counts gate. Two folds of the SAME leaves
+/// that produce the SAME public inputs hash identically regardless of which
+/// worker proved which merge (the #193 determinism contract). FNV-1a over the
+/// canonical Goldilocks field elements — collision-resistant enough for an
+/// equality witness and fully deterministic.
+fn fold_pi_fingerprint(proof: &ProofWithPublicInputs<F, C, D>) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for pi in &proof.public_inputs {
+        let v = pi.to_canonical_u64();
+        for b in v.to_le_bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
 }
 
 /// Issue #198: prove ONE merge task on this worker — download the two inputs,
