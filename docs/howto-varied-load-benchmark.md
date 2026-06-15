@@ -170,6 +170,47 @@ grep '^BENCH_EVENT ' run.log | sed 's/^BENCH_EVENT //' \
            | [.height, .throughput_tx_s, .lag_p50_ms] | @tsv'
 ```
 
+### Per-block end-to-end lag + keep-pace SLO verdict (#215)
+
+The quick table above reads only the GATHER wall. To compute the **true**
+per-block lag (`gather + measured merge + measured L4`), the run-level p50/p99,
+and a PASS/MARGINAL/FAIL verdict against the ADR-0004 §0 SLO (p50 ≤ 20 s,
+p99 ≤ 40 s, ≥ 5 blocks/s), feed the coordinator stream to
+`scripts/lag-slo-verdict.py`. It joins `coordinator_fold` (#179) on `height`
+and **refuses to count a `"modeled"` fold** — only `--proof-bucket` runs whose
+`merge_source`/`l4_source` are `"measured"` enter the percentiles; modeled
+blocks are flagged and excluded.
+
+```bash
+# From a saved log (prefix or prefix-stripped JSONL both accepted):
+python3 scripts/lag-slo-verdict.py run.log
+
+# Or stream it straight through:
+grep '^BENCH_EVENT ' run.log | python3 scripts/lag-slo-verdict.py -
+
+# Machine-readable mirror + a non-default drive rate for keep-pace:
+python3 scripts/lag-slo-verdict.py run.log \
+  --drive-rate-blocks-s 5 --json-out verdict.json
+```
+
+Sample verdict block:
+
+```
+Run-level:
+  lag p50 = 16.000 s   (SLO <= 20 s)
+  lag p99 = 19.000 s   (SLO <= 40 s)
+  observed = 5.000 blocks/s   (SLO >= 5 blocks/s)
+  backlog bounded = True; dropped_chunks = 0; keep-pace = True
+
+VERDICT: PASS  (vs 20/40 s @ >= 5 blk/s)
+```
+
+The tool exits `0` on PASS/MARGINAL and non-zero on FAIL, and always prints the
+mandatory scope caveats (dequeue anchor; pre-state delivery EXCLUDED;
+`witness_move` UNMODELED; L1→L4-only). `make lag-slo-verdict-test` runs its unit
+suite against the committed `scripts/tests/fixtures/coordinator-lag-sample.jsonl`
+fixture (and runs as part of `make local-test`).
+
 ---
 
 ## 5. Scope & caveats
