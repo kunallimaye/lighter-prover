@@ -55,11 +55,21 @@ cell_memory_request = "44Gi" # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L4
 # DEPENDENCY: replace with the REAL arm64 prover image tag
 # (<sha>-neoverse-v2) emitted by cicd/cloudbuild.yaml. Placeholder until built.
 cell_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+# Issue #209: the cell ships its REAL L2 leaf proof to the shared proof
+# store (--proof-bucket / LIGHTER_PROOF_BUCKET) so the coordinator can
+# DOWNLOAD it and run the REAL merge tree + L4. The bucket name follows the
+# deterministic default in variables.tf (proof_store_bucket = "" =>
+# "<project_id>-lighter-prover-proofs"). --proof-mount-path is the gcsfuse
+# mount enable_proof_mount = true creates (issue #206 transport, faster
+# than the gcloud-cp fallback). REPLACE "PROJECT" with the real project id
+# at apply time (same placeholder convention as --project, above).
 cell_command = [
   "/usr/local/bin/prover", "--mode", "cell",
   "--project", "PROJECT",
   "--chunk-subscription", "lighter-prover-scale-0p5pct-chunk-sub",
   "--results-topic", "lighter-prover-scale-0p5pct-results",
+  "--proof-bucket", "PROJECT-lighter-prover-proofs",
+  "--proof-mount-path", "/mnt/proof-store",
   "--tx-per-proof", "9",
   "--poll-interval-s", "2",
 ]
@@ -79,12 +89,26 @@ coordinator_cpu_request    = "43"   # whole box; coordinator-specific profile UN
 coordinator_memory_request = "44Gi" # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
 # DEPENDENCY: same real arm64 prover image tag from cicd/cloudbuild.yaml.
 coordinator_image = "us-central1-docker.pkg.dev/PROJECT/lighter-prover/bench:SHA-neoverse-v2"
+# Issue #209: --proof-bucket / --proof-mount-path point the coordinator at
+# the SAME bucket the cells uploaded their L2 leaf proofs to, so
+# real_fold_enabled = TRUE and the coordinator runs the REAL merge tree +
+# REAL BlockCircuit L4 (merge_source / l4_source = "measured"). Without
+# --proof-bucket the coordinator would fall back to the accounting-only
+# fold (no real merge, no real L4) — that path is now an explicit opt-in
+# (--allow-accounting-only-fold), not the silent default. --fold-distributed
+# selects the cross-machine FoldTopology::Distributed (issue #198: leader
+# emits merge tasks, fold workers competing-pull) so the merge plane
+# enable_merge_plane creates is actually used. REPLACE "PROJECT" with the
+# real project id at apply time.
 coordinator_command = [
   "/usr/local/bin/prover", "--mode", "coordinator",
   "--project", "PROJECT",
   "--dispatch-subscription", "lighter-prover-scale-0p5pct-dispatch-sub",
   "--chunk-topic", "lighter-prover-scale-0p5pct-chunk",
   "--results-subscription", "lighter-prover-scale-0p5pct-results-sub",
+  "--proof-bucket", "PROJECT-lighter-prover-proofs",
+  "--proof-mount-path", "/mnt/proof-store",
+  "--fold-distributed",
   "--tx-per-proof", "9",
   "--poll-interval-s", "2",
 ]
@@ -103,6 +127,28 @@ chunk_topic          = "lighter-prover-scale-0p5pct-chunk"
 chunk_subscription   = "lighter-prover-scale-0p5pct-chunk-sub"
 results_topic        = "lighter-prover-scale-0p5pct-results"
 results_subscription = "lighter-prover-scale-0p5pct-results-sub"
+
+# ── Issue #209: REAL coordinator-side fold (merge tree + L4) ──
+# Before #209 the committed scale tfvars set only `enable_chunk_plane = true`
+# and the coordinator silently ran the "accounting-only fold" (no real
+# merge, no real L4 — merge_source/l4_source = "modeled", merge_ms/l4_ms
+# = 0). A terraform apply therefore measured only HALF the pipeline. The
+# three flags below + the --proof-bucket/--proof-mount-path/--fold-distributed
+# args in {cell,coordinator}_command above flip the coordinator into the
+# REAL merge + L4 path BY DEFAULT (the #209 acceptance criterion).
+#
+#  - enable_proof_store: provisions the shared GCS bucket cells upload L2
+#    leaf proofs to and the coordinator downloads them from (issue #179).
+#  - enable_proof_mount: gcsfuse-mounts that bucket into the coordinator
+#    pod at /mnt/proof-store so storage.rs uses file I/O instead of the
+#    slower `gcloud storage cp` subprocess transport (issue #206).
+#  - enable_merge_plane: provisions the merge-task / merge-result Pub/Sub
+#    pairs the distributed leader+workers transit per-pair fold tasks over
+#    (issue #198 cross-machine fold fan-out), matched by --fold-distributed
+#    in coordinator_command above.
+enable_proof_store = true
+enable_proof_mount = true
+enable_merge_plane = true
 
 pubsub_topic        = "lighter-prover-scale-0p5pct-dispatch"
 pubsub_subscription = "lighter-prover-scale-0p5pct-dispatch-sub"
