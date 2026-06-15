@@ -1732,24 +1732,62 @@ fn run_cell(args: &Args) {
             };
 
             // The cell's L2 is a single-chunk LEAF chain proof: fold this one
-            // L1 chunk onto the cyclic base (witness_index as the chain index).
+            // L1 chunk onto the cyclic base. FINDING D fix (issue #177) part 2:
+            // the base proof's pre-state roots must be the chunk's POSITIONAL
+            // roots, NOT block-initial. Pre-#177 the base used
+            // `pre_exec_witness.new_state_root` / `block.old_account_delta_tree_root`
+            // (block-initial) for EVERY chunk, so only chunk 0's L2 leaf proved
+            // and chunks 1..k-1 failed the chain wire-consistency check (the L2
+            // analog of the L1 bug). We derive the positional `ChunkSeed` (3
+            // roots) natively from the chunk's positional pre-state via
+            // `seed_from_state`, exactly as the known-good tree-fold `prove_leaf`
+            // does. When the fix is disabled (A/B), fall back to block-initial.
+            let (base_state_root, base_validium_root, base_delta_root) =
+                match &positional_snapshots {
+                    Some(snaps) => {
+                        let pre = snaps
+                            .at_chunk(args.tx_per_proof, pool_idx)
+                            .expect("positional snapshot present (checked above)");
+                        let seed = seed_from_state(
+                            &pre.register_stack,
+                            pre.account_tree_root,
+                            pre.account_pub_data_tree_root,
+                            pre.market_tree_root,
+                            pre.account_delta_tree_root,
+                            &pre.all_assets,
+                            &pre.all_market_details,
+                            &state_metadata,
+                            &pre.system_config,
+                        );
+                        (seed.pre_state_root, seed.pre_validium_root, seed.pre_delta_root)
+                    }
+                    None => (
+                        pre_exec_witness.new_state_root,
+                        pre_exec_witness.new_validium_root,
+                        block.old_account_delta_tree_root,
+                    ),
+                };
             let base_chain_proof = BlockTxChainCircuit::cyclic_base_proof(
                 &chain_circuit_data,
                 &dummy_tx_chain_circuit,
                 block.block_number,
                 block.created_at,
-                pre_exec_witness.new_state_root,
-                pre_exec_witness.new_state_root,
-                pre_exec_witness.new_validium_root,
-                block.old_account_delta_tree_root,
+                base_state_root,
+                base_state_root,
+                base_validium_root,
+                base_delta_root,
                 block_tx_witness_size,
                 &state_metadata,
             );
-            // ── REAL L2 prove ── (never stubbed)
+            // ── REAL L2 prove ── (never stubbed). Chain index is 0: every cell
+            // leaf is the FIRST (and only) step of its own single-chunk chain,
+            // matching the tree-fold `prove_leaf` (which passes 0, not the
+            // chunk ordinal). Using `witness_index` as the chain index would
+            // mismatch the base proof's chain position.
             let chain_ok = BlockTxChainCircuit::prove(
                 &chain_circuit_t,
                 &chain_circuit_data,
-                chunk.witness_index,
+                0,
                 &base_chain_proof,
                 &dummy_proof,
                 &tx_proof,

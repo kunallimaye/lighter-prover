@@ -37,15 +37,27 @@
 use std::time::Instant;
 
 use bench::prestate::{ChunkPreState, sweep_per_tx_snapshots};
+use bench::seed::seed_from_state;
 use circuit::block::Block;
 use circuit::block_pre_execution::{BlockPreExec, BlockPreExecWitness};
 use circuit::block_pre_execution_constraints::{BlockPreExecutionCircuit, Circuit as _};
 use circuit::block_tx::BlockTxWitness;
+use circuit::block_tx_chain_constraints::{BlockTxChainCircuit, Circuit as _};
 use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
+use circuit::builder::custom::cyclic_base_proof;
 use circuit::types::config::{C, CIRCUIT_CONFIG, D, F};
 use plonky2::plonk::proof::ProofWithPublicInputs;
+use plonky2::recursion::dummy_circuit::dummy_circuit;
 
 const CHAIN_ID: u32 = 304;
+
+/// Whether to ALSO exercise the cell's L2 leaf chain prove from positional
+/// snapshots (the L2 analog of FINDING D — block-initial L2 base roots make
+/// only chunk 0's leaf prove). On by default; set `LAYER0_L1_ONLY=1` to skip
+/// L2 for a faster L1-only run.
+fn l2_enabled() -> bool {
+    std::env::var("LAYER0_L1_ONLY").map(|v| v != "1").unwrap_or(true)
+}
 
 fn enabled() -> bool {
     std::env::var("LAYER0_FINDING_D")
@@ -255,6 +267,42 @@ fn run_s_gate(
     let bt = l1.target;
     let l1_data = l1.builder.build::<C>();
 
+    // Build the L2 chain circuit + dummies ONCE (the cell's exact L2 setup), so
+    // we can exercise the LEAF chain prove from positional snapshots — the L2
+    // analog of FINDING D. The cell's pre-#177 L2 base proof used block-initial
+    // roots for every chunk, so only chunk 0's leaf proved; this catches that.
+    let do_l2 = l2_enabled();
+    let (state_metadata, l2_chain) = if do_l2 {
+        let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+        let pbt = pre_exec_circuit.target;
+        let pre_exec_data = pre_exec_circuit.builder.build::<C>();
+        let bpe = BlockPreExec::from_block(block);
+        let pre_proof = BlockPreExecutionCircuit::prove(&pre_exec_data, &bpe, &pbt).unwrap();
+        let pw = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
+        let sm = pw.new_state_metadata.clone();
+
+        let chain_circuit = BlockTxChainCircuit::define(CIRCUIT_CONFIG, &l1_data, s, 1);
+        let chain_t = chain_circuit.target;
+        let chain_data = chain_circuit.builder.build::<C>();
+        let block_tx_witness_size = chain_circuit.block_tx_witness_size;
+        let dummy_chain = dummy_circuit(&chain_data.common);
+        let dummy_proof = cyclic_base_proof(
+            &chain_data.common,
+            &chain_data.verifier_only,
+            &dummy_chain,
+            Vec::<F>::new().iter().copied().enumerate().collect(),
+        )
+        .unwrap();
+        println!("[layer0]   S={s}: L2 chain circuit resident (leaf-prove gate ON)");
+        (
+            Some(sm),
+            Some((chain_t, chain_data, block_tx_witness_size, dummy_chain, dummy_proof)),
+        )
+    } else {
+        println!("[layer0]   S={s}: L2 leaf-prove gate OFF (LAYER0_L1_ONLY=1)");
+        (None, None)
+    };
+
     // KNOWN-GOOD rolling state, threaded forward across chunks exactly like
     // run_tree_fold (bench.rs 1973-2056).
     let mut rolling = ChunkPreState {
@@ -316,6 +364,48 @@ fn run_s_gate(
             "S={s} chunk {chunk_idx}: positional-snapshot proof public inputs do NOT match \
              the known-good rolling-state proof — hidden chunk-level coupling, STOP"
         );
+
+        // --- L2 LEAF PROVE from positional snapshot (the cell's exact path) ---
+        // This is the L2 analog of the FINDING D gate: derive the positional
+        // ChunkSeed (3 roots) via seed_from_state, build the base proof from
+        // those roots, and prove the leaf chain at chain index 0 — exactly as
+        // the deployed cell does. Pre-fix this failed for chunks 1..k-1 with
+        // "set twice" in the CHAIN circuit (only chunk 0's L2 base matched
+        // block-initial). If it fails here, the deployed cell would fail too.
+        if let (Some(sm), Some((chain_t, chain_data, btws, dummy_chain, dummy_proof))) =
+            (&state_metadata, &l2_chain)
+        {
+            let seed = seed_from_state(
+                &pos_pre.register_stack,
+                pos_pre.account_tree_root,
+                pos_pre.account_pub_data_tree_root,
+                pos_pre.market_tree_root,
+                pos_pre.account_delta_tree_root,
+                &pos_pre.all_assets,
+                &pos_pre.all_market_details,
+                sm,
+                &pos_pre.system_config,
+            );
+            let base = BlockTxChainCircuit::cyclic_base_proof(
+                chain_data,
+                dummy_chain,
+                block.block_number,
+                block.created_at,
+                seed.pre_state_root,
+                seed.pre_state_root,
+                seed.pre_validium_root,
+                seed.pre_delta_root,
+                *btws,
+                sm,
+            );
+            BlockTxChainCircuit::prove(chain_t, chain_data, 0, &base, dummy_proof, &pos_proof)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "S={s} chunk {chunk_idx}: POSITIONAL L2 LEAF prove FAILED \
+                         (FINDING D L2 analog NOT fixed): {err:?}"
+                    )
+                });
+        }
 
         // Roll the known-good state forward from the proof's outputs.
         let w = BlockTxWitness::from_public_inputs(&kg_proof.public_inputs);
