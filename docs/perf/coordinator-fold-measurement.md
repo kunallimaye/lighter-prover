@@ -495,6 +495,78 @@ client for the proof store, the exact analogue of this change applied to the
 store rather than the plane) and is explicitly OUT OF #203's transport scope
 (plane-only). Net: the plane is no longer the bottleneck; the store is.
 
+## Mount-backed proof store (issue #206)
+
+Issue #203 left the residual per-level barrier on the proof store's `gcloud
+storage cp` shell-out (process spawn + auth re-resolve + TLS per copy; 2
+downloads + 1 upload per merge, all inside the barrier against a ~0.5 s prove).
+Issue #206 makes that transport SELECTABLE: when `--proof-mount-path` /
+`LIGHTER_PROOF_MOUNT` is set, `bench/src/conductor/storage.rs` `upload`/
+`download` become plain file write/read against a mounted bucket (gcsfuse),
+keeping the EXACT `{height}/{witness_index}` / `{height}/m/{level}/{index}` key
+scheme (the keys become file paths). Writes are atomic (temp + same-dir
+`rename`) so a cross-machine reader never sees a partial proof; a missing /
+not-yet-visible proof is an honest `Err`, never a fabricated proof. The
+`gcloud storage cp` CLI path is preserved unchanged as the fallback. The
+storage time is decomposed into first-class `BENCH_METRIC fold_storage`
+metrics — `storage_upload_ms`, `storage_download_ms`, and
+`proof_visibility_wait_ms` (the read-after-write barrier wait: time a
+next-level worker polls for an input written on another machine to become
+visible through the mount).
+
+### Live re-measurement — k=4 ONLY (per maintainer instruction)
+
+Real infra: 4× `c4a-standard-16` (ARM64 Axion, aarch64 build with
+`target-cpu=neoverse-n1`), `us-central1-c` (us-central1-a/b stockout → -c), one
+leader VM + up to 3 fold-worker VMs, each gcsfuse-mounting the shared proof
+bucket (`--implicit-dirs`). Native streaming-pull merge plane (#203). A FIXED
+k=4 leaf batch (4 real L1+L2 leaves, ~422 KB each) staged once and folded
+across 1/2/3 workers, ≥3 reps each (leaf-gen excluded from the timer).
+
+**Fold wall (median of 3 reps), mount-backed transport:**
+
+| workers | fold wall median (mount, #206) | #203 `gcloud storage cp` baseline | speedup vs CLI |
+|---------|--------------------------------|-----------------------------------|----------------|
+| 1       | **6.76 s** (min 5.93 / max 8.56) | ~13.1 s                           | ~1.9×          |
+| 2       | **4.23 s** (min 3.63 / max 5.50) | —                                 | —              |
+| 3       | **3.29 s** (min 3.26 / max 4.35) | ~9.7 s                            | ~2.9×          |
+
+**Storage decomposition (per merge, `fold_storage`, mount=true):**
+
+- `storage_upload_ms`: min 145 / median 165 / max 243 (an atomic file write +
+  rename — replaces a whole `gcloud storage cp` subprocess that cost ~0.7–0.8 s
+  per copy in the #203 CLI regime).
+- `storage_download_ms`: min 0 / median 0 / max 248 (file read; often 0 ms
+  once gcsfuse's metadata/page cache is warm).
+- `proof_visibility_wait_ms` (read-after-write barrier wait): **0 ms for the
+  vast majority of merges; one level-2 merge on a worker that did NOT write its
+  inputs observed a 118 ms cross-machine visibility lag** (one input needed a
+  second read after a 50 ms poll). So the gcsfuse close-to-open consistency lag
+  is REAL and cross-machine-visible, but at k=4 it stayed well under the
+  ~0.5 s prove step and did NOT dominate the critical path.
+
+**Correctness (the gate):** every one of the 9 live reps (3 worker counts × 3
+reps) produced a final proof that **VERIFIED** and was **BIT-IDENTICAL** across
+all worker counts — one fingerprint for the whole matrix:
+`pi_fingerprint=0x4d78b8bf97d2e99b`, `all_reps_bit_identical=true` for each
+config. The on-bucket layout confirmed the unchanged key scheme transited as
+files: leaves `206000004/{0..3}`, merges `206000004/m/1/{0,1}` +
+`206000004/m/2/0`; intermediate proof size held at the constant ~422 KB
+(422,120 B leaf). The hermetic real-proving e2e (`distributed_fold_e2e` with
+`LIGHTER_E2E_MOUNT=1`, k=4) independently confirmed distributed == in-process,
+bit-identical, VERIFIES through the mount transport for workers 1/2/3/4.
+
+### Honest conclusion (one line)
+
+The mount removed the `gcloud storage cp` subprocess from the per-merge
+critical path and cut the k=4 fold wall ~1.9× (1w) to ~2.9× (3w) vs the #203
+CLI baseline, with storage now dominated by the ~165 ms atomic upload and
+near-zero (cached) downloads; the cross-machine read-after-write visibility lag
+is real (one 118 ms instance observed) but did NOT land on the critical path at
+k=4 — a clean result for the stepping-stone, with the residual write latency
+and the visibility-lag tail being the exact signals #207 should weigh against a
+pooled native GCS client or a KV substrate.
+
 ## Refs
 
 - PR #194 — parallel fold implementation (stays merged; correct).
@@ -517,4 +589,11 @@ store rather than the plane) and is explicitly OUT OF #203's transport scope
   "Native streaming-pull re-measurement" section above is its result — the plane
   poll latency is removed; the residual barrier is now the GCS-CLI proof-store
   transit, the next lever).
+- #206 — mount-backed proof store + storage decomposition instrumentation
+  (DELIVERED; the "Mount-backed proof store" section above is its result — the
+  `gcloud storage cp` subprocess is off the per-merge critical path; storage is
+  now atomic file I/O on a gcsfuse mount, with `storage_upload_ms` /
+  `storage_download_ms` / `proof_visibility_wait_ms` decomposed for #207).
+- #207 — storage-substrate evaluation (DESIGN; consumes #206's measured
+  decomposition to decide pooled native GCS client vs a KV substrate).
 - ADR-0006 — distributed-prover-conductor (production topology source).

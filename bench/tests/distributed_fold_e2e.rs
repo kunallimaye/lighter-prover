@@ -417,10 +417,33 @@ fn run_e2e() {
     let store_dir = work.join("bucket");
     std::fs::create_dir_all(&store_dir).expect("create store dir");
     let shim = write_gcloud_shim(&work, &store_dir);
+    // Issue #206: a mount root selects mount-mode file I/O over the gcloud
+    // shim. `LIGHTER_E2E_MOUNT=1` runs the e2e through the NEW mounted-volume
+    // transport (write/read + atomic rename against `mount_dir`); unset keeps
+    // the original gcloud-shim CLI path. Either way the fold must be
+    // bit-identical + VERIFY — the equivalence contract is transport-agnostic.
+    let mount_dir = work.join("mount");
+    let use_mount = std::env::var("LIGHTER_E2E_MOUNT").is_ok();
+    if use_mount {
+        std::fs::create_dir_all(&mount_dir).expect("create mount dir");
+    }
     let proof_store = GcloudStorage::new(StorageConfig {
         bucket: "e2e-local-bucket".into(),
         gcloud_bin: shim.to_string_lossy().to_string(),
+        mount_path: if use_mount {
+            mount_dir.to_string_lossy().to_string()
+        } else {
+            String::new()
+        },
     });
+    println!(
+        "[e2e] proof-store transport: {} (issue #206)",
+        if use_mount {
+            "MOUNTED volume (file I/O + atomic rename)"
+        } else {
+            "gcloud storage cp shim (CLI)"
+        }
+    );
     assert!(
         proof_store.config().enabled(),
         "local proof store must be enabled"
