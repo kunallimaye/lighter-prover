@@ -55,7 +55,7 @@ cell_memory_request = "44Gi" # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L4
 # Issue #216: a REAL arm64 (neoverse-v2/Axion) bench image that already EXISTS
 # in Artifact Registry — no build needed, just this pinned SHA. Re-pin to a
 # newer cicd/cloudbuild.yaml output as the bench binary advances.
-cell_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:944794880a1df0718ed5237a67b864718e94d7ab-neoverse-v2"
+cell_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:1d5036b5369fcf6a966738e6de8265b6e5a6e800-neoverse-v2"
 # Issue #209: the cell ships its REAL L2 leaf proof to the shared proof store
 # so the coordinator can DOWNLOAD it and run the REAL merge tree + L4.
 # Issue #216: --project and --proof-bucket are NO LONGER literal placeholders
@@ -88,7 +88,7 @@ coordinator_arch           = "arm64"
 coordinator_cpu_request    = "43"   # whole box; coordinator-specific profile UNMODELED (#113) — proxy
 coordinator_memory_request = "44Gi" # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
 # Issue #216: same REAL arm64 (neoverse-v2) bench image as the cells.
-coordinator_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:944794880a1df0718ed5237a67b864718e94d7ab-neoverse-v2"
+coordinator_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:1d5036b5369fcf6a966738e6de8265b6e5a6e800-neoverse-v2"
 # Issue #209: --proof-bucket / --proof-mount-path point the coordinator at
 # the SAME bucket the cells uploaded their L2 leaf proofs to, so
 # real_fold_enabled = TRUE and the coordinator runs the REAL merge tree +
