@@ -45,9 +45,32 @@ def main():
     target = data.get('gcp', {}).get('target', {})
     if not target and 'target' in data:
       target = data.get('target', {})
+
+    build_sa_obj = target.get('build_sa', {})
+    runtime_sa_obj = target.get('runtime_sa', {})
+
+    build_email = (
+        build_sa_obj.get('email', '')
+        if isinstance(build_sa_obj, dict)
+        else str(build_sa_obj)
+    )
+    runtime_email = (
+        runtime_sa_obj.get('email', '')
+        if isinstance(runtime_sa_obj, dict)
+        else str(runtime_sa_obj)
+    )
+
     cleaned = {
-        'builder_sa_email': str(target.get('build_sa', '')),
-        'runtime_sa_email': str(target.get('runtime_sa', '')),
+        'builder_sa_email': build_email,
+        'runtime_sa_email': runtime_email,
+        'builder_sa_roles': (
+            build_sa_obj.get('roles', []) if isinstance(build_sa_obj, dict) else []
+        ),
+        'runtime_sa_roles': (
+            runtime_sa_obj.get('roles', [])
+            if isinstance(runtime_sa_obj, dict)
+            else []
+        ),
     }
     print(json.dumps(cleaned))
 

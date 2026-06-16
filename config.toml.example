@@ -1,10 +1,10 @@
-# Project Configuration & Infrastructure VMs List
+# Project Configuration & Infrastructure Toolkit
 #
 # Copy this file to config.toml and customize your settings.
 # config.toml is gitignored — never commit it.
 #
 # This file defines the Google Cloud infrastructure and target Service Accounts
-# that will be provisioned/used when running `make cloud-deploy`.
+# (including required IAM role allocations) for the Lighter prover platform.
 
 [project]
 name = "lighter-prover"
@@ -13,17 +13,32 @@ name = "lighter-prover"
 project = "kunal-scratch"
 region  = "us-central1"
 
-# ─── Target Service Accounts ───────────────────────────────────────────
-# Identities used during infrastructure deployment and runtime execution.
-# These service accounts must exist prior to running `make cloud-deploy`.
+# ─── Target Service Accounts & Role Allocations ────────────────────────
+# Identities and IAM permissions required by Cloud Build and runtime workloads.
+# Run `make cloud-admin-init` to automatically create these Service Accounts
+# and bind the enumerated IAM roles on your Google Cloud project.
 
-[gcp.target]
-build_sa   = "lighter-builder@kunal-scratch.iam.gserviceaccount.com"
-runtime_sa = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
+[gcp.target.build_sa]
+email = "lighter-builder@kunal-scratch.iam.gserviceaccount.com"
+# Roles expected by Cloud Build to execute Terraform pipelines and push images.
+roles = [
+  "roles/cloudbuild.builds.builder",
+  "roles/storage.objectAdmin",
+  "roles/artifactregistry.admin"
+]
+
+[gcp.target.runtime_sa]
+email = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
+# Least-privilege roles expected by GCE instances / Cloud Run workloads at runtime.
+roles = [
+  "roles/artifactregistry.reader",
+  "roles/logging.logWriter",
+  "roles/monitoring.metricWriter"
+]
 
 # ─── Virtual Machines List ─────────────────────────────────────────────
 # Add or remove VM entries below. Each block defines an individual GCE instance
-# that will be provisioned by Terraform.
+# provisioned when running `make cloud-deploy`.
 
 [vms]
 

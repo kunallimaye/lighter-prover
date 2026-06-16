@@ -70,9 +70,8 @@ _verify_service_accounts() {
     _die "Service account configuration file missing."
   fi
 
-  local build_sa
+  local build_sa runtime_sa
   build_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
-  local runtime_sa
   runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
 
   if [[ -z "${build_sa}" ]]; then
@@ -93,6 +92,40 @@ _verify_service_accounts() {
     _die "Runtime SA ${runtime_sa} does not exist or is not accessible. Contract violation: job failed."
   fi
   _log_ok "  Runtime SA verified."
+}
+
+_provision_sa_and_roles() {
+  local project="$1"
+  local sa_email="$2"
+  local roles_key="$3"
+  local json_file="$4"
+
+  if [[ -z "${sa_email}" ]]; then return 0; fi
+
+  local sa_name="${sa_email%%@*}"
+
+  _log_info "Checking SA identity: ${sa_email}..."
+  if ! gcloud iam service-accounts describe "${sa_email}" --project="${project}" &>/dev/null; then
+    _log_info "  SA not found, creating '${sa_name}'..."
+    gcloud iam service-accounts create "${sa_name}" \
+      --project="${project}" \
+      --display-name="Managed Lighter SA (${sa_name})" \
+      --quiet
+    _log_ok "  Created ${sa_email}"
+  else
+    _log_ok "  SA identity already exists."
+  fi
+
+  local role
+  while IFS= read -r role; do
+    if [[ -z "${role}" ]]; then continue; fi
+    _log_info "  Allocating IAM role '${role}' to ${sa_email}..."
+    gcloud projects add-iam-policy-binding "${project}" \
+      --member="serviceAccount:${sa_email}" \
+      --role="${role}" \
+      --condition=None \
+      --quiet >/dev/null
+  done < <(python3 -c "import json; [print(r) for r in json.load(open('${json_file}')).get('${roles_key}', [])]" 2>/dev/null || true)
 }
 
 _execute_cloudbuild() {
@@ -127,6 +160,31 @@ _execute_cloudbuild() {
 
 # ─── Operator Verbs ───────────────────────────────────────────────────
 
+cloud_admin_init() {
+  local build_project
+  build_project="$(_resolve_build_project)"
+
+  _log_info "Bootstrapping GCP target Service Accounts & IAM roles (cloud-admin-init)..."
+  _log_info "  Target Project: ${build_project}"
+
+  local config_path="${CONFIG_TOML:-config.toml}"
+  if [[ ! -f "${config_path}" ]]; then
+    _die "Configuration file ${config_path} missing. Create it from config.toml.example first."
+  fi
+
+  _generate_tfvars
+  local target_json="infra-as-code/terraform/target.auto.tfvars.json"
+
+  local build_sa runtime_sa
+  build_sa="$(python3 -c "import json; print(json.load(open('${target_json}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+  runtime_sa="$(python3 -c "import json; print(json.load(open('${target_json}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+
+  _provision_sa_and_roles "${build_project}" "${build_sa}" "builder_sa_roles" "${target_json}"
+  _provision_sa_and_roles "${build_project}" "${runtime_sa}" "runtime_sa_roles" "${target_json}"
+
+  _log_ok "Target Service Accounts and IAM role allocations successfully provisioned."
+}
+
 cloud_deploy() {
   _execute_cloudbuild "apply"
 }
@@ -142,8 +200,9 @@ cloud_destroy() {
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
-  cloud-deploy)  cloud_deploy ;;
-  cloud-plan)    cloud_plan ;;
-  cloud-destroy) cloud_destroy ;;
-  *) _die "Usage: $0 {cloud-deploy|cloud-plan|cloud-destroy}" ;;
+  cloud-admin-init) cloud_admin_init ;;
+  cloud-deploy)     cloud_deploy ;;
+  cloud-plan)       cloud_plan ;;
+  cloud-destroy)    cloud_destroy ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-deploy|cloud-plan|cloud-destroy}" ;;
 esac
