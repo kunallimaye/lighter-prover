@@ -110,7 +110,13 @@ coordinator_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/ben
 # agree on the merge-plane names. The leader is wired with the merge-TASK topic
 # it publishes to + the merge-RESULT subscription it barriers on; the fold
 # workers (fold_worker_command) take the matching merge-task SUBSCRIPTION +
-# merge-result TOPIC. These names are the enable_merge_plane defaults.
+# merge-result TOPIC.
+# Issue #233: these merge names are now TIER-PREFIXED (lighter-prover-scale-
+# 0p2pct-merge-*), exactly like the chunk/results planes, instead of the generic
+# enable_merge_plane defaults — so two scale tiers running concurrently get
+# tier-isolated merge planes and never collide. The merge_* variable overrides
+# below (next to enable_merge_plane) provision Pub/Sub names that MATCH these
+# flag values.
 coordinator_command = [
   "/usr/local/bin/prover", "--mode", "coordinator",
   "--dispatch-subscription", "lighter-prover-scale-0p2pct-dispatch-sub",
@@ -118,8 +124,8 @@ coordinator_command = [
   "--results-subscription", "lighter-prover-scale-0p2pct-results-sub",
   "--proof-mount-path", "/mnt/proof-store",
   "--fold-distributed",
-  "--merge-task-topic", "lighter-prover-merge-task",
-  "--merge-result-subscription", "lighter-prover-merge-result-sub",
+  "--merge-task-topic", "lighter-prover-scale-0p2pct-merge-task",
+  "--merge-result-subscription", "lighter-prover-scale-0p2pct-merge-result-sub",
   "--native-merge-plane",
   "--tx-per-proof", "9",
   "--poll-interval-s", "2",
@@ -160,8 +166,8 @@ fold_worker_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/ben
 # (#205). --tx-per-proof 9 matches the cell leaf granularity.
 fold_worker_command = [
   "/usr/local/bin/prover", "--mode", "fold-worker",
-  "--merge-task-subscription", "lighter-prover-merge-task-sub",
-  "--merge-result-topic", "lighter-prover-merge-result",
+  "--merge-task-subscription", "lighter-prover-scale-0p2pct-merge-task-sub",
+  "--merge-result-topic", "lighter-prover-scale-0p2pct-merge-result",
   "--proof-mount-path", "/mnt/proof-store",
   "--native-merge-plane",
   "--tx-per-proof", "9",
@@ -199,6 +205,14 @@ results_subscription = "lighter-prover-scale-0p2pct-results-sub"
 enable_proof_store = true
 enable_proof_mount = true
 enable_merge_plane = true
+# Issue #233: tier-prefix the provisioned merge-plane Pub/Sub names (like the
+# chunk/results overrides above) so the PROVISIONED topic/sub names MATCH the
+# tier-prefixed flag values in coordinator_command/fold_worker_command, and so
+# concurrent scale tiers get tier-isolated merge planes.
+merge_task_topic          = "lighter-prover-scale-0p2pct-merge-task"
+merge_task_subscription   = "lighter-prover-scale-0p2pct-merge-task-sub"
+merge_result_topic        = "lighter-prover-scale-0p2pct-merge-result"
+merge_result_subscription = "lighter-prover-scale-0p2pct-merge-result-sub"
 
 # ── Autoscaling on Pub/Sub backlog ──
 pubsub_topic        = "lighter-prover-scale-0p2pct-dispatch"

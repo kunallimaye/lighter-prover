@@ -2442,6 +2442,21 @@ fn run_coordinator(args: &Args) {
         );
         std::process::exit(2);
     }
+    // Issue #233: when running the cross-machine distributed fold, the
+    // leader publishes merge tasks to the merge-task topic and barriers on
+    // the merge-result subscription. Validate that plane UP FRONT — before
+    // we gather a single block — so a misconfigured distributed run exits
+    // immediately with a clear error rather than gathering a full block and
+    // then bailing mid-fold inside coordinator_distributed_fold (#198/#229).
+    if args.fold_distributed
+        && (cfg.merge_task_topic.is_empty() || cfg.merge_result_subscription.is_empty())
+    {
+        eprintln!(
+            "error: --mode coordinator --fold-distributed requires --merge-task-topic and \
+             --merge-result-subscription (the merge-task plane); none configured"
+        );
+        std::process::exit(2);
+    }
     cfg.chunk_subscription.clear();
     let coord_project = cfg.project.clone();
     let bus = GcloudPubSub::new(cfg);
