@@ -48,7 +48,7 @@ _build_substitutions() {
   local bucket="${TF_STATE_BUCKET:-${build_project}-tfstate}"
   local prefix="${TF_STATE_PREFIX:-lighter-prover}"
   local region="${GCP_REGION:-us-central1}"
-  local ar_repo="${AR_REPO:-lighter-prover}"
+  local ar_repo="${AR_REPO:-lighter-prover-iac}"
   local orch_project="${ORCH_PROJECT:-${build_project}}"
   local runtime_project="${RUNTIME_PROJECT:-${build_project}}"
 

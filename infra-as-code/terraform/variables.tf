@@ -46,9 +46,9 @@ variable "runtime_region" {
 # ─── Artifact Registry ───────────────────────────────────────────────
 
 variable "ar_repo" {
-  description = "Artifact Registry repository ID for the bench image."
+  description = "Artifact Registry repository ID for managed container workloads."
   type        = string
-  default     = "lighter-prover"
+  default     = "lighter-prover-iac"
 }
 
 variable "build_machine_type" {
