@@ -302,9 +302,34 @@ variable "proof_store_bucket" {
 }
 
 variable "proof_store_pod_gsa_email" {
-  description = "Email of the EXISTING pod Google Service Account that cells/coordinators run as (Workload Identity). It already holds the pubsub roles; this module additionally grants it roles/storage.objectAdmin on the proof-store bucket ONLY (bucket-scoped, not project-wide). The SA is NOT created here."
+  description = "Email of the EXISTING pod Google Service Account that cells/coordinators run as (Workload Identity). It already holds the pubsub roles; this module additionally grants it roles/storage.objectAdmin on the proof-store bucket ONLY (bucket-scoped, not project-wide) and binds it roles/iam.workloadIdentityUser for the prover KSA. The SA is NOT created here. If null (the default), it DERIVES from project_id as \"lighter-prover-pods@$${project_id}.iam.gserviceaccount.com\" so the email follows the project; set a non-null value to override (issue #231)."
   type        = string
-  default     = "lighter-prover-pods@kunal-scratch.iam.gserviceaccount.com"
+  default     = null
+}
+
+# ─── Workload Identity for the prover pods (issue #231) ──────────────
+# Without WI the cell/coordinator pods run as the `default` KSA and cannot
+# authenticate to Pub/Sub or GCS. These variables create a dedicated KSA,
+# annotate it to the pod GSA, bind workloadIdentityUser, and set
+# service_account_name on both deployments. All defaulted so the existing
+# smoke + scale tfvars deploy WI WITHOUT any tfvars edit.
+
+variable "enable_pod_workload_identity" {
+  description = "Create the prover KSA + the roles/iam.workloadIdentityUser binding to the pod GSA, and set service_account_name on the cell/coordinator pods so they run as the pod GSA via Workload Identity (issue #231). Defaults true: WI is harmless when planes are off (smoke), and required whenever pods must auth to Pub/Sub + GCS."
+  type        = bool
+  default     = true
+}
+
+variable "pod_ksa_name" {
+  description = "Name of the Kubernetes ServiceAccount (in the `default` namespace) the prover cell/coordinator pods run as, annotated to the pod GSA for Workload Identity (issue #231)."
+  type        = string
+  default     = "prover"
+}
+
+variable "enable_pubsub_iam" {
+  description = "Also grant the pod GSA roles/pubsub.publisher + roles/pubsub.subscriber via Terraform (issue #231). Default false: the pod GSA already holds these roles out-of-band, so the default-off path VERIFIES the working grants without disturbing them. Set true to bring the pubsub grants under Terraform management (GRANT) — satisfies the issue's \"grant (or verify)\"."
+  type        = bool
+  default     = false
 }
 
 variable "proof_store_location" {
