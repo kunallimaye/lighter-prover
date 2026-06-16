@@ -6,6 +6,8 @@
 //! and the bounded-queue scheduler), so the binary and tests share the
 //! same plonky2-free code paths.
 
+pub mod account_family_native;
+pub mod account_family_tree;
 pub mod blob_encode;
 pub mod conductor;
 pub mod empty_witness;

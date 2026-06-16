@@ -61,9 +61,17 @@ use crate::prestate::{ChunkPreState, PreStateSnapshots};
 /// starting to populate the already-present optional `sibling_paths` field).
 ///
 /// `1.0` is the initial persisted schema: roots + state, with an OPTIONAL
-/// `sibling_paths` field present-but-unpopulated. #243 will ship as `1.1`
-/// (same readers, just a populated optional field) — NOT a `2.0`.
+/// `sibling_paths` field present-but-unpopulated. #243 ships as `1.1` (same
+/// readers, just a populated optional field) — NOT a `2.0`.
+///
+/// The version a corpus is STAMPED with is chosen per-document by
+/// [`PreStateCorpus::from_snapshots`]: `1.1` when any snapshot carries captured
+/// `sibling_paths`, else `1.0`. Both load on a `1.x` reader (additive MINOR).
 pub const CORPUS_SCHEMA_VERSION: &str = "1.0";
+
+/// The MINOR-bumped schema version stamped when a corpus carries captured
+/// empty-index sibling-paths (issue #243). Backward-compatible with `1.0`.
+pub const CORPUS_SCHEMA_VERSION_WITH_PATHS: &str = "1.1";
 
 /// One position's sibling-path payload — the FORWARD-COMPATIBILITY seam for
 /// issue #243.
@@ -76,11 +84,85 @@ pub const CORPUS_SCHEMA_VERSION: &str = "1.0";
 /// `"account"`, `"market"`) without this struct enumerating them up front.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SiblingPaths {
-    /// Tree-name -> ordered list of sibling hashes (root..leaf). Empty until
-    /// issue #243 populates it. `#[serde(default)]` so older corpora that omit
-    /// the key (and this whole optional field) still load.
+    /// Tree-name -> ordered list of sibling hashes (leaf-first, the
+    /// `merkle_helpers::recalculate_root` fold order). Empty until issue #243
+    /// populates it. `#[serde(default)]` so older corpora that omit the key
+    /// (and this whole optional field) still load.
     #[serde(default)]
     pub paths: std::collections::BTreeMap<String, Vec<HashOut<F>>>,
+}
+
+/// Tree-name keys used in [`SiblingPaths::paths`]. Single source of truth so
+/// the producer (#243 sweep) and consumer (padding-tx builder) never drift.
+pub const SIBLING_PATH_KEY_ACCOUNT: &str = "account";
+pub const SIBLING_PATH_KEY_ACCOUNT_PUB_DATA: &str = "account_pub_data";
+pub const SIBLING_PATH_KEY_ACCOUNT_DELTA: &str = "account_delta";
+pub const SIBLING_PATH_KEY_MARKET: &str = "market";
+
+impl SiblingPaths {
+    /// Serialize the four typed empty-index sibling-paths into the string-keyed
+    /// wire map (issue #243, schema 1.1).
+    pub fn from_empty_index_paths(paths: &crate::prestate::EmptyIndexSiblingPaths) -> Self {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(SIBLING_PATH_KEY_ACCOUNT.to_string(), paths.account.to_vec());
+        map.insert(
+            SIBLING_PATH_KEY_ACCOUNT_PUB_DATA.to_string(),
+            paths.account_pub_data.to_vec(),
+        );
+        map.insert(
+            SIBLING_PATH_KEY_ACCOUNT_DELTA.to_string(),
+            paths.account_delta.to_vec(),
+        );
+        map.insert(SIBLING_PATH_KEY_MARKET.to_string(), paths.market.to_vec());
+        Self { paths: map }
+    }
+
+    /// Deserialize the wire map back into the four typed fixed-length paths,
+    /// validating each tree is present with the right depth (honest error
+    /// otherwise — never a silently truncated path).
+    pub fn into_empty_index_paths(
+        self,
+    ) -> Result<crate::prestate::EmptyIndexSiblingPaths, CorpusError> {
+        use circuit::types::constants::{ACCOUNT_MERKLE_LEVELS, MARKET_MERKLE_LEVELS};
+
+        let take = |map: &std::collections::BTreeMap<String, Vec<HashOut<F>>>,
+                    key: &'static str,
+                    depth: usize|
+         -> Result<Vec<HashOut<F>>, CorpusError> {
+            let v = map
+                .get(key)
+                .cloned()
+                .ok_or(CorpusError::MissingSiblingPath { tree: key })?;
+            if v.len() != depth {
+                return Err(CorpusError::ShapeMismatch {
+                    field: key,
+                    expected: depth,
+                    got: v.len(),
+                });
+            }
+            Ok(v)
+        };
+
+        let account = take(&self.paths, SIBLING_PATH_KEY_ACCOUNT, ACCOUNT_MERKLE_LEVELS)?;
+        let account_pub_data = take(
+            &self.paths,
+            SIBLING_PATH_KEY_ACCOUNT_PUB_DATA,
+            ACCOUNT_MERKLE_LEVELS,
+        )?;
+        let account_delta = take(
+            &self.paths,
+            SIBLING_PATH_KEY_ACCOUNT_DELTA,
+            ACCOUNT_MERKLE_LEVELS,
+        )?;
+        let market = take(&self.paths, SIBLING_PATH_KEY_MARKET, MARKET_MERKLE_LEVELS)?;
+
+        Ok(crate::prestate::EmptyIndexSiblingPaths {
+            account: account.try_into().unwrap(),
+            account_pub_data: account_pub_data.try_into().unwrap(),
+            account_delta: account_delta.try_into().unwrap(),
+            market: market.try_into().unwrap(),
+        })
+    }
 }
 
 /// The serializable form of ONE positional snapshot (the wire twin of
@@ -119,8 +201,13 @@ impl SnapshotEntry {
             account_pub_data_tree_root: snap.account_pub_data_tree_root,
             account_delta_tree_root: snap.account_delta_tree_root,
             market_tree_root: snap.market_tree_root,
-            // Issue #243 fills this; in #257 it is always None.
-            sibling_paths: None,
+            // Issue #243: serialize the OPTIONAL captured empty-index
+            // sibling-paths (schema 1.1). `None` for roots-only snapshots
+            // (#257 behavior); `Some` when the path-capturing sweep filled them.
+            sibling_paths: snap
+                .empty_index_sibling_paths
+                .as_ref()
+                .map(SiblingPaths::from_empty_index_paths),
         }
     }
 
@@ -141,6 +228,14 @@ impl SnapshotEntry {
                 expected: POSITION_LIST_SIZE,
                 got: v.len(),
             })?;
+        // Issue #243: rehydrate the OPTIONAL empty-index sibling-paths (schema
+        // 1.1). A 1.0 corpus omits the field (`None`); a 1.1 corpus carries the
+        // four named tree paths. Malformed paths are an honest error.
+        let empty_index_sibling_paths = match self.sibling_paths {
+            Some(sp) => Some(sp.into_empty_index_paths()?),
+            None => None,
+        };
+
         Ok(ChunkPreState {
             register_stack: self.register_stack,
             all_assets,
@@ -150,6 +245,7 @@ impl SnapshotEntry {
             account_pub_data_tree_root: self.account_pub_data_tree_root,
             account_delta_tree_root: self.account_delta_tree_root,
             market_tree_root: self.market_tree_root,
+            empty_index_sibling_paths,
         })
     }
 }
@@ -169,15 +265,24 @@ pub struct PreStateCorpus {
 impl PreStateCorpus {
     /// Build the serializable corpus from an in-memory [`PreStateSnapshots`].
     pub fn from_snapshots(snaps: &PreStateSnapshots) -> Self {
+        let snapshots: Vec<SnapshotEntry> = snaps
+            .snapshots()
+            .iter()
+            .map(SnapshotEntry::from_chunk_pre_state)
+            .collect();
+        // Stamp 1.1 iff any snapshot carries captured sibling-paths (issue
+        // #243), else 1.0 (#257). Both are loadable by a 1.x reader.
+        let schema_version = if snapshots.iter().any(|s| s.sibling_paths.is_some()) {
+            CORPUS_SCHEMA_VERSION_WITH_PATHS
+        } else {
+            CORPUS_SCHEMA_VERSION
+        }
+        .to_string();
         Self {
-            schema_version: CORPUS_SCHEMA_VERSION.to_string(),
+            schema_version,
             height: snaps.height,
             created_at: snaps.created_at,
-            snapshots: snaps
-                .snapshots()
-                .iter()
-                .map(SnapshotEntry::from_chunk_pre_state)
-                .collect(),
+            snapshots,
         }
     }
 
@@ -245,6 +350,9 @@ pub enum CorpusError {
     },
     /// The corpus schema MAJOR version is not loadable by this build.
     IncompatibleVersion { found: String, supported: String },
+    /// A schema-1.1 corpus's `sibling_paths` was present but missing a required
+    /// tree's path (issue #243).
+    MissingSiblingPath { tree: &'static str },
     /// JSON (de)serialization failure.
     Json(serde_json::Error),
     /// Gzip / file I/O failure.
@@ -265,6 +373,10 @@ impl std::fmt::Display for CorpusError {
             CorpusError::IncompatibleVersion { found, supported } => write!(
                 f,
                 "pre-state corpus schema version '{found}' is incompatible with supported '{supported}' (MAJOR mismatch)"
+            ),
+            CorpusError::MissingSiblingPath { tree } => write!(
+                f,
+                "pre-state corpus sibling_paths present but missing required tree '{tree}' (issue #243 schema 1.1)"
             ),
             CorpusError::Json(e) => write!(f, "pre-state corpus JSON error: {e}"),
             CorpusError::Io(e) => write!(f, "pre-state corpus I/O error: {e}"),
@@ -415,6 +527,7 @@ mod tests {
             account_pub_data_tree_root: mk_root(2000),
             account_delta_tree_root: mk_root(3000),
             market_tree_root: mk_root(4000),
+            empty_index_sibling_paths: None,
         }
     }
 
@@ -533,16 +646,25 @@ mod tests {
             "v1.0 omits the empty optional field from the wire (additive form)"
         );
 
-        // Simulate #243 populating the field, then prove THIS (v1.0) reader
+        // Simulate #243 populating the field, then prove THIS reader
         // round-trips it without any format change. Build the populated
         // `sibling_paths` JSON from a REAL `SiblingPaths` value so its wire
         // shape (incl. the `HashOut<F>` representation) is exactly what #243
-        // would emit — never a hand-guessed shape.
+        // would emit — never a hand-guessed shape. The four trees carry
+        // CORRECTLY-SIZED paths (depth 48 for the account family, 12 for
+        // market), since #243's path-aware load validates each tree's depth.
+        use circuit::types::constants::{ACCOUNT_MERKLE_LEVELS, MARKET_MERKLE_LEVELS};
+        let acc_path: Vec<HashOut<F>> = (0..ACCOUNT_MERKLE_LEVELS)
+            .map(|i| HashOut::<F>::from_partial(&[F::from_canonical_u64(7 + i as u64)]))
+            .collect();
+        let mkt_path: Vec<HashOut<F>> = (0..MARKET_MERKLE_LEVELS)
+            .map(|i| HashOut::<F>::from_partial(&[F::from_canonical_u64(100 + i as u64)]))
+            .collect();
         let mut paths = std::collections::BTreeMap::new();
-        paths.insert(
-            "account".to_string(),
-            vec![HashOut::<F>::from_partial(&[F::from_canonical_u64(7)])],
-        );
+        paths.insert(SIBLING_PATH_KEY_ACCOUNT.to_string(), acc_path.clone());
+        paths.insert(SIBLING_PATH_KEY_ACCOUNT_PUB_DATA.to_string(), acc_path.clone());
+        paths.insert(SIBLING_PATH_KEY_ACCOUNT_DELTA.to_string(), acc_path);
+        paths.insert(SIBLING_PATH_KEY_MARKET.to_string(), mkt_path);
         let sibling_paths = SiblingPaths { paths };
         let sibling_paths_json = serde_json::to_value(&sibling_paths).unwrap();
 
@@ -564,6 +686,74 @@ mod tests {
 
         // Keep `doc` referenced (avoids an unused-mut lint on some toolchains).
         assert_eq!(doc.schema_version, CORPUS_SCHEMA_VERSION);
+    }
+
+    /// Issue #243: a corpus whose snapshots carry captured empty-index
+    /// sibling-paths is stamped 1.1, round-trips the four typed paths exactly,
+    /// and a malformed (wrong-depth) path is an honest error.
+    #[test]
+    fn schema_1_1_sibling_paths_round_trip() {
+        use circuit::types::constants::{ACCOUNT_MERKLE_LEVELS, MARKET_MERKLE_LEVELS};
+
+        let acc: [HashOut<F>; ACCOUNT_MERKLE_LEVELS] =
+            core::array::from_fn(|i| HashOut::<F>::from_partial(&[F::from_canonical_u64(i as u64 + 1)]));
+        let pd: [HashOut<F>; ACCOUNT_MERKLE_LEVELS] =
+            core::array::from_fn(|i| HashOut::<F>::from_partial(&[F::from_canonical_u64(i as u64 + 1000)]));
+        let delta: [HashOut<F>; ACCOUNT_MERKLE_LEVELS] =
+            core::array::from_fn(|i| HashOut::<F>::from_partial(&[F::from_canonical_u64(i as u64 + 2000)]));
+        let market: [HashOut<F>; MARKET_MERKLE_LEVELS] =
+            core::array::from_fn(|i| HashOut::<F>::from_partial(&[F::from_canonical_u64(i as u64 + 3000)]));
+        let paths = crate::prestate::EmptyIndexSiblingPaths {
+            account: acc,
+            account_pub_data: pd,
+            account_delta: delta,
+            market,
+        };
+
+        // A two-snapshot corpus where snapshot[0] carries the captured paths.
+        let mut snaps: Vec<ChunkPreState> = (0..2).map(|i| synthetic_snapshot(i as u64)).collect();
+        snaps[0].empty_index_sibling_paths = Some(paths.clone());
+        let corpus = PreStateSnapshots::new(123, 456, snaps);
+
+        let doc = PreStateCorpus::from_snapshots(&corpus);
+        // Carrying captured paths bumps the stamp to 1.1 (still 1.x — loadable).
+        assert_eq!(doc.schema_version, CORPUS_SCHEMA_VERSION_WITH_PATHS);
+
+        let bytes = doc.to_gzip_bytes().unwrap();
+        let back = PreStateCorpus::from_gzip_bytes(&bytes)
+            .unwrap()
+            .into_snapshots()
+            .unwrap();
+
+        let rt = back
+            .at_position(0)
+            .unwrap()
+            .empty_index_sibling_paths
+            .as_ref()
+            .expect("snapshot[0] carries paths after round-trip");
+        assert_eq!(rt.account, paths.account, "account path");
+        assert_eq!(rt.account_pub_data, paths.account_pub_data, "pub_data path");
+        assert_eq!(rt.account_delta, paths.account_delta, "delta path");
+        assert_eq!(rt.market, paths.market, "market path");
+        // snapshot[1] stays None.
+        assert!(
+            back.at_position(1)
+                .unwrap()
+                .empty_index_sibling_paths
+                .is_none()
+        );
+
+        // A wrong-depth account path is an honest ShapeMismatch, not a panic.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&doc.to_json_bytes().unwrap()).unwrap();
+        value["snapshots"][0]["sibling_paths"]["paths"][SIBLING_PATH_KEY_ACCOUNT] =
+            serde_json::json!([]);
+        let bad: PreStateCorpus = serde_json::from_value(value).unwrap();
+        let err = bad.into_snapshots().unwrap_err();
+        assert!(
+            matches!(err, CorpusError::ShapeMismatch { field: "account", .. }),
+            "wrong-depth sibling path must be a ShapeMismatch: {err}"
+        );
     }
 
     #[test]
