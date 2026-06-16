@@ -38,6 +38,7 @@ steps:
       - 'TF_VAR_builder_sa_email=${_BUILDER_SA_EMAIL}'
       - 'TF_VAR_runtime_sa_email=${_RUNTIME_SA_EMAIL}'
       - 'TF_VAR_ar_repo=${_AR_REPO}'
+      - 'TF_VAR_vms=${_VMS_JSON}'
 
 substitutions:
   _TF_ACTION: 'apply'
@@ -50,6 +51,7 @@ substitutions:
   _BUILDER_SA_EMAIL: ''
   _RUNTIME_SA_EMAIL: ''
   _AR_REPO: 'lighter-prover'
+  _VMS_JSON: '{}'
 
 options:
   logging: CLOUD_LOGGING_ONLY

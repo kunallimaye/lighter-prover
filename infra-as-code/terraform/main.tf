@@ -76,3 +76,39 @@ resource "google_artifact_registry_repository_iam_member" "runtime_reader" {
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${var.runtime_sa_email}"
 }
+
+# ─── Prover GCE VMs (from config.toml [vms]) ─────────────────────────
+
+resource "google_compute_instance" "prover_vms" {
+  for_each     = var.vms
+  provider     = google.runtime
+  name         = each.key
+  machine_type = each.value.machine_type
+  zone         = each.value.zone
+  project      = var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id
+
+  boot_disk {
+    initialize_params {
+      image = "debian-cloud/debian-12"
+      size  = each.value.disk_size_gb
+      type  = each.value.disk_type
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {
+      # Ephemeral external IP
+    }
+  }
+
+  service_account {
+    email  = var.runtime_sa_email != "" ? var.runtime_sa_email : "${var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id}-compute@developer.gserviceaccount.com"
+    scopes = ["cloud-platform"]
+  }
+
+  labels = {
+    project = "lighter-prover"
+    managed = "terraform"
+  }
+}

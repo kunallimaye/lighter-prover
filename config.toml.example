@@ -1,0 +1,32 @@
+# Project Configuration & Infrastructure VMs List
+#
+# Copy this file to config.toml and customize your settings.
+# config.toml is gitignored — never commit it.
+#
+# This file defines the Google Cloud infrastructure that will be provisioned
+# when running `make cloud-deploy`.
+
+[project]
+name = "lighter-prover"
+
+[gcp.defaults]
+project = "kunal-scratch"
+region  = "us-central1"
+
+# ─── Virtual Machines List ─────────────────────────────────────────────
+# Add or remove VM entries below. Each block defines an individual GCE instance
+# that will be provisioned by Terraform.
+
+[vms]
+
+[vms.prover-vm-1]
+machine_type = "c4-standard-8"
+zone         = "us-central1-a"
+disk_size_gb = 100
+disk_type    = "pd-ssd"
+
+[vms.prover-vm-2]
+machine_type = "c4-standard-16"
+zone         = "us-central1-b"
+disk_size_gb = 200
+disk_type    = "pd-ssd"

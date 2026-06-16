@@ -63,3 +63,16 @@ variable "runtime_sa_email" {
   type        = string
   default     = ""
 }
+
+# ─── GCE Virtual Machines ────────────────────────────────────────────
+
+variable "vms" {
+  description = "Map of VM configurations to provision."
+  type = map(object({
+    machine_type = string
+    zone         = string
+    disk_size_gb = optional(number, 100)
+    disk_type    = optional(string, "pd-ssd")
+  }))
+  default = {}
+}

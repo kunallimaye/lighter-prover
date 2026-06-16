@@ -47,10 +47,26 @@ _build_substitutions() {
 
 # ─── Core IaC Execution ───────────────────────────────────────────────
 
+_generate_tfvars() {
+  local config_path="${CONFIG_TOML:-config.toml}"
+  local target_tfvars="infra-as-code/terraform/vms.auto.tfvars.json"
+
+  _log_info "Parsing VM configurations from ${config_path}..."
+  if [[ -f "${config_path}" ]]; then
+    python3 infra-as-code/scripts/parse_vms.py "${config_path}" > "${target_tfvars}"
+    _log_info "  Generated ${target_tfvars}"
+  else
+    _log_info "  ${config_path} not found, generating empty VM set."
+    echo '{}' > "${target_tfvars}"
+  fi
+}
+
 _execute_cloudbuild() {
   local action="$1"
   local build_project
   build_project="$(_resolve_build_project)"
+
+  _generate_tfvars
 
   _log_info "Submitting IaC pipeline to Cloud Build (action: ${action})..."
   _log_info "  Build Project: ${build_project}"
