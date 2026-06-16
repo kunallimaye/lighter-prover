@@ -72,6 +72,7 @@ steps:
           -f cicd/Containerfile \
           --build-arg LIGHTER_REF=${COMMIT_SHA} \
           --build-arg TARGET_CPU=portable \
+          --build-arg CARGO_FEATURES=native-pubsub \
           -t ${_IMAGE_NAME}:${COMMIT_SHA} \
           -t ${_IMAGE_NAME}:latest \
           --push \
@@ -96,6 +97,7 @@ steps:
           -f cicd/Containerfile \
           --build-arg LIGHTER_REF=${COMMIT_SHA} \
           --build-arg TARGET_CPU=znver5 \
+          --build-arg CARGO_FEATURES=native-pubsub \
           -t ${_IMAGE_NAME}:${COMMIT_SHA}-znver5 \
           --push \
           .
@@ -113,6 +115,7 @@ steps:
           -f cicd/Containerfile \
           --build-arg LIGHTER_REF=${COMMIT_SHA} \
           --build-arg TARGET_CPU=neoverse-v2 \
+          --build-arg CARGO_FEATURES=native-pubsub \
           -t ${_IMAGE_NAME}:${COMMIT_SHA}-neoverse-v2 \
           --push \
           .
@@ -130,6 +133,7 @@ steps:
           -f cicd/Containerfile \
           --build-arg LIGHTER_REF=${COMMIT_SHA} \
           --build-arg TARGET_CPU=neoverse-n1 \
+          --build-arg CARGO_FEATURES=native-pubsub \
           -t ${_IMAGE_NAME}:${COMMIT_SHA}-neoverse-n1 \
           --push \
           .
