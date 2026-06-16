@@ -120,10 +120,46 @@ LAYER0_FINDING_D=1 cargo test -p bench --release --test prestate_finding_d \
 ### Chunk-count note (honest)
 
 With 500 txs at S=9 there are `floor(500/9) = 55` FULL 9-tx chunks (495 txs);
-the 56th chunk in the live `ceil(500/9)=56` SPLIT is a 5-tx partial. The gate
-proves the 55 full chunks (the partial is a different L1 circuit shape). At S=4
-there are `floor(500/4) = 125` full chunks. The fix is chunk-size-agnostic; the
-partial-tail chunk is handled by the coordinator's SPLIT exactly as before.
+the 56th chunk in the live `ceil(500/9)=56` SPLIT is a 5-tx partial. The
+FINDING D gate proves the 55 full chunks. At S=4 there are `floor(500/4) = 125`
+full chunks. The FINDING D fix is chunk-size-agnostic.
+
+The 56th partial chunk is **NOT** "handled by the coordinator's SPLIT exactly as
+before" — a short final chunk trips an `itertools::zip_eq` panic in
+`circuit/src/block_tx_constraints.rs` because the circuit's tx `Vec` is hard-sized
+to exactly `tx_per_proof` at `define` time (`run_cell` aligns the tx count DOWN to
+495 to avoid it). **Issue #243** makes the true `ceil(500/9)=56` reachable by
+PADDING the 56th chunk to a full 9 txs: `5` real leftover txs + `4`
+`TX_TYPE_EMPTY` txs. Empty txs mutate nothing but run every unconditional Merkle
+verification, so each padding empty must carry HONEST mid-block sibling-paths for
+the chosen empty leaf index (`EMPTY_ACCOUNT_INDEX = 2`, never touched by the 500
+txs) against the CURRENT account-family trees — NOT the all-empty/genesis paths
+(which fold the empty leaf to the EMPTY root and clash with the chained mid-block
+root, "Partition … set twice").
+
+#243 implements this host-side, with no circuit change:
+
+- **Native account-family leaf hashes** (`bench::account_family_native`) port the
+  in-circuit `AccountTarget::hash` / `AccountDeltaTarget::hash` / `MarketTarget::hash`
+  to plain Rust over Poseidon2, verified **bit-for-bit** against the circuit by
+  cheap one-shot extractor proves.
+- An **off-circuit sparse Merkle tree + path harvester** (`bench::account_family_tree`)
+  reconstructs index 2's honest sibling-path from the per-tx `(leaf, proof)` data
+  the S=1 sweep already iterates over (each proof pins the honest node hashes on
+  its leaf's root-path; unioned they cover index 2's path).
+- The sweep variant `sweep_per_tx_snapshots_with_paths` captures those paths at
+  each position and stores them in the corpus's optional `sibling_paths` field
+  (**schema 1.1**, backward-compatible with #257's 1.0 — a 1.0 reader loads 1.1
+  unchanged). Each captured path is fold-validated to the position's PROVEN root,
+  so a wrong path is never emitted (incomplete-data positions store `None`).
+- `empty_witness::mid_block_empty_tx(paths)` substitutes those honest paths into
+  an otherwise-empty tx, and `run_cell --pad-final-chunk` (off by default) appends
+  the padded 56th chunk so the cell reaches the true `ceil(tx_count/S)`.
+
+The padded 56th chunk (5 real + 4 empties) is a benchmark-valid stand-in (per-tx
+prove cost is tx-type-flat), NOT a novel mainnet block; pre-state DELIVERY remains
+a separate production term. See the env-gated `padded_final_chunk_proves_with_honest_paths`
+gate (`LAYER0_PAD_FINAL_CHUNK=1`).
 
 ## 5a. Corpus PERSISTENCE — serialize once, mount thereafter (issue #257)
 

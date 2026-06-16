@@ -389,6 +389,7 @@ fn run_bench() {
         account_pub_data_tree_root: block.old_account_pub_data_tree_root,
         account_delta_tree_root: block.old_account_delta_tree_root,
         market_tree_root: block.old_market_tree_root,
+        empty_index_sibling_paths: None,
     };
     let l1_s1 = BlockTxCircuit::define(CIRCUIT_CONFIG, 1, CHAIN_ID);
     let bt_s1 = l1_s1.target;

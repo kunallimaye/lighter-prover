@@ -117,7 +117,7 @@ fn empty_account() -> Account<F> {
 /// One-shot: builds a tiny circuit, computes the partial hashes over an empty
 /// `AccountTarget`, registers them as public inputs, proves, and reads them
 /// back. No fabricated values — the hashes are produced by the circuit itself.
-fn empty_account_partial_hashes() -> [HashOut<F>; 2] {
+pub fn empty_account_partial_hashes() -> [HashOut<F>; 2] {
     use circuit::types::account::{AccountTarget, AccountTargetWitness};
     use circuit::types::config::{C, CIRCUIT_CONFIG};
     use plonky2::field::types::Field;
@@ -175,7 +175,7 @@ fn empty_account_delta() -> AccountDelta<F> {
 /// hash path consumes from the witness). For the empty fee delta this must
 /// equal the empty delta's partial hash so `fee_account_hash` yields the empty
 /// (ZERO) leaf. One-shot extractor; no fabricated values.
-fn empty_account_delta_partial_hash() -> HashOut<F> {
+pub fn empty_account_delta_partial_hash() -> HashOut<F> {
     use circuit::types::account_delta::account_delta::{
         AccountDeltaTarget, AccountDeltaTargetWitness,
     };
@@ -364,6 +364,50 @@ pub fn empty_tx_with_fee_partial(
     }
 }
 
+/// Build a MID-BLOCK empty `TX_TYPE_EMPTY` transaction that carries HONEST
+/// current-state Merkle sibling-paths for the chosen empty leaf index
+/// ([`EMPTY_ACCOUNT_INDEX`]) instead of the all-empty/genesis paths
+/// ([`empty_tx`] uses) — issue #243.
+///
+/// ## Why this exists
+///
+/// An empty tx mutates nothing but the L1 circuit runs every UNCONDITIONAL
+/// Merkle verification in full. Mid-block, the account-family trees are NOT
+/// empty, so the all-empty sibling paths fold an empty leaf to the EMPTY root,
+/// which clashes with the chained mid-block root the circuit threads in
+/// ("Partition ... set twice"). To pad the final chunk with empties that prove
+/// mid-block, each empty tx must verify its empty leaf against the CURRENT root
+/// — i.e. carry the honest current-state sibling-paths for index 2 (whose leaf
+/// IS empty mid-block because index 2 is never touched).
+///
+/// This is a LOCALIZED swap from [`empty_tx`]: only the four account-family
+/// proof arrays (`account_tree_merkle_proofs`,
+/// `account_pub_data_tree_merkle_proofs`, `account_delta_tree_merkle_proofs`,
+/// `market_tree_merkle_proof`) are substituted with the honest paths. Every
+/// other path (asset / order-book / api-key / account-orders / position-delta)
+/// stays all-empty, because an empty tx touches NONE of those sub-trees (their
+/// leaves and roots remain the protocol empty constants regardless of
+/// mid-block account-family state).
+///
+/// All `NB_ACCOUNTS_PER_TX` account slots sit at the SAME empty index 2, so
+/// they share the one honest index-2 path per tree.
+pub fn mid_block_empty_tx(
+    fee_partial: [HashOut<F>; 2],
+    fee_delta_partial: HashOut<F>,
+    paths: &crate::prestate::EmptyIndexSiblingPaths,
+) -> Tx<F> {
+    let mut tx = empty_tx_with_fee_partial(fee_partial, fee_delta_partial);
+
+    // Substitute the honest current-state index-2 paths at the four
+    // account-family proof-array sites (all three account slots are index 2).
+    tx.account_tree_merkle_proofs = core::array::from_fn(|_| paths.account);
+    tx.account_pub_data_tree_merkle_proofs = core::array::from_fn(|_| paths.account_pub_data);
+    tx.account_delta_tree_merkle_proofs = core::array::from_fn(|_| paths.account_delta);
+    tx.market_tree_merkle_proof = paths.market;
+
+    tx
+}
+
 /// Build the fully-empty genesis `Block<F>` with `tx_count` empty txs. All
 /// trees are empty (roots = the EMPTY_*_TREE_ROOT constants), and the
 /// state/validium roots are computed natively via the `seed.rs` recipe so the
@@ -455,6 +499,50 @@ mod tests {
         let tx = empty_tx();
         assert!(tx.is_empty());
         assert_eq!(tx.market_before.order_book_root, EMPTY_ORDER_BOOK_TREE_ROOT);
+    }
+
+    #[test]
+    fn mid_block_empty_tx_is_structurally_valid() {
+        use crate::prestate::EmptyIndexSiblingPaths;
+
+        // Honest synthetic paths: an all-empty path folds the empty leaf to the
+        // empty root, so it is a STRUCTURALLY valid stand-in for the harness
+        // here (the real honest mid-block paths come from the sweep). We use the
+        // module's own empty paths so the substitution sites are exercised.
+        let paths = EmptyIndexSiblingPaths {
+            account: empty_merkle_proof::<ACCOUNT_MERKLE_LEVELS>(),
+            account_pub_data: empty_merkle_proof::<ACCOUNT_MERKLE_LEVELS>(),
+            account_delta: empty_merkle_proof::<ACCOUNT_MERKLE_LEVELS>(),
+            market: empty_merkle_proof::<MARKET_MERKLE_LEVELS>(),
+        };
+
+        let fee_partial = [HashOut::<F>::ZERO; 2];
+        let fee_delta_partial = HashOut::<F>::ZERO;
+        let tx = mid_block_empty_tx(fee_partial, fee_delta_partial, &paths);
+
+        // Still an empty tx (tx_type unchanged) with the empty order-book root.
+        assert!(tx.is_empty());
+        assert_eq!(tx.market_before.order_book_root, EMPTY_ORDER_BOOK_TREE_ROOT);
+
+        // The four account-family proof arrays were substituted with the
+        // supplied honest paths (all NB_ACCOUNTS_PER_TX slots share index 2).
+        for slot in tx.account_tree_merkle_proofs.iter() {
+            assert_eq!(*slot, paths.account);
+        }
+        for slot in tx.account_pub_data_tree_merkle_proofs.iter() {
+            assert_eq!(*slot, paths.account_pub_data);
+        }
+        for slot in tx.account_delta_tree_merkle_proofs.iter() {
+            assert_eq!(*slot, paths.account_delta);
+        }
+        assert_eq!(tx.market_tree_merkle_proof, paths.market);
+
+        // Sub-trees an empty tx does NOT touch stay all-empty (api-key path is
+        // the canonical empty path).
+        assert_eq!(
+            tx.api_key_tree_merkle_proof,
+            empty_merkle_proof::<API_KEY_MERKLE_LEVELS>()
+        );
     }
 
     #[test]

@@ -253,6 +253,17 @@ struct Args {
     #[arg(long, env = "LIGHTER_TX_LIMIT", default_value_t = DEFAULT_TX_LIMIT)]
     tx_limit: usize,
 
+    /// Issue #243: pad the final (short) chunk with `TX_TYPE_EMPTY` txs to a
+    /// full `tx_per_proof` instead of aligning the tx count DOWN, so the cell
+    /// reaches the TRUE `ceil(tx_count / tx_per_proof)` chunk count (e.g. 56 at
+    /// S=9 over 500 txs, vs the aligned-down 55). The padding empties carry
+    /// HONEST mid-block sibling-paths captured during the S=1 sweep
+    /// (`bench::prestate::sweep_per_tx_snapshots_with_paths`); requires the
+    /// pre-state fix (FINDING D) to be ON and a path-carrying corpus. Off by
+    /// default — existing benchmark runs are unchanged.
+    #[arg(long, env = "LIGHTER_PAD_FINAL_CHUNK", default_value_t = false)]
+    pad_final_chunk: bool,
+
     /// Streaming mode (issue #49): read a JSONL block trace conforming
     /// to bench/trace-format.md on stdin, fan each arrival out into
     /// ceil(tx_count / tx_per_proof) chunk jobs over a bounded queue,
@@ -1752,24 +1763,55 @@ fn run_cell(args: &Args) {
         );
         std::process::exit(2);
     }
+    // The largest multiple of tx_per_proof that fits both tx_limit and the
+    // available txs (the aligned-down count — the pre-#243 behavior).
     let aligned_limit = (args.tx_limit / args.tx_per_proof) * args.tx_per_proof;
     let effective_limit =
         aligned_limit.min((block.txs.len() / args.tx_per_proof) * args.tx_per_proof);
-    let pool: Vec<Vec<_>> = block.txs[..effective_limit]
+
+    // Issue #243: when --pad-final-chunk is set, consume the SHORT remainder too
+    // (up to tx_limit / available) and pad the final chunk with empties so the
+    // cell reaches the TRUE ceil(tx_count / S). Otherwise behave exactly as
+    // before (align down; no short final chunk).
+    let total_available = block.txs.len().min(args.tx_limit);
+    let remainder = if args.pad_final_chunk {
+        total_available - (total_available / args.tx_per_proof) * args.tx_per_proof
+    } else {
+        0
+    };
+    // The full (real, S-wide) chunks. The optional padded final chunk is
+    // appended AFTER the positional snapshots exist (it needs their captured
+    // sibling-paths for the padding empties).
+    let real_tx_limit = if args.pad_final_chunk && remainder > 0 {
+        (total_available / args.tx_per_proof) * args.tx_per_proof
+    } else {
+        effective_limit
+    };
+    let mut pool: Vec<Vec<_>> = block.txs[..real_tx_limit]
         .chunks(args.tx_per_proof)
         .map(|c| c.to_vec())
         .collect();
-    let pool_total = pool.len();
+    // The real leftover txs that the padded final chunk will start with.
+    let final_chunk_real_txs: Vec<_> = if args.pad_final_chunk && remainder > 0 {
+        block.txs[real_tx_limit..real_tx_limit + remainder].to_vec()
+    } else {
+        Vec::new()
+    };
+    if args.pad_final_chunk && remainder > 0 {
+        info!(
+            "cell: --pad-final-chunk ON (issue #243): {} full {}-tx chunks + 1 PADDED final \
+             chunk ({} real + {} TX_TYPE_EMPTY) = {} chunks (true ceil({}/{}))",
+            pool.len(),
+            args.tx_per_proof,
+            remainder,
+            args.tx_per_proof - remainder,
+            pool.len() + 1,
+            total_available,
+            args.tx_per_proof,
+        );
+    }
+    // `pool_total` is finalized AFTER the optional padded chunk is appended.
     let corpus_height: u64 = block.block_number;
-    let witness_corpus: MountedCorpus<usize> = MountedCorpus::single_block(
-        corpus_height,
-        (0..pool_total).map(|i| (i, args.tx_per_proof)).collect(),
-    );
-    info!(
-        "cell: witness plane = k=1 mounted corpus at height {} with {} slices \
-         (ADR-0008 §1.4); witness_fetch_ms is the LOCAL-RESOLVE FLOOR",
-        corpus_height, pool_total
-    );
 
     // ---- Build circuits ONCE (resident; identical to the stream path) ----
     let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, args.tx_per_proof, CHAIN_ID);
@@ -1897,6 +1939,7 @@ fn run_cell(args: &Args) {
                 account_pub_data_tree_root: block.old_account_pub_data_tree_root,
                 account_delta_tree_root: block.old_account_delta_tree_root,
                 market_tree_root: block.old_market_tree_root,
+                empty_index_sibling_paths: None,
             };
             // The sweep proves SINGLE-tx steps, so it needs an S=1 L1 circuit --
             // NOT the cell's serving circuit `data` (built at S=tx_per_proof). A
@@ -1907,15 +1950,38 @@ fn run_cell(args: &Args) {
             let sweep_bt = sweep_circuit.target;
             let sweep_data = sweep_circuit.builder.build::<C>();
             let sweep_t = Instant::now();
-            let snaps = sweep_per_tx_snapshots(
-                block.block_number,
-                created_at,
-                initial,
-                &block.txs[..effective_limit],
-                &sweep_data,
-                &sweep_bt,
-                |_pos, _wall_ms| {},
-            );
+            // Issue #243: with --pad-final-chunk, sweep the FULL real chunk
+            // range (so `snapshots[S * num_full_chunks]` — the padded chunk's
+            // pre-state — exists) AND capture the empty-index sibling-paths the
+            // padding empties need. Otherwise the roots-only sweep, unchanged.
+            let snaps = if args.pad_final_chunk && remainder > 0 {
+                // Sweep through the REMAINDER txs too (total_available), so the
+                // padded chunk's pre-state position (`real_tx_limit`) is captured
+                // as a MID-loop snapshot — its sibling-path is harvested from the
+                // first remainder tx's proofs (which are against the root at
+                // `real_tx_limit`). Sweeping only `real_tx_limit` would leave that
+                // position as the trailing post-state snapshot, which carries no
+                // captured path (no following tx supplies proofs).
+                bench::prestate::sweep_per_tx_snapshots_with_paths(
+                    block.block_number,
+                    created_at,
+                    initial,
+                    &block.txs[..total_available],
+                    &sweep_data,
+                    &sweep_bt,
+                    |_pos, _wall_ms| {},
+                )
+            } else {
+                sweep_per_tx_snapshots(
+                    block.block_number,
+                    created_at,
+                    initial,
+                    &block.txs[..effective_limit],
+                    &sweep_data,
+                    &sweep_bt,
+                    |_pos, _wall_ms| {},
+                )
+            };
             info!(
                 "cell: positional pre-state corpus REGENERATED via sweep: {} snapshots in {:?}",
                 snaps.len(),
@@ -1955,6 +2021,79 @@ fn run_cell(args: &Args) {
         );
         None
     };
+
+    // ---- Issue #243: append the PADDED final chunk -------------------------
+    //
+    // With --pad-final-chunk and a non-zero remainder, append ONE final chunk =
+    // the real leftover txs + (S - remainder) honest mid-block empties. The
+    // empties carry the empty-index sibling-paths captured at the padded chunk's
+    // pre-state position (`snapshots[S * num_full_chunks]`) by the
+    // path-capturing sweep. If the corpus lacks captured paths at that position
+    // (e.g. a roots-only #257 corpus, or a position the harvester could not
+    // complete), padding is SKIPPED with a loud warning rather than emitting a
+    // chunk with wrong (genesis) paths that would fail to prove.
+    if args.pad_final_chunk && remainder > 0 {
+        let num_full_chunks = pool.len();
+        let pad_pre_pos = args.tx_per_proof * num_full_chunks;
+        let captured = positional_snapshots
+            .as_ref()
+            .and_then(|s| s.at_position(pad_pre_pos))
+            .and_then(|snap| snap.empty_index_sibling_paths.clone());
+
+        match captured {
+            Some(paths) => {
+                // Derive the empty fee-account partial hashes once (reused for
+                // every padding empty), exactly as `empty_genesis_block` does.
+                let fee_partial = bench::empty_witness::empty_account_partial_hashes();
+                let fee_delta_partial =
+                    bench::empty_witness::empty_account_delta_partial_hash();
+
+                let mut final_chunk = final_chunk_real_txs.clone();
+                let pad_count = args.tx_per_proof - remainder;
+                for _ in 0..pad_count {
+                    final_chunk.push(bench::empty_witness::mid_block_empty_tx(
+                        fee_partial,
+                        fee_delta_partial,
+                        &paths,
+                    ));
+                }
+                assert_eq!(
+                    final_chunk.len(),
+                    args.tx_per_proof,
+                    "padded final chunk must be exactly tx_per_proof wide"
+                );
+                pool.push(final_chunk);
+                info!(
+                    "cell: appended PADDED final chunk #{} ({} real + {} empties) with HONEST \
+                     mid-block sibling-paths from snapshot[{}] (issue #243)",
+                    num_full_chunks, remainder, pad_count, pad_pre_pos
+                );
+            }
+            None => {
+                log::warn!(
+                    "cell: --pad-final-chunk requested but NO captured sibling-paths at \
+                     snapshot[{}] (corpus is roots-only or path-capture was incomplete); \
+                     SKIPPING padding — proving the {} full chunks only (issue #243)",
+                    pad_pre_pos,
+                    num_full_chunks
+                );
+            }
+        }
+    }
+
+    // Finalize the pool width AFTER any padded chunk is appended, then build the
+    // mounted witness corpus over the final slice count.
+    let pool_total = pool.len();
+    let witness_corpus: MountedCorpus<usize> = MountedCorpus::single_block(
+        corpus_height,
+        (0..pool_total).map(|i| (i, args.tx_per_proof)).collect(),
+    );
+    info!(
+        "cell: witness plane = k=1 mounted corpus at height {} with {} slices \
+         (ADR-0008 §1.4); witness_fetch_ms is the LOCAL-RESOLVE FLOOR",
+        corpus_height, pool_total
+    );
+
     info!("cell: circuits resident; entering chunk-prove loop");
 
     // Graceful shutdown (issue #234): a SIGINT/SIGTERM flips this flag; we
@@ -3111,6 +3250,7 @@ fn run_tree_fold(
             account_pub_data_tree_root,
             account_delta_tree_root,
             market_tree_root,
+            empty_index_sibling_paths: None,
         });
 
         let block_tx = BlockTx {
@@ -4753,6 +4893,7 @@ fn fold_bench_stage_leaves(
         account_pub_data_tree_root: block.old_account_pub_data_tree_root,
         account_delta_tree_root: block.old_account_delta_tree_root,
         market_tree_root: block.old_market_tree_root,
+        empty_index_sibling_paths: None,
     };
     let l1_s1 = BlockTxCircuit::define(CIRCUIT_CONFIG, 1, CHAIN_ID);
     let bt_s1 = l1_s1.target;
