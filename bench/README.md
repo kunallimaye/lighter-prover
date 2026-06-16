@@ -208,6 +208,60 @@ Each fixture carries `BlockMessage {height, tx_count}` so the coordinator
 splits k=24 / k=32 at S=9. Use `--block-rate` to control how fast blocks
 arrive without changing `k`.
 
+### Bimodal sampled load (issue #220)
+
+A third axis — **sampled per-block size** — drives a mainnet-faithful
+mix into the Tier-2 keep-pace phase (consumed by #214 Phase B). The
+canonical 7-band weights live in `bench/feeder/size_distributions.py`
+(`MAINNET_BIMODAL_COUNTS`) as the single-source-of-truth, with the
+same mix documented in `bench/trace-format.md` §4 (provenance header)
+for the #212 mainnet shape: ~11% blocks at `tx==1`, ~74% pinned to
+the chain's 500-tx cap, the long tail in between. Sampling is seeded
+and explicitly RNG-injected (no module-level `random`) so the same
+`--seed N` always produces a byte-identical stream.
+
+- `--size-distribution bimodal` — the #212 mix (the default Tier-2
+  load).
+- `--size-dist-file PATH` — a custom JSON sampler (same band partition,
+  custom weights / representatives).
+- `--seed N` — required when sampling; pins determinism.
+- `--histogram-out PATH` — optional JSON sidecar with the realized
+  per-band counts + sampler config + seed (audit artifact). A
+  `REALIZED_HISTOGRAM eq_1=N1 ... eq_500=N7 total=N` line is always
+  emitted on stderr at end of run.
+
+```bash
+# Regenerate the committed Tier-2 fixture (byte-deterministic body):
+python3 bench/feeder/feeder.py synth-peak \
+  --size-distribution bimodal --seed 220 \
+  --block-rate 11.08 --duration 60s --dry-run \
+  --histogram-out bench/feeder/fixtures/synth_bimodal_mainnet.histogram.json \
+  > bench/feeder/fixtures/synth_bimodal_mainnet.jsonl
+
+# Drive Phase B live with the native publisher bridge (no gcloud
+# shell-out on the hot path; pacing drift + realized histogram both
+# reported on stderr at end of run):
+python3 bench/feeder/feeder.py synth-peak \
+  --size-distribution bimodal --seed 220 \
+  --block-rate 11.08 --duration 15m \
+  --publish-to <dispatch-topic> --project <gcp-project> \
+  --histogram-out /tmp/keep-pace.histogram.json
+```
+
+Honesty caveats:
+
+- Varies block **size/height** per the real distribution, **not tx
+  content** — stays inside the ADR-0009 §2 (decision) / §3 (scope)
+  sanctioned size+height boundary. Content variety remains gated on
+  #184.
+- Because the #212 mix is `k=56`-dominated (~74% of blocks pinned to
+  the cap), driving this load is the **first live end-to-end k=56
+  distributed fold** — never validated live before (prior runs were
+  `k ≤ 16` or accounting-only). The Phase B run using this feeder
+  depends on #177 + #209 + the real merge+L4 path holding (audited
+  green in #214). This feeder ships the producer; the live Phase B
+  run is a separate event tracked in #214.
+
 Dependencies: `record`, `peak-hours`, and `tx-mix` need
 `bench/feeder/requirements.txt` (`websockets`, `requests`); `replay`,
 `synth-peak`, and the tests are pure Python 3 stdlib.

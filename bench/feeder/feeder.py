@@ -28,10 +28,18 @@ import datetime
 import json
 import math
 import os
+import random
 import signal
 import statistics
 import sys
 import time
+
+# Sized-block sampler for synth-peak (issue #220). Imported eagerly: the
+# module is stdlib-only and adds no runtime cost on the constant-tx_count
+# back-compat path; co-locating with feeder.py keeps the producer pipeline
+# in one place.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import size_distributions  # noqa: E402
 
 WS_URL = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true"
 POLL_URL = "https://explorer.elliot.ai/api/blocks"
@@ -356,6 +364,27 @@ def synth_schedule(duration_s, base_ts_ms, *, tx_count=BLOCK_TX_CAP,
         yield {"ts_ms": base_ts_ms + int(round(i * cadence_ms)),
                "height": SYNTH_HEIGHT_BASE + i,
                "tx_count": int(tx_count)}
+
+
+def synth_schedule_sampled(duration_s, base_ts_ms, *, block_rate, sampler):
+    """Same shape as synth_schedule, but tx_count per block is drawn from
+    `sampler.sample()` (issue #220 — third axis: per-block size).
+
+    Cadence math identical to synth_schedule (so --block-rate semantics
+    are preserved exactly); heights are SYNTH_HEIGHT_BASE + i strictly
+    increasing (no P2 mean-fill expansion). The yielded shape
+    {ts_ms, height, tx_count} is identical so the publisher bridge
+    (publish_scheduled_events) consumes it unchanged.
+
+    Determinism: `sampler` carries its own injected random.Random; the
+    same seed + invocation produces a byte-identical stream every run.
+    """
+    cadence_ms = 1000.0 / block_rate
+    n = math.floor(duration_s * 1000.0 / cadence_ms) + 1
+    for i in range(n):
+        yield {"ts_ms": base_ts_ms + int(round(i * cadence_ms)),
+               "height": SYNTH_HEIGHT_BASE + i,
+               "tx_count": int(sampler.sample())}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -687,15 +716,80 @@ def cmd_replay(args, out=None):
 # synth-peak
 # ──────────────────────────────────────────────────────────────────────
 
+def _render_realized_histogram(hist, total):
+    """Single-line stderr summary of the realized per-band counts.
+
+    Mirrors the PacingReport end-of-run pattern: machine-greppable token
+    (REALIZED_HISTOGRAM) + key=value pairs in canonical band order.
+    """
+    parts = " ".join(f"{name}={hist[name]}"
+                     for name in size_distributions.BAND_NAMES)
+    return f"REALIZED_HISTOGRAM {parts} total={total}"
+
+
 def cmd_synth_peak(args, out=None):
     out = out or sys.stdout
     duration_s = parse_duration(args.duration)
+
+    # ── Sampled-size axis (issue #220) ─────────────────────────────────
+    # Resolve the optional size-distribution sampler. When set, --tx-count is
+    # ignored (mutex enforced below) and tx_count per block is drawn from
+    # `sampler.sample()`. The sampler carries its own random.Random(seed) so
+    # the stream is byte-deterministic given --seed.
+    size_distribution = getattr(args, "size_distribution", None)
+    size_dist_file = getattr(args, "size_dist_file", None)
+    seed = getattr(args, "seed", None)
+    histogram_out = getattr(args, "histogram_out", None)
+    def _usage_error(msg):
+        # Match argparse's usage-error exit code (2) and stderr-channel
+        # message so the caller cannot distinguish runtime vs syntax
+        # validation failures. Raises SystemExit(2).
+        print(f"error: {msg}", file=sys.stderr)
+        raise SystemExit(2)
+
+    sampler = None
+    if size_distribution is not None or size_dist_file is not None:
+        # Mutex validation already done at parse time for size_distribution
+        # vs size_dist_file; here we enforce the cross-axis rules.
+        if args.tx_count is not None:
+            _usage_error(
+                "--tx-count is mutually exclusive with --size-distribution "
+                "/ --size-dist-file (a sampler sets tx_count per block)")
+        if args.rate is not None:
+            _usage_error(
+                "--rate is undefined with a sampled size distribution "
+                "(the aggregate-tx/s axis assumes a constant tx_count); "
+                "use --block-rate B with --size-distribution")
+        if args.block_rate is None:
+            _usage_error(
+                "--block-rate is required with --size-distribution "
+                "/ --size-dist-file")
+        if seed is None:
+            _usage_error(
+                "--seed is required with --size-distribution "
+                "/ --size-dist-file (determinism contract)")
+        rng = random.Random(seed)
+        if size_distribution == "bimodal":
+            sampler = size_distributions.bimodal_mainnet_sampler(rng)
+        elif size_dist_file is not None:
+            # SystemExit from the loader is caught by main()'s argparse layer;
+            # propagate so the CLI exits 1 with the loader's clear message.
+            sampler = size_distributions.sampler_from_file(size_dist_file, rng)
+    elif seed is not None:
+        # Seed without a sampler: warn (matches the plan's "ignored otherwise
+        # with a stderr warning" contract) — the stream stays back-compat.
+        print("warning: --seed is ignored without --size-distribution "
+              "/ --size-dist-file", file=sys.stderr)
 
     # Two independent load axes (issue #217). Cadence comes from --block-rate
     # directly; if only --rate (aggregate tx/s) is given, derive the block
     # rate as rate / tx_count so the default tx_count=500 reproduces the
     # legacy cadence = 500/rate exactly (back-compat).
-    tx_count = args.tx_count
+    # tx_count defaults to BLOCK_TX_CAP when --tx-count is omitted; the
+    # explicit-None sentinel is what the sampler-vs-constant mutex check
+    # above relies on (so it MUST be filled in below the mutex, not at
+    # argparse-default time).
+    tx_count = args.tx_count if args.tx_count is not None else BLOCK_TX_CAP
     if args.block_rate is not None:
         block_rate = args.block_rate
     else:
@@ -703,6 +797,14 @@ def cmd_synth_peak(args, out=None):
 
     params = {"block_rate": block_rate, "tx_count": tx_count,
               "duration_s": duration_s}
+    if sampler is not None:
+        # When sampling, tx_count varies per block — recording the constant
+        # default would be misleading. Drop it; the sampler config is the
+        # truthful provenance.
+        params.pop("tx_count", None)
+        params["size_distribution"] = sampler.name
+        params["seed"] = int(seed)
+        params["sampler_bands"] = sampler.band_weights()
     if args.rate is not None:
         params["peak_rate"] = args.rate  # legacy axis, when --rate was used
     if args.dry_run:
@@ -723,24 +825,67 @@ def cmd_synth_peak(args, out=None):
 
     print(provenance_line("synth-peak", params), file=out, flush=True)
     base_ts = 0 if args.dry_run else int(time.time() * 1000)
-    sched = synth_schedule(duration_s, base_ts,
-                           tx_count=tx_count, block_rate=block_rate)
+    if sampler is not None:
+        sched = synth_schedule_sampled(
+            duration_s, base_ts, block_rate=block_rate, sampler=sampler)
+    else:
+        sched = synth_schedule(duration_s, base_ts,
+                               tx_count=tx_count, block_rate=block_rate)
+
+    # Wrap the iterator in an accumulator that records every emitted tx_count
+    # so the realized histogram can be emitted at end of run (success OR
+    # exception). The list lives in the enclosing scope so `finally` blocks
+    # can render even when the publisher raises.
+    realized_tx_counts = []
+
+    def _track(events):
+        for ev in events:
+            realized_tx_counts.append(int(ev["tx_count"]))
+            yield ev
+    sched = _track(sched)
+
+    def _emit_histogram():
+        """End-of-run histogram emission (stderr + optional sidecar JSON)."""
+        if sampler is None:
+            return
+        hist = size_distributions.realized_histogram(realized_tx_counts)
+        total = len(realized_tx_counts)
+        print(_render_realized_histogram(hist, total),
+              file=sys.stderr, flush=True)
+        if histogram_out is not None:
+            sidecar = {
+                "sampler": {
+                    "name": sampler.name,
+                    "bands": sampler.band_weights(),
+                },
+                "seed": int(seed),
+                "realized": hist,
+                "n_blocks": total,
+            }
+            with open(histogram_out, "w") as hf:
+                json.dump(sidecar, hf, indent=2, sort_keys=True)
+                hf.write("\n")
+
     if publish_to:
         bridge = build_publisher_bridge(project, publish_to)
         try:
             publish_scheduled_events(bridge, sched)
         finally:
             print(bridge.report.render(), file=sys.stderr, flush=True)
+            _emit_histogram()
         return 0
-    start_mono = time.monotonic()
-    for ev in sched:
-        if not args.dry_run:
-            delay = (ev["ts_ms"] - base_ts) / 1000.0 - (
-                time.monotonic() - start_mono)
-            if delay > 0:
-                time.sleep(delay)
-        print(json.dumps(ev), file=out, flush=not args.dry_run)
-    out.flush()
+    try:
+        start_mono = time.monotonic()
+        for ev in sched:
+            if not args.dry_run:
+                delay = (ev["ts_ms"] - base_ts) / 1000.0 - (
+                    time.monotonic() - start_mono)
+                if delay > 0:
+                    time.sleep(delay)
+            print(json.dumps(ev), file=out, flush=not args.dry_run)
+        out.flush()
+    finally:
+        _emit_histogram()
     return 0
 
 
@@ -1506,14 +1651,44 @@ def build_parser():
                                 "tx_count/rate seconds (back-compat: with the "
                                 "default tx_count=500 this is 500/rate)")
     ps.add_argument("--tx-count", "--block-size", dest="tx_count",
-                    type=block_tx_count, default=BLOCK_TX_CAP, metavar="N",
+                    type=block_tx_count, default=None, metavar="N",
                     help=f"txns per block, 1..{BLOCK_TX_CAP} "
                          f"(default {BLOCK_TX_CAP}); constant -> pins "
-                         "k = ceil(N/S) for a fixed-k stream")
+                         "k = ceil(N/S) for a fixed-k stream. Mutually "
+                         "exclusive with --size-distribution / "
+                         "--size-dist-file (a sampler sets tx_count per block)")
     ps.add_argument("--duration", required=True,
                     help="trace duration (e.g. 15m, 900s)")
     ps.add_argument("--dry-run", action="store_true",
                     help="print the emission schedule without sleeping")
+    # ── Sampled per-block size distribution (issue #220) ────────────────
+    # Third axis (block size) sampled from a seeded distribution; defaults
+    # to the documented #212 mainnet bimodal mix when --size-distribution
+    # bimodal is set. Mutually exclusive with --tx-count. Requires --seed
+    # (determinism contract: same seed -> byte-identical stream).
+    size_axis = ps.add_mutually_exclusive_group()
+    size_axis.add_argument(
+        "--size-distribution", choices=["bimodal"], default=None,
+        metavar="NAME",
+        help="sample tx_count per block from a named distribution "
+             "(currently: 'bimodal' = the #212 mainnet 7-band mix). "
+             "Requires --seed; mutually exclusive with --tx-count and "
+             "--size-dist-file")
+    size_axis.add_argument(
+        "--size-dist-file", default=None, metavar="PATH",
+        help="sample tx_count per block from a JSON sampler config file "
+             "(schema: {name, bands:[{lo,hi,weight,representative?}]}). "
+             "Requires --seed; mutually exclusive with --tx-count and "
+             "--size-distribution")
+    ps.add_argument("--seed", type=int, default=None, metavar="N",
+                    help="RNG seed for sampled distributions (required with "
+                         "--size-distribution / --size-dist-file; ignored "
+                         "otherwise with a warning)")
+    ps.add_argument("--histogram-out", default=None, metavar="PATH",
+                    help="write the realized per-band histogram + sampler "
+                         "config to PATH as JSON (audit sidecar). Stderr "
+                         "summary line is always emitted when a sampler is in "
+                         "use, regardless of this flag")
     # Native Pub/Sub publisher bridge (#211); see replay subcommand for shape.
     ps.add_argument("--publish-to", default=None, metavar="TOPIC",
                     help="dispatch topic name to publish to via the native "
