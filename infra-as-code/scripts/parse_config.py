@@ -54,7 +54,11 @@ def main():
     print(json.dumps(cleaned))
 
   elif out_mode == 'target':
-    target = data.get('gcp', {}).get('target', {})
+    gcp = data.get('gcp', {})
+    defaults = gcp.get('defaults', {}) if isinstance(gcp, dict) else {}
+    project = str(defaults.get('project', '') if isinstance(defaults, dict) else '')
+
+    target = gcp.get('target', {}) if isinstance(gcp, dict) else {}
     if not target and 'target' in data:
       target = data.get('target', {})
 
@@ -77,7 +81,6 @@ def main():
         elif sa_key == 'runtime_sa' or 'runtime' in sa_key:
           runtime_email = email
 
-    # Fallback resolution if standard keys weren't explicit
     if not build_email and target_sas:
       build_email = list(target_sas.values())[0]['email']
     if not runtime_email and len(target_sas) > 1:
@@ -86,6 +89,8 @@ def main():
       runtime_email = build_email
 
     cleaned = {
+        'build_project_id': project,
+        'runtime_project_id': project,
         'target_sas': target_sas,
         'builder_sa_email': build_email,
         'runtime_sa_email': runtime_email,

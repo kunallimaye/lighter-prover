@@ -10,11 +10,31 @@ _die()       { _log_error "$@"; exit 1; }
 
 # ─── Configuration Resolvers ──────────────────────────────────────────
 
+_generate_tfvars() {
+  local config_path="${CONFIG_TOML:-config.toml}"
+  local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+
+  if [[ -f "${config_path}" ]]; then
+    python3 infra-as-code/scripts/parse_config.py "${config_path}" vms > "${target_vms}"
+    python3 infra-as-code/scripts/parse_config.py "${config_path}" target > "${target_sa}"
+  else
+    _die "Configuration file ${config_path} not found. Create it from config.toml.example first."
+  fi
+}
+
 _resolve_build_project() {
-  local project
-  project="$(gcloud config get-value project 2>/dev/null || true)"
+  _generate_tfvars
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local project=""
+  if [[ -f "${target_sa}" ]]; then
+    project="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_project_id', ''))" 2>/dev/null || true)"
+  fi
   if [[ -z "${project}" ]]; then
-    _die "Unable to detect gcloud project. Run 'gcloud config set project <id>' first."
+    project="$(gcloud config get-value project 2>/dev/null || true)"
+  fi
+  if [[ -z "${project}" ]]; then
+    _die "Unable to detect GCP project ID. Set [gcp.defaults].project in config.toml."
   fi
   echo "${project}"
 }
@@ -46,23 +66,7 @@ _build_substitutions() {
   echo "${subs}"
 }
 
-# ─── Core IaC Execution & Preflight ───────────────────────────────────
-
-_generate_tfvars() {
-  local config_path="${CONFIG_TOML:-config.toml}"
-  local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
-  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-
-  _log_info "Parsing configurations from ${config_path}..."
-  if [[ -f "${config_path}" ]]; then
-    python3 infra-as-code/scripts/parse_config.py "${config_path}" vms > "${target_vms}"
-    python3 infra-as-code/scripts/parse_config.py "${config_path}" target > "${target_sa}"
-    _log_info "  Generated ${target_vms}"
-    _log_info "  Generated ${target_sa}"
-  else
-    _die "Configuration file ${config_path} not found. Cannot resolve [gcp.target] service accounts."
-  fi
-}
+# ─── Preflight & IAM Bootstrapping ────────────────────────────────────
 
 _verify_service_accounts_and_auth() {
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
@@ -88,7 +92,7 @@ _verify_service_accounts_and_auth() {
   if [[ -n "${builder_sa}" ]]; then
     _log_info "Testing local caller access (actAs) on Build SA: ${builder_sa}..."
     if ! gcloud auth print-access-token --impersonate-service-account="${builder_sa}" &>/dev/null; then
-      _die "Active local caller identity lacks permission to impersonate Build SA ${builder_sa}. Ask the cloud owner to grant roles/iam.serviceAccountUser and roles/iam.serviceAccountTokenCreator."
+      _die "Active local caller identity lacks permission to act as Build SA ${builder_sa}. Ask the cloud owner to grant roles/iam.serviceAccountUser and roles/iam.serviceAccountTokenCreator."
     fi
     _log_ok "  Impersonation access confirmed."
   fi
@@ -120,11 +124,19 @@ _provision_sa_and_roles() {
   while IFS= read -r role; do
     if [[ -z "${role}" ]]; then continue; fi
     _log_info "  Allocating IAM role '${role}' to ${sa_email}..."
-    gcloud projects add-iam-policy-binding "${project}" \
+    local n=0
+    until gcloud projects add-iam-policy-binding "${project}" \
       --member="serviceAccount:${sa_email}" \
       --role="${role}" \
       --condition=None \
-      --quiet >/dev/null
+      --quiet >/dev/null 2>&1; do
+      n=$((n + 1))
+      if [[ $n -ge 6 ]]; then
+        _die "Failed to bind role ${role} after 6 retries (GCP IAM eventual consistency timeout)."
+      fi
+      _log_info "    Waiting for GCP IAM replication ($n/6)..."
+      sleep 5
+    done
   done < <(python3 -c "import json; [print(r) for r in json.load(open('${json_file}')).get('target_sas', {}).get('${sa_key}', {}).get('roles', [])]" 2>/dev/null || true)
 }
 
@@ -158,12 +170,13 @@ _teardown_sa_and_roles() {
   fi
 }
 
+# ─── IaC Submission Plane ─────────────────────────────────────────────
+
 _execute_cloudbuild() {
   local action="$1"
   local build_project
   build_project="$(_resolve_build_project)"
 
-  _generate_tfvars
   _verify_service_accounts_and_auth
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
@@ -208,12 +221,6 @@ cloud_admin_init() {
   _log_info "Bootstrapping arbitrary GCP target Service Accounts & IAM roles (cloud-admin-init)..."
   _log_info "  Target Project: ${build_project}"
 
-  local config_path="${CONFIG_TOML:-config.toml}"
-  if [[ ! -f "${config_path}" ]]; then
-    _die "Configuration file ${config_path} missing. Create it from config.toml.example first."
-  fi
-
-  _generate_tfvars
   local target_json="infra-as-code/terraform/target.auto.tfvars.json"
 
   local sa_key sa_email
@@ -249,12 +256,6 @@ cloud_admin_undo() {
   _log_info "Tearing down target GCP Service Accounts & IAM roles (cloud-admin-undo)..."
   _log_info "  Target Project: ${build_project}"
 
-  local config_path="${CONFIG_TOML:-config.toml}"
-  if [[ ! -f "${config_path}" ]]; then
-    _die "Configuration file ${config_path} missing. Cannot determine target identities to teardown."
-  fi
-
-  _generate_tfvars
   local target_json="infra-as-code/terraform/target.auto.tfvars.json"
 
   local sa_key sa_email

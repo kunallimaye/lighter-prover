@@ -29,6 +29,7 @@ Thumbs.db
 *.tfstate
 *.tfstate.backup
 *.tfplan
+*.auto.tfvars.json
 .terraform.lock.hcl
 # Build
 tmp/
