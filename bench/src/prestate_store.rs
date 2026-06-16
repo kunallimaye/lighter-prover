@@ -90,6 +90,16 @@ pub struct SiblingPaths {
     /// (and this whole optional field) still load.
     #[serde(default)]
     pub paths: std::collections::BTreeMap<String, Vec<HashOut<F>>>,
+    /// Issue #263: the ADAPTIVE empty leaf index shared by the account /
+    /// account_pub_data / account_delta trees (no longer the fixed constant 2).
+    /// `#[serde(default)]` so a v1.1 corpus written before #263 (which always
+    /// used index 2) still loads, defaulting to 0 — such corpora carry the old
+    /// broken all-trees-None paths anyway and are regenerated.
+    #[serde(default)]
+    pub account_index: u128,
+    /// Issue #263: the adaptive empty leaf index for the market tree.
+    #[serde(default)]
+    pub market_index: u128,
 }
 
 /// Tree-name keys used in [`SiblingPaths::paths`]. Single source of truth so
@@ -114,7 +124,11 @@ impl SiblingPaths {
             paths.account_delta.to_vec(),
         );
         map.insert(SIBLING_PATH_KEY_MARKET.to_string(), paths.market.to_vec());
-        Self { paths: map }
+        Self {
+            paths: map,
+            account_index: paths.account_index,
+            market_index: paths.market_index,
+        }
     }
 
     /// Deserialize the wire map back into the four typed fixed-length paths,
@@ -157,6 +171,8 @@ impl SiblingPaths {
         let market = take(&self.paths, SIBLING_PATH_KEY_MARKET, MARKET_MERKLE_LEVELS)?;
 
         Ok(crate::prestate::EmptyIndexSiblingPaths {
+            account_index: self.account_index,
+            market_index: self.market_index,
             account: account.try_into().unwrap(),
             account_pub_data: account_pub_data.try_into().unwrap(),
             account_delta: account_delta.try_into().unwrap(),
@@ -665,7 +681,11 @@ mod tests {
         paths.insert(SIBLING_PATH_KEY_ACCOUNT_PUB_DATA.to_string(), acc_path.clone());
         paths.insert(SIBLING_PATH_KEY_ACCOUNT_DELTA.to_string(), acc_path);
         paths.insert(SIBLING_PATH_KEY_MARKET.to_string(), mkt_path);
-        let sibling_paths = SiblingPaths { paths };
+        let sibling_paths = SiblingPaths {
+            paths,
+            account_index: 281_474_976_579_584,
+            market_index: 256,
+        };
         let sibling_paths_json = serde_json::to_value(&sibling_paths).unwrap();
 
         // Reach into the (private) per-snapshot field via a JSON value cycle to
@@ -704,6 +724,8 @@ mod tests {
         let market: [HashOut<F>; MARKET_MERKLE_LEVELS] =
             core::array::from_fn(|i| HashOut::<F>::from_partial(&[F::from_canonical_u64(i as u64 + 3000)]));
         let paths = crate::prestate::EmptyIndexSiblingPaths {
+            account_index: 281_474_976_579_584,
+            market_index: 256,
             account: acc,
             account_pub_data: pd,
             account_delta: delta,
@@ -731,6 +753,8 @@ mod tests {
             .empty_index_sibling_paths
             .as_ref()
             .expect("snapshot[0] carries paths after round-trip");
+        assert_eq!(rt.account_index, paths.account_index, "account index");
+        assert_eq!(rt.market_index, paths.market_index, "market index");
         assert_eq!(rt.account, paths.account, "account path");
         assert_eq!(rt.account_pub_data, paths.account_pub_data, "pub_data path");
         assert_eq!(rt.account_delta, paths.account_delta, "delta path");

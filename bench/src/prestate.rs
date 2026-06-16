@@ -92,13 +92,30 @@ pub struct ChunkPreState {
     pub empty_index_sibling_paths: Option<EmptyIndexSiblingPaths>,
 }
 
-/// The four honest empty-index (index 2) account-family sibling-paths captured
-/// at one tx position. Each is leaf-first (the `merkle_helpers::recalculate_root`
-/// fold order). The account / account_pub_data / account_delta trees are depth
+/// The four honest empty-index account-family sibling-paths captured at one tx
+/// position, together with the ADAPTIVELY-CHOSEN empty leaf indices they belong
+/// to. Each path is leaf-first (the `merkle_helpers::recalculate_root` fold
+/// order). The account / account_pub_data / account_delta trees are depth
 /// `ACCOUNT_MERKLE_LEVELS = 48`; the market tree is depth
 /// `MARKET_MERKLE_LEVELS = 12`.
+///
+/// ## Why the indices are carried (issue #263 fix)
+///
+/// The empty index is no longer the fixed constant 2 (whose untouched
+/// neighbouring subtrees could never be harvested). Instead, each position's
+/// empty index is derived from a real touched account's coherent proof
+/// ([`crate::account_family_tree::empty_path_from_proof`]) — a guaranteed-empty
+/// leaf in the descended empty subtree. The three account-family trees share
+/// one `account_index`; the market tree has its own `market_index`. The empty
+/// padding tx (`empty_witness::mid_block_empty_tx`) sets its leaves to these
+/// indices so the in-circuit path bits (`split_le(account_index)`) match the
+/// emitted siblings.
 #[derive(Debug, Clone)]
 pub struct EmptyIndexSiblingPaths {
+    /// The shared empty leaf index for the account / pub_data / delta trees.
+    pub account_index: u128,
+    /// The empty leaf index for the market tree.
+    pub market_index: u128,
     pub account: [HashOut<F>; circuit::types::constants::ACCOUNT_MERKLE_LEVELS],
     pub account_pub_data: [HashOut<F>; circuit::types::constants::ACCOUNT_MERKLE_LEVELS],
     pub account_delta: [HashOut<F>; circuit::types::constants::ACCOUNT_MERKLE_LEVELS],
@@ -240,47 +257,230 @@ pub fn sweep_per_tx_snapshots<Hook: FnMut(usize, u64)>(
     PreStateSnapshots::new(height, created_at, snapshots)
 }
 
-/// The empty ACCOUNT-FAMILY leaf index whose honest mid-block sibling-paths the
-/// padding empties carry for the account / account_pub_data / account_delta
-/// trees (issue #243). Index 2 is a non-special index confirmed NEVER touched by
-/// any of the 500 txs in `bench/bench_test.json`, so its leaf is genuinely empty
-/// mid-block (`empty_witness::EMPTY_ACCOUNT_INDEX`).
+/// Historical fixed empty ACCOUNT-FAMILY leaf index from #243. Index 2 is a
+/// non-special index never touched by any of the 500 txs in
+/// `bench/bench_test.json`, so its leaf is genuinely empty mid-block. NOTE
+/// (issue #263): the sweep no longer harvests THIS fixed index — its untouched
+/// neighbouring subtrees ({0,1} treasury/insurance, index 3) can never be
+/// reconstructed from per-tx proofs. The empty index is now derived ADAPTIVELY
+/// per position from a real touched account's coherent proof
+/// (`capture_empty_paths` /
+/// [`crate::account_family_tree::empty_path_from_proof`]) and carried in
+/// [`EmptyIndexSiblingPaths::account_index`]. Retained as the documented default
+/// for `empty_witness::EMPTY_ACCOUNT_INDEX`.
+#[allow(dead_code)]
 pub const EMPTY_INDEX: u128 = 2;
 
-/// The empty MARKET leaf index the padding empties' `market_before` sits at
-/// (`NIL_MARKET_INDEX = 255` — the always-empty market slot the empty tx uses).
-/// The market sibling-path is captured for THIS index so it matches the empty
-/// tx's `market_before.market_index`.
+/// Historical fixed empty MARKET leaf index from #243 (`NIL_MARKET_INDEX = 255`).
+/// Superseded by the adaptive [`EmptyIndexSiblingPaths::market_index`] (issue
+/// #263); retained for documentation.
+#[allow(dead_code)]
 pub const EMPTY_MARKET_INDEX: u128 = circuit::types::constants::NIL_MARKET_INDEX as u128;
 
 /// Like [`sweep_per_tx_snapshots`] but ALSO captures, at every tx position, the
-/// honest mid-block Merkle sibling-paths for [`EMPTY_INDEX`] against the four
+/// honest mid-block Merkle sibling-paths for an ADAPTIVELY-chosen empty leaf
+/// index (issue #263) against the four
 /// account-family trees (`account`, `account_pub_data`, `account_delta`,
 /// `market`) — issue #243.
 ///
-/// ## How paths are captured
+/// ## How paths are captured (issue #263 — coherent single-proof reconstruction)
 ///
 /// Path capture piggybacks on the SAME forward sweep at zero extra prove cost.
 /// At each position the sweep already sees the tx's `accounts_before` /
 /// `accounts_delta_before` / `market_before` (honest leaf CONTENTS) and the
 /// matching `*_tree_merkle_proofs` (honest siblings against the state at that
-/// position). Each `(leaf, proof)` pair pins the honest node hashes on that
-/// leaf's root-path; unioned via a [`PathHarvester`](crate::account_family_tree::PathHarvester)
-/// they reconstruct [`EMPTY_INDEX`]'s sibling-path wherever a touched account
-/// shares a subtree with it (everywhere else the sibling is the empty-subtree
-/// hash). The leaf hashes are the NATIVE account-family hashes
+/// position). The leaf hashes are the NATIVE account-family hashes
 /// ([`crate::account_family_native`]), verified bit-for-bit against the circuit.
+///
+/// Rather than UNION scattered per-tx proofs for a FIXED empty index (which the
+/// original #243 harvester did — and which could never cover index 2's untouched
+/// neighbouring subtrees, and mixed nodes across incoherent evolving roots; see
+/// [`crate::account_family_tree::empty_path_from_proof`]), each position derives
+/// an ADAPTIVE empty leaf index + its full sibling-path from ONE real touched
+/// account's coherent proof at THAT position. The chosen index is genuinely
+/// empty (it lives in an empty subtree the touched account branches away from)
+/// and its path folds a ZERO leaf to the position's root with NO accumulation.
 ///
 /// ## Coherence guard (honest-failure)
 ///
-/// The harvesters accumulate across positions; a node-hash CONFLICT (two proofs
-/// disagreeing) aborts the sweep. Additionally, every captured path is folded
-/// back from [`EMPTY_INDEX`]'s EMPTY (ZERO) leaf and asserted to equal the
-/// position's PROVEN tree root before it is stored. A path that does not fold to
-/// the proven root is a fatal `panic` — never a silently wrong path. (For the
-/// account-delta / market trees the empty leaf is ZERO at index 2 as well, since
-/// index 2 is untouched.)
+/// Every captured path is folded back from the chosen empty index's EMPTY (ZERO)
+/// leaf and asserted to equal the position's pre-state tree root before it is
+/// stored. A path that does not fold is reported via `None` — never a silently
+/// wrong path. A consumer needing a path at a `None` position falls back, never
+/// to a fabricated path. (This guard returning `None` on a genuine mismatch is
+/// CORRECT behaviour — the fix makes the emitted paths correct, not the guard
+/// lenient.)
 ///
+/// Whether `index` is a valid index for an EMPTY account leaf used by the
+/// padding tx (issue #263). Excludes the reserved/special indices the circuit
+/// treats non-generically: treasury (0) and insurance-fund (1) are NEVER empty
+/// (`account_hash::is_empty` excludes treasury, and both are populated), and the
+/// `NIL_ACCOUNT_INDEX = 2^48 - 1` sentinel marks "no account" (using it as a
+/// real empty leaf trips the circuit's NIL handling — observed as a witness
+/// "set twice" conflict). A valid empty index is `2 ..= MAX_ACCOUNT_INDEX`.
+fn is_valid_empty_account_index(index: u128) -> bool {
+    use circuit::types::constants::MAX_ACCOUNT_INDEX;
+    // Index 2 is the canonical first non-special empty index; anything in
+    // `[2, MAX_ACCOUNT_INDEX]` is a normal account slot.
+    index >= 2 && index <= MAX_ACCOUNT_INDEX as u128
+}
+
+/// Reconstruct the four account-family empty-index sibling-paths for ONE tx
+/// position, COHERENTLY from that tx's own honest proofs against the pre-state
+/// roots `state` (issue #263). Returns `None` (never a wrong path) when no real
+/// touched account at this position yields a guaranteed-empty leaf in all three
+/// account trees, or when the market leaf has no empty sibling subtree.
+///
+/// ## Strategy
+///
+/// The three account-family trees (`account`, `account_pub_data`,
+/// `account_delta`) share one `account_index`. We scan the tx's real (non-NIL,
+/// non-empty) touched accounts; for each we find the LOWEST branch level empty
+/// in ALL THREE account proofs simultaneously
+/// ([`crate::account_family_tree::common_empty_branch_level`]) and reconstruct a
+/// single empty index + its three paths from that account's coherent proofs
+/// ([`crate::account_family_tree::empty_path_from_proof`]). The market tree is
+/// reconstructed independently from `market_before`'s honest proof.
+///
+/// Each path is fold-validated against the corresponding pre-state root before
+/// being accepted.
+fn capture_empty_paths(tx: &Tx<F>, state: &ChunkPreState, pos: usize) -> Option<EmptyIndexSiblingPaths> {
+    use crate::account_family_native::{
+        account_delta_leaf_hash, account_hash_native, market_leaf_hash,
+    };
+    use crate::account_family_tree::{
+        common_empty_branch_levels, empty_path_from_proof, AccountFamilyTree,
+    };
+    use circuit::types::constants::{
+        ACCOUNT_MERKLE_LEVELS, MARKET_MERKLE_LEVELS, NIL_MARKET_INDEX,
+    };
+
+    // ── Account / pub_data / delta: one shared empty index from one account ──
+    // (empty_index, account_path, pub_data_path, delta_path).
+    type AccountFamilyEmptyPaths = (
+        u128,
+        [HashOut<F>; ACCOUNT_MERKLE_LEVELS],
+        [HashOut<F>; ACCOUNT_MERKLE_LEVELS],
+        [HashOut<F>; ACCOUNT_MERKLE_LEVELS],
+    );
+    let mut account_paths: Option<AccountFamilyEmptyPaths> = None;
+
+    'accounts: for (i, account) in tx.accounts_before.iter().enumerate() {
+        let idx = account.account_index;
+        if idx < 0 {
+            continue; // NIL / unused account slot.
+        }
+        let (acc_hash, pd_hash, is_empty) = account_hash_native(account);
+        if is_empty {
+            continue; // Need a REAL account to borrow a coherent subtree root.
+        }
+        let idx = idx as u128;
+
+        // The matching delta leaf (delta is indexed by accounts_delta_before).
+        let dpos = tx
+            .accounts_delta_before
+            .iter()
+            .position(|d| d.account_index == account.account_index);
+        let Some(dpos) = dpos else { continue };
+        let delta_hash = account_delta_leaf_hash(&tx.accounts_delta_before[dpos]);
+
+        let acc_proof = &tx.account_tree_merkle_proofs[i];
+        let pd_proof = &tx.account_pub_data_tree_merkle_proofs[i];
+        let delta_proof = &tx.account_delta_tree_merkle_proofs[dpos];
+
+        // Every branch level empty in ALL THREE account trees. Try shallow
+        // first, but skip levels whose descended index is reserved/special
+        // (treasury 0, insurance 1, or the NIL sentinel 2^48-1) — those are
+        // NOT valid empty account leaves in the circuit.
+        for b in common_empty_branch_levels(&[acc_proof, pd_proof, delta_proof]) {
+            let (Some(e_acc), Some(e_pd), Some(e_delta)) = (
+                empty_path_from_proof(idx, acc_hash, acc_proof, b),
+                empty_path_from_proof(idx, pd_hash, pd_proof, b),
+                empty_path_from_proof(idx, delta_hash, delta_proof, b),
+            ) else {
+                continue;
+            };
+
+            // All three derive the SAME empty index (same idx, same b).
+            debug_assert_eq!(e_acc.index, e_pd.index);
+            debug_assert_eq!(e_acc.index, e_delta.index);
+
+            if !is_valid_empty_account_index(e_acc.index) {
+                continue; // reserved/special index — try a deeper branch level.
+            }
+
+            // Fold-validate each against its pre-state root.
+            let acc_ok = AccountFamilyTree::<ACCOUNT_MERKLE_LEVELS>::fold(
+                e_acc.index,
+                HashOut::ZERO,
+                &e_acc.path,
+            ) == state.account_tree_root;
+            let pd_ok = AccountFamilyTree::<ACCOUNT_MERKLE_LEVELS>::fold(
+                e_pd.index,
+                HashOut::ZERO,
+                &e_pd.path,
+            ) == state.account_pub_data_tree_root;
+            let delta_ok = AccountFamilyTree::<ACCOUNT_MERKLE_LEVELS>::fold(
+                e_delta.index,
+                HashOut::ZERO,
+                &e_delta.path,
+            ) == state.account_delta_tree_root;
+
+            if acc_ok && pd_ok && delta_ok {
+                account_paths = Some((e_acc.index, e_acc.path, e_pd.path, e_delta.path));
+                break 'accounts;
+            }
+        }
+    }
+
+    let Some((account_index, account, account_pub_data, account_delta)) = account_paths else {
+        log::debug!(
+            "sweep path-capture: position {pos} no coherent account-family empty index \
+             (no real touched account yields a common empty subtree); storing None"
+        );
+        return None;
+    };
+
+    // ── Market: independent empty index from the tx's market leaf ────────────
+    // The empty tx's `market_before.market_index` must resolve to NIL in the
+    // circuit (index > MAX_PERPS_MARKET_INDEX = 254 ⇒ not a perps market), so
+    // the chosen empty market index must be > 254 (and != the reserved NIL
+    // sentinel pattern is fine for market since NIL_MARKET_INDEX = 255 IS the
+    // intended empty slot). We require `index >= NIL_MARKET_INDEX` so the leaf
+    // is treated as the always-empty non-perps market slot.
+    let mkt_idx = tx.market_before.market_index as u128;
+    let mkt_hash = market_leaf_hash(&tx.market_before);
+    let mkt_proof = &tx.market_tree_merkle_proof;
+    let market_empty = common_empty_branch_levels(&[mkt_proof])
+        .into_iter()
+        .filter_map(|b| empty_path_from_proof(mkt_idx, mkt_hash, mkt_proof, b))
+        .find(|e| {
+            e.index >= NIL_MARKET_INDEX as u128
+                && AccountFamilyTree::<MARKET_MERKLE_LEVELS>::fold(
+                    e.index,
+                    HashOut::ZERO,
+                    &e.path,
+                ) == state.market_tree_root
+        });
+
+    let Some(market_empty) = market_empty else {
+        log::debug!(
+            "sweep path-capture: position {pos} market empty path not reconstructible \
+             (no empty non-perps market slot >= NIL_MARKET_INDEX); storing None"
+        );
+        return None;
+    };
+
+    Some(EmptyIndexSiblingPaths {
+        account_index,
+        market_index: market_empty.index,
+        account,
+        account_pub_data,
+        account_delta,
+        market: market_empty.path,
+    })
+}
+
 /// Off the per-chunk prove path: this is part of the one-time offline sweep.
 pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
     height: u64,
@@ -291,127 +491,16 @@ pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
     bt: &BlockTxTarget,
     mut on_step: Hook,
 ) -> PreStateSnapshots {
-    use crate::account_family_tree::PathHarvester;
-    use circuit::types::constants::{ACCOUNT_MERKLE_LEVELS, MARKET_MERKLE_LEVELS};
-
     let mut snapshots: Vec<ChunkPreState> = Vec::with_capacity(txs.len() + 1);
     let mut cur = initial;
 
-    // One harvester per account-family tree. The three account-family trees are
-    // depth 48; the market tree is depth 12.
-    let mut h_account = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::new();
-    let mut h_pub_data = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::new();
-    let mut h_delta = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::new();
-    let mut h_market = PathHarvester::<MARKET_MERKLE_LEVELS>::new();
-
-    // Record one tx's touched account-family leaves + their honest proofs into
-    // the harvesters. Records the PRE-state leaves (accounts_before) against the
-    // PRE-state roots — the same root the snapshot at this position carries.
-    fn record_tx(
-        h_account: &mut PathHarvester<ACCOUNT_MERKLE_LEVELS>,
-        h_pub_data: &mut PathHarvester<ACCOUNT_MERKLE_LEVELS>,
-        h_delta: &mut PathHarvester<ACCOUNT_MERKLE_LEVELS>,
-        h_market: &mut PathHarvester<MARKET_MERKLE_LEVELS>,
-        tx: &Tx<F>,
-    ) {
-        use crate::account_family_native::{
-            account_delta_leaf_hash, account_hash_native, market_leaf_hash,
-        };
-        for (i, account) in tx.accounts_before.iter().enumerate() {
-            let idx = account.account_index;
-            if idx < 0 {
-                continue; // NIL / unused account slot.
-            }
-            let idx = idx as u128;
-            let (acc_hash, pd_hash, _is_empty) = account_hash_native(account);
-            h_account.record_proof(idx, acc_hash, &tx.account_tree_merkle_proofs[i]);
-            h_pub_data.record_proof(idx, pd_hash, &tx.account_pub_data_tree_merkle_proofs[i]);
-        }
-        for (i, delta) in tx.accounts_delta_before.iter().enumerate() {
-            let idx = delta.account_index;
-            if idx < 0 {
-                continue;
-            }
-            let delta_hash = account_delta_leaf_hash(delta);
-            h_delta.record_proof(idx as u128, delta_hash, &tx.account_delta_tree_merkle_proofs[i]);
-        }
-        // Market: one leaf per tx (market_before) at index market_index.
-        let mkt_idx = tx.market_before.market_index as u128;
-        let mkt_hash = market_leaf_hash(&tx.market_before);
-        h_market.record_proof(mkt_idx, mkt_hash, &tx.market_tree_merkle_proof);
-    }
-
-    // Capture EMPTY_INDEX's four paths against the CURRENT (pre-state) roots,
-    // folding each back from the empty leaf to validate against the proven root.
-    fn capture(
-        h_account: &PathHarvester<ACCOUNT_MERKLE_LEVELS>,
-        h_pub_data: &PathHarvester<ACCOUNT_MERKLE_LEVELS>,
-        h_delta: &PathHarvester<ACCOUNT_MERKLE_LEVELS>,
-        h_market: &PathHarvester<MARKET_MERKLE_LEVELS>,
-        state: &ChunkPreState,
-        pos: usize,
-    ) -> Option<EmptyIndexSiblingPaths> {
-        let account = h_account.path(EMPTY_INDEX);
-        let account_pub_data = h_pub_data.path(EMPTY_INDEX);
-        let account_delta = h_delta.path(EMPTY_INDEX);
-        let market = h_market.path(EMPTY_MARKET_INDEX);
-
-        // HONEST-FAILURE: each path must fold the EMPTY (ZERO) leaf back to the
-        // position's PROVEN tree root. If a single tx's observed proofs did not
-        // reveal every populated sibling on EMPTY_INDEX's path (a
-        // data-availability gap at this position), the fold will NOT match and
-        // we return `None` rather than emit a WRONG path. A consumer that needs
-        // a path at a position with `None` falls back (run_cell) — never to a
-        // fabricated path. This is the GATE-2 (#243 pilot) coherence guard made
-        // a per-position assertion.
-        let account_ok = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::fold(
-            EMPTY_INDEX,
-            HashOut::ZERO,
-            &account,
-        ) == state.account_tree_root;
-        let pub_data_ok = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::fold(
-            EMPTY_INDEX,
-            HashOut::ZERO,
-            &account_pub_data,
-        ) == state.account_pub_data_tree_root;
-        let delta_ok = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::fold(
-            EMPTY_INDEX,
-            HashOut::ZERO,
-            &account_delta,
-        ) == state.account_delta_tree_root;
-        let market_ok = PathHarvester::<MARKET_MERKLE_LEVELS>::fold(
-            EMPTY_MARKET_INDEX,
-            HashOut::ZERO,
-            &market,
-        ) == state.market_tree_root;
-
-        if account_ok && pub_data_ok && delta_ok && market_ok {
-            Some(EmptyIndexSiblingPaths {
-                account,
-                account_pub_data,
-                account_delta,
-                market,
-            })
-        } else {
-            log::debug!(
-                "sweep path-capture: position {pos} path incomplete \
-                 (account_ok={account_ok} pub_data_ok={pub_data_ok} \
-                 delta_ok={delta_ok} market_ok={market_ok}); storing None"
-            );
-            None
-        }
-    }
-
     for (pos, tx) in txs.iter().enumerate() {
-        // Record THIS tx's touched leaves+proofs (against the pre-state roots)
-        // BEFORE capturing, so the capture at `pos` sees this position's data
-        // (last-writer-wins; cumulative across positions).
-        record_tx(&mut h_account, &mut h_pub_data, &mut h_delta, &mut h_market, tx);
-
-        // Snapshot the pre-state BEFORE applying this tx, WITH captured paths.
+        // Reconstruct the empty-index paths COHERENTLY from THIS tx's own honest
+        // proofs against the CURRENT (pre-state) roots `cur`. No cross-position
+        // accumulation — the #263 fix derives a guaranteed-empty leaf index from
+        // a single touched account, so every emitted path folds to `cur`'s root.
         let mut snap = cur.clone();
-        snap.empty_index_sibling_paths =
-            capture(&h_account, &h_pub_data, &h_delta, &h_market, &cur, pos);
+        snap.empty_index_sibling_paths = capture_empty_paths(tx, &cur, pos);
         snapshots.push(snap);
 
         // Prove this single-tx step to obtain the post-state.
@@ -424,12 +513,6 @@ pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
         let wall_ms = t.elapsed().as_millis() as u64;
 
         let w = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs);
-        // Harvesters accumulate ACROSS positions with last-writer-wins (no
-        // reset): nodes touched by a later tx overwrite their stale value, so the
-        // target index's path coverage grows over the sweep. Stale (never-
-        // re-touched) nodes are caught by the per-position fold-back guard in
-        // `capture`, which emits `None` rather than a wrong path.
-
         cur = ChunkPreState {
             register_stack: w.register_stack_after,
             all_assets: w.all_assets_after.clone(),

@@ -547,10 +547,16 @@ fn run_pad_gate() {
         .clone()
         .expect("captured empty-index sibling-paths at the padded chunk pre-state");
 
-    // Build the padded final chunk: real leftover txs + (S - remainder) empties.
+    // Build the padded final chunk: (S - remainder) empties FIRST, then the real
+    // leftover txs. The captured paths are honest against the chunk's INPUT
+    // pre-state (`snapshots[real_limit]`); an empty tx mutates nothing so it must
+    // verify its empty leaf against the root it ENTERS with — the chunk's input
+    // root. Placing empties after the real txs would verify them against the
+    // (evolved) post-real-tx root the captured path does NOT match (issue #263).
+    // Empties-first leaves the chunk's net mutation and output roots unchanged.
     let fee_partial = bench::empty_witness::empty_account_partial_hashes();
     let fee_delta_partial = bench::empty_witness::empty_account_delta_partial_hash();
-    let mut final_chunk: Vec<_> = block.txs[real_limit..real_limit + remainder].to_vec();
+    let mut final_chunk: Vec<_> = Vec::with_capacity(S);
     for _ in 0..(S - remainder) {
         final_chunk.push(bench::empty_witness::mid_block_empty_tx(
             fee_partial,
@@ -558,6 +564,7 @@ fn run_pad_gate() {
             &paths,
         ));
     }
+    final_chunk.extend_from_slice(&block.txs[real_limit..real_limit + remainder]);
     assert_eq!(final_chunk.len(), S, "padded chunk must be S wide");
 
     // Prove the padded final chunk through the UNMODIFIED S=9 circuit.
