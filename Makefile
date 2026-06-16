@@ -1,4 +1,4 @@
-.PHONY: help cloud-deploy
+.PHONY: help cloud-deploy cloud-plan cloud-destroy
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -6,3 +6,9 @@ help: ## Show this help
 
 cloud-deploy: ## Run Cloud Build to deploy infrastructure using Terraform (infra-as-code/cloudbuild.yaml)
 	@bash infra-as-code/scripts/cloud.sh cloud-deploy
+
+cloud-plan: ## Run Cloud Build to preview infrastructure changes (Terraform plan)
+	@bash infra-as-code/scripts/cloud.sh cloud-plan
+
+cloud-destroy: ## Run Cloud Build to tear down infrastructure (Terraform destroy)
+	@bash infra-as-code/scripts/cloud.sh cloud-destroy

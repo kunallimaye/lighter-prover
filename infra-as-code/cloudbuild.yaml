@@ -10,7 +10,7 @@ steps:
   # 1. Initialize Terraform backend
   - id: tf-init
     name: 'hashicorp/terraform:1.14'
-    dir: 'cicd/terraform'
+    dir: 'infra-as-code/terraform'
     args:
       - 'init'
       - '-backend-config=bucket=${_TF_STATE_BUCKET}'
@@ -21,7 +21,7 @@ steps:
   # 2. Execute Terraform action (plan/apply/destroy)
   - id: tf-action
     name: 'hashicorp/terraform:1.14'
-    dir: 'cicd/terraform'
+    dir: 'infra-as-code/terraform'
     args:
       - '${_TF_ACTION}'
       - '-auto-approve'
