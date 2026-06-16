@@ -335,11 +335,12 @@ fn is_valid_empty_account_index(index: u128) -> bool {
 ///
 /// The three account-family trees (`account`, `account_pub_data`,
 /// `account_delta`) share one `account_index`. We scan the tx's real (non-NIL,
-/// non-empty) touched accounts; for each we find the LOWEST branch level empty
-/// in ALL THREE account proofs simultaneously
-/// ([`crate::account_family_tree::common_empty_branch_level`]) and reconstruct a
-/// single empty index + its three paths from that account's coherent proofs
-/// ([`crate::account_family_tree::empty_path_from_proof`]). The market tree is
+/// non-empty) touched accounts; for each we walk the branch levels empty in ALL
+/// THREE account proofs simultaneously
+/// ([`crate::account_family_tree::common_empty_branch_levels`], shallow first)
+/// and reconstruct a single empty index + its three paths from that account's
+/// coherent proofs ([`crate::account_family_tree::empty_path_from_proof`]),
+/// skipping levels whose descended index is reserved/special. The market tree is
 /// reconstructed independently from `market_before`'s honest proof.
 ///
 /// Each path is fold-validated against the corresponding pre-state root before
