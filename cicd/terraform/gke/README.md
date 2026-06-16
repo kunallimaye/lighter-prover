@@ -19,7 +19,7 @@ future GKE-Standard or MIG backend is a sibling root selected by the
 |---|---|
 | `google_container_cluster` (Autopilot) | Managed cluster; Google bin-packs nodes. |
 | `google_pubsub_topic` + `subscription` | The block-dispatch backlog signal (ADR-0006 §1.1). |
-| `kubernetes_deployment.cells` | **Machine CLASS 1** — chunk-prover cells (CPU-saturating; c4a/Axion in prod). |
+| `kubernetes_deployment.cells` | **Machine CLASS 1** — chunk-prover cells (CPU-saturating; c4a/Axion in prod). Mount the proof store (issue #235) like the coordinator/fold-worker — see below. |
 | `kubernetes_deployment.coordinator` | **Machine CLASS 2** — coordinators (fold L2 + prove L4; distinct class). |
 | `kubernetes_deployment.fold_worker` | **Machine CLASS 3** — fold workers (issue #232) that competing-pull the MERGE-TASK subscription for the cross-machine distributed fold (issue #198). Gated by `enable_fold_workers`. |
 | `kubernetes_pod_disruption_budget_v1.coordinator` | **HARD DAY-1** — PDB for the coordinator pool. |
@@ -91,6 +91,48 @@ merge results) and GCS (transit intermediate proofs), so it runs under
 true (the default; see the Workload Identity section above), and falls back to
 the `default` KSA when WI is off. No fold-worker-specific WI variable is needed.
 
+## Cells mount the proof store (issue #235)
+
+All three machine classes now mount the gcsfuse-backed proof store identically.
+The cell command passes `--proof-mount-path /mnt/proof-store`, so the bench
+binary (`bench/src/conductor/storage.rs`) selects **file-I/O MOUNT mode** over
+the `gcloud storage cp` fallback to ship its L2 leaf proof. Before #235 the
+cells pod had **no** gcsfuse volume, so those uploads wrote to a non-existent
+path while the flag claimed otherwise. The fix mirrors the proven
+coordinator/fold-worker pattern, all gated by `local.proof_mount_on`
+(= `enable_proof_mount && enable_proof_store`):
+
+- the `gke-gcsfuse/volumes=true` pod annotation (`local.cell_annotations`) that
+  opts the pod into the gcsfuse CSI driver,
+- the `LIGHTER_PROOF_MOUNT` env var (= `var.proof_mount_path`),
+- the `proof-store` `volume_mount` at that path, and
+- the gcsfuse CSI inline `volume` backed by the resolved proof-store bucket.
+
+No tfvars change is needed — the scale tfvars already pass the flag and set
+`enable_proof_mount = true`. Like the fold workers (and unlike the coordinator),
+cells carry **no** `safe-to-evict=false`: they are stateless competing-pull
+consumers.
+
+## Zone topology-spread tolerates a single-zone c4a stockout (issue #235)
+
+The cluster is **regional** Autopilot (`location = var.region`), so Google *can*
+place pods across zones — but nothing forced it to. The
+`enable_zone_spread` knob adds a `topologySpreadConstraint` across
+`topology.kubernetes.io/zone` to **all three** deployments so a single-zone
+**c4a (Axion) stockout** doesn't strand the whole pool. This directly addresses
+`docs/live-benchmark-results.md` **FINDING C**: c4a stocked out across *all*
+us-central1 zones during the multi-node benchmark.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `enable_zone_spread` | `false` (smoke); `true` in the scale tfvars | Add the per-zone `topologySpreadConstraint` to cells/coordinator/fold-worker. |
+| `zone_spread_max_skew` | `1` | maxSkew — spread as evenly as possible across zones. |
+
+`when_unsatisfiable = ScheduleAnyway` (NOT `DoNotSchedule`) is deliberate: a
+real N-1-zone stockout must **not** block scheduling entirely. Spread is
+*preferred*; concentration into a single available zone is *tolerated* over a
+stranded run.
+
 ## Which image tag wires to each class
 
 | Class | Smoke (validation) | Production |
@@ -160,6 +202,41 @@ terraform apply \
 # bucket co-regional in us-east4; pods get the real project + bucket via env;
 # image SHA already pinned -> pods PROVE on first deploy.
 ```
+
+## Automated scale apply / teardown (issue #235)
+
+The raw `terraform apply` above is wrapped by a **parameterized, automated**
+Cloud Build path — the SCALE sibling of the `gke-smoke-*` targets — so a scale
+tier can be applied and torn down via the Makefile operator interface:
+
+```sh
+# Apply + confirm a scale tier (region defaults to us-east4; see below):
+make gke-scale-up   GKE_PROJECT=<proj> GKE_BUILD_SA=<gke-capable-sa> GKE_TFVARS=scale-0p2pct.tfvars
+
+# Tear down + verify nothing remains (match GKE_TFVARS to the applied tier):
+make gke-scale-down GKE_PROJECT=<proj> GKE_BUILD_SA=<gke-capable-sa> GKE_TFVARS=scale-0p2pct.tfvars
+```
+
+| Piece | What it does |
+|---|---|
+| `make gke-scale-up` / `gke-scale-validate` | `scripts/gke-scale.sh up` → submits `cicd/cloudbuild-gke-scale.yaml`: apply `${GKE_TFVARS}` + confirm all enabled machine classes roll out. |
+| `make gke-scale-down` | `scripts/gke-scale.sh down` → submits `cicd/cloudbuild-gke-scale-teardown.yaml`: destroy + verify nothing remains. |
+| `GKE_TFVARS=` | Which scale tier to apply/destroy (default `scale-0p2pct.tfvars`). Threaded into the pipeline as the `-var-file`. |
+| `GKE_REGION=` | Region override (default **us-east4** — see below). |
+
+**Default region is us-east4** (the scale automation + the GKE module's `region`
+default), unlike the smoke path which stays on us-central1. Rationale:
+`docs/live-benchmark-results.md` **FINDING C** — c4a (Axion) stocked out across
+*all* us-central1 zones during the multi-node benchmark, while us-east4 confirmed
+real Axion capacity. The scale automation also uses a **separate TF state
+prefix** (`lighter-prover/gke-scale`) and **cluster name**
+(`lighter-prover-scale`) so a scale run never clobbers the smoke state.
+
+Unlike the smoke pipeline, the scale validate step **omits** the synthetic
+Pub/Sub-backlog HPA publish loop and the forced-drain eviction probe: those are
+smoke-acceptance theater proven once + hardwired in `main.tf`. The scale
+pipeline confirms the tier *came up* (all enabled classes scheduled) — the HPA
+reacts to REAL load on a real run.
 
 ## Scope guard
 

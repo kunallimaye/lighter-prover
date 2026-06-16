@@ -31,6 +31,7 @@
   cloud-txmix-build cloud-txmix-deploy cloud-txmix-smoke \
   cloud-txmix-capture cloud-txmix-results cloud-txmix-post \
   gke-smoke-up gke-smoke-validate gke-smoke-down \
+  gke-scale-up gke-scale-validate gke-scale-down \
   cloud-status cloud-recover \
   logs-list logs-last logs-clean \
   fleet-quota-check fleet-run fleet-run-dry fleet-status \
@@ -188,6 +189,33 @@ gke-smoke-validate: ## Alias of gke-smoke-up (the up pipeline includes the live 
 
 gke-smoke-down: ## Tear down the GKE smoke topology + verify nothing remains (no cluster/nodes/LBs/disks)
 	@bash scripts/gke-smoke.sh down
+
+# ─── GKE Autopilot SCALE deployment automation (issue #235; #229 Track 1) ──
+# Parametrised apply→confirm→teardown of a real SCALE tier (cells + coordinator
+# + fold-workers) of the ADR-0006 topology, the SCALE sibling of the gke-smoke-*
+# targets. Select the tier with GKE_TFVARS= (scale-0p2pct / 0p3pct / 0p5pct);
+# the scale tfvars enable the proof mount + zone-spread. Uses its OWN cluster +
+# TF state prefix (lighter-prover/gke-scale) so a scale run never clobbers the
+# smoke state. Runs via Cloud Build as a GKE-capable SA (set GKE_BUILD_SA).
+#
+# DEFAULT REGION is us-east4 (NOT us-central1 like the smoke path): c4a (Axion)
+# STOCKED OUT across all us-central1 zones during the multi-node benchmark while
+# us-east4 confirmed real Axion capacity — docs/live-benchmark-results.md
+# FINDING C. The scale tfvars also set enable_zone_spread=true so a single-zone
+# c4a stockout (ScheduleAnyway) doesn't strand the pool.
+#
+# Knobs: GKE_PROJECT=, GKE_REGION= (default us-east4, see FINDING C),
+# GKE_TFVARS= (default scale-0p2pct.tfvars), GKE_CLUSTER= (default
+# lighter-prover-scale), GKE_BUILD_SA= (GKE-capable SA), GKE_TF_BUCKET=.
+
+gke-scale-up: ## Apply + confirm a GKE scale tier (set GKE_TFVARS=scale-0p2pct.tfvars; default region us-east4 per FINDING C)
+	@bash scripts/gke-scale.sh up
+
+gke-scale-validate: ## Alias of gke-scale-up (the up pipeline includes the readiness check)
+	@bash scripts/gke-scale.sh validate
+
+gke-scale-down: ## Tear down the GKE scale tier + verify nothing remains (set GKE_TFVARS= to match the applied tier)
+	@bash scripts/gke-scale.sh down
 
 # ─── Detached Orchestration ──────────────────────────────────────────
 

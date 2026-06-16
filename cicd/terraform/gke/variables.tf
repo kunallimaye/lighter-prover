@@ -20,9 +20,9 @@ variable "project_id" {
 }
 
 variable "region" {
-  description = "Region for the Autopilot cluster and Pub/Sub. Must support Autopilot + the c4a (Axion) shape (e.g. us-central1)."
+  description = "Region for the Autopilot cluster and Pub/Sub. Must support Autopilot + the c4a (Axion) shape (e.g. us-east4 — us-central1 c4a stocked out across all zones, see #235 / docs/live-benchmark-results.md FINDING C; us-east4 confirmed Axion capacity)."
   type        = string
-  default     = "us-central1"
+  default     = "us-east4"
 }
 
 # ─── Cluster ─────────────────────────────────────────────────────────
@@ -438,6 +438,20 @@ variable "proof_mount_path" {
   description = "In-pod path the proof-store bucket is gcsfuse-mounted at when enable_proof_mount is true (issue #206). Passed to the bench binary as LIGHTER_PROOF_MOUNT so storage.rs maps {height}/{witness_index} and {height}/m/{level}/{index} keys to files under this root."
   type        = string
   default     = "/mnt/proof-store"
+}
+
+# ─── Scheduling: zone topology-spread (issue #235) ───────────────────
+
+variable "enable_zone_spread" {
+  description = "Add a topologySpreadConstraint across topology.kubernetes.io/zone to cells/coordinator/fold-worker pods so a single-zone c4a (Axion) stockout doesn't strand the pool (issue #235; see docs/live-benchmark-results.md FINDING C — c4a stocked out across all us-central1 zones). when_unsatisfiable=ScheduleAnyway, so a real N-1-zone stockout never BLOCKS scheduling — spread is preferred, concentration is tolerated. Harmless at smoke scale; default off."
+  type        = bool
+  default     = false
+}
+
+variable "zone_spread_max_skew" {
+  description = "maxSkew for the zone topologySpreadConstraint (issue #235): the max permitted difference in matching pods between the most- and least-loaded zone before the scheduler prefers a less-loaded zone. 1 = spread as evenly as possible. Only used when enable_zone_spread is true."
+  type        = number
+  default     = 1
 }
 
 variable "hpa_target_class" {
