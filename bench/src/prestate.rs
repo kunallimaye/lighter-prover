@@ -313,7 +313,7 @@ pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
         h_delta: &mut PathHarvester<ACCOUNT_MERKLE_LEVELS>,
         h_market: &mut PathHarvester<MARKET_MERKLE_LEVELS>,
         tx: &Tx<F>,
-    ) -> Result<(), String> {
+    ) {
         use crate::account_family_native::{
             account_delta_leaf_hash, account_hash_native, market_leaf_hash,
         };
@@ -324,8 +324,8 @@ pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
             }
             let idx = idx as u128;
             let (acc_hash, pd_hash, _is_empty) = account_hash_native(account);
-            h_account.record_proof(idx, acc_hash, &tx.account_tree_merkle_proofs[i])?;
-            h_pub_data.record_proof(idx, pd_hash, &tx.account_pub_data_tree_merkle_proofs[i])?;
+            h_account.record_proof(idx, acc_hash, &tx.account_tree_merkle_proofs[i]);
+            h_pub_data.record_proof(idx, pd_hash, &tx.account_pub_data_tree_merkle_proofs[i]);
         }
         for (i, delta) in tx.accounts_delta_before.iter().enumerate() {
             let idx = delta.account_index;
@@ -333,13 +333,12 @@ pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
                 continue;
             }
             let delta_hash = account_delta_leaf_hash(delta);
-            h_delta.record_proof(idx as u128, delta_hash, &tx.account_delta_tree_merkle_proofs[i])?;
+            h_delta.record_proof(idx as u128, delta_hash, &tx.account_delta_tree_merkle_proofs[i]);
         }
         // Market: one leaf per tx (market_before) at index market_index.
         let mkt_idx = tx.market_before.market_index as u128;
         let mkt_hash = market_leaf_hash(&tx.market_before);
-        h_market.record_proof(mkt_idx, mkt_hash, &tx.market_tree_merkle_proof)?;
-        Ok(())
+        h_market.record_proof(mkt_idx, mkt_hash, &tx.market_tree_merkle_proof);
     }
 
     // Capture EMPTY_INDEX's four paths against the CURRENT (pre-state) roots,
@@ -405,16 +404,9 @@ pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
 
     for (pos, tx) in txs.iter().enumerate() {
         // Record THIS tx's touched leaves+proofs (against the pre-state roots)
-        // BEFORE capturing, so the capture at `pos` sees this position's data.
-        if let Err(e) = record_tx(
-            &mut h_account,
-            &mut h_pub_data,
-            &mut h_delta,
-            &mut h_market,
-            tx,
-        ) {
-            panic!("sweep path-capture: incoherent proof at position {pos}: {e}");
-        }
+        // BEFORE capturing, so the capture at `pos` sees this position's data
+        // (last-writer-wins; cumulative across positions).
+        record_tx(&mut h_account, &mut h_pub_data, &mut h_delta, &mut h_market, tx);
 
         // Snapshot the pre-state BEFORE applying this tx, WITH captured paths.
         let mut snap = cur.clone();
@@ -432,12 +424,11 @@ pub fn sweep_per_tx_snapshots_with_paths<Hook: FnMut(usize, u64)>(
         let wall_ms = t.elapsed().as_millis() as u64;
 
         let w = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs);
-        // After a tx, prior harvested nodes are against the OLD root; reset so we
-        // only union proofs from the next position's tx against its OWN root.
-        h_account.reset();
-        h_pub_data.reset();
-        h_delta.reset();
-        h_market.reset();
+        // Harvesters accumulate ACROSS positions with last-writer-wins (no
+        // reset): nodes touched by a later tx overwrite their stale value, so the
+        // target index's path coverage grows over the sweep. Stale (never-
+        // re-touched) nodes are caught by the per-position fold-back guard in
+        // `capture`, which emits `None` rather than a wrong path.
 
         cur = ChunkPreState {
             register_stack: w.register_stack_after,

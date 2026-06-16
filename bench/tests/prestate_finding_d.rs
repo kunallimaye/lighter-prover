@@ -521,8 +521,11 @@ fn run_pad_gate() {
         empty_index_sibling_paths: None,
     };
 
-    // Path-capturing sweep over the FULL real chunk range so snapshot[real_limit]
-    // (the padded chunk's pre-state) exists WITH captured paths.
+    // Path-capturing sweep through the REMAINDER txs too (tx_count), so
+    // snapshot[real_limit] (the padded chunk's pre-state) is a MID-loop snapshot
+    // whose sibling-path is harvested from the first remainder tx's proofs. (A
+    // sweep of only real_limit txs would leave that position as the trailing
+    // post-state snapshot with no captured path.)
     let s1 = BlockTxCircuit::define(CIRCUIT_CONFIG, 1, CHAIN_ID);
     let s1_bt = s1.target;
     let s1_data = s1.builder.build::<C>();
@@ -530,7 +533,7 @@ fn run_pad_gate() {
         block.block_number,
         created_at,
         initial,
-        &block.txs[..real_limit],
+        &block.txs[..tx_count],
         &s1_data,
         &s1_bt,
         |_p, _w| {},

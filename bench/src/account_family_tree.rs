@@ -196,14 +196,18 @@ impl<const L: usize> Default for AccountFamilyTree<L> {
 /// touched account shares a subtree with it; everywhere else the node is the
 /// empty-subtree hash.
 ///
-/// ## Honest-failure
+/// ## Accumulation & honest-failure
 ///
-/// Every harvested node is recorded keyed by its heap position and CHECKED for
-/// consistency: if two proofs disagree on the same node (an incoherent state),
-/// [`record_proof`](Self::record_proof) returns `Err` so the sweep fails
-/// LOUDLY rather than emitting a wrong path. The final reconstructed path is
-/// additionally validated by folding the target's (empty) leaf back to the
-/// snapshot's proven root (see `prestate::sweep_per_tx_snapshots_with_paths`).
+/// Nodes are recorded keyed by heap position with LAST-WRITER-WINS semantics:
+/// as state evolves across the sweep, a node touched at a later position
+/// OVERWRITES its earlier value, so the harvester accumulates the most recent
+/// honest node hashes (maximizing the target index's path coverage) rather than
+/// erroring on the expected churn. A node NOT re-touched retains a stale value;
+/// the per-position fold-back guard catches that — every reconstructed path is
+/// folded from the target's (empty) leaf and compared to the position's PROVEN
+/// root before it is emitted, so a stale/incomplete path is REJECTED (the
+/// consumer stores `None`, never a wrong path). See
+/// `prestate::sweep_per_tx_snapshots_with_paths`.
 #[derive(Debug, Clone)]
 pub struct PathHarvester<const L: usize> {
     empty_hashes: Vec<HashOut<F>>,
@@ -230,26 +234,53 @@ impl<const L: usize> PathHarvester<L> {
         (1u128 << L) + leaf_index
     }
 
-    /// Record one honest `(leaf_hash, leaf_index, sibling_path)` proof: pin the
-    /// leaf node and every node on its root-path. `sibling_path` is leaf-first
-    /// (the `merkle_helpers::recalculate_root` order). Returns `Err` on a
-    /// node-hash conflict (incoherent state).
-    pub fn record_proof(
+    /// Record one honest `(leaf_hash, leaf_index, sibling_path)` proof against a
+    /// SINGLE coherent state: pin the leaf node and every node on its root-path
+    /// with LAST-WRITER-WINS (a node observed again OVERWRITES its prior value,
+    /// absorbing state churn across positions). `sibling_path` is leaf-first
+    /// (the `merkle_helpers::recalculate_root` order).
+    ///
+    /// Returns `Err` ONLY when `strict` is set and a node disagrees with an
+    /// existing value — used by tests to assert coherence WITHIN one fixed
+    /// state. The sweep uses the non-strict [`record_proof`](Self::record_proof).
+    pub fn record_proof_strict(
         &mut self,
         leaf_index: u128,
         leaf_hash: HashOut<F>,
         sibling_path: &[HashOut<F>; L],
     ) -> Result<(), String> {
+        self.record_proof_inner(leaf_index, leaf_hash, sibling_path, true)
+    }
+
+    /// Record one honest `(leaf, proof)` with last-writer-wins (no conflict
+    /// error). The per-position fold-back guard in the sweep validates the
+    /// resulting path, so churn between positions is absorbed safely.
+    pub fn record_proof(
+        &mut self,
+        leaf_index: u128,
+        leaf_hash: HashOut<F>,
+        sibling_path: &[HashOut<F>; L],
+    ) {
+        let _ = self.record_proof_inner(leaf_index, leaf_hash, sibling_path, false);
+    }
+
+    fn record_proof_inner(
+        &mut self,
+        leaf_index: u128,
+        leaf_hash: HashOut<F>,
+        sibling_path: &[HashOut<F>; L],
+        strict: bool,
+    ) -> Result<(), String> {
         let mut key = Self::leaf_key(leaf_index);
         let mut node_hash = leaf_hash;
-        self.insert_checked(key, node_hash, 0)?;
+        self.insert_node(key, node_hash, 0, strict)?;
 
         for level in 0..L {
             let bit = key & 1;
             let sibling_key = key ^ 1;
             let sibling = sibling_path[level];
             // Pin the sibling node directly from the proof.
-            self.insert_checked(sibling_key, sibling, level)?;
+            self.insert_node(sibling_key, sibling, level, strict)?;
 
             let parent_hash = if bit == 0 {
                 Poseidon2Hash::two_to_one(node_hash, sibling)
@@ -257,23 +288,31 @@ impl<const L: usize> PathHarvester<L> {
                 Poseidon2Hash::two_to_one(sibling, node_hash)
             };
             key >>= 1;
-            self.insert_checked(key, parent_hash, level + 1)?;
+            self.insert_node(key, parent_hash, level + 1, strict)?;
             node_hash = parent_hash;
         }
         Ok(())
     }
 
-    fn insert_checked(&mut self, key: u128, hash: HashOut<F>, level: usize) -> Result<(), String> {
-        if let Some(existing) = self.nodes.get(&key) {
-            if *existing != hash {
-                return Err(format!(
-                    "PathHarvester node conflict at heap key {key} (level {level}): \
-                     {existing:?} vs {hash:?} — incoherent mid-block state"
-                ));
+    fn insert_node(
+        &mut self,
+        key: u128,
+        hash: HashOut<F>,
+        level: usize,
+        strict: bool,
+    ) -> Result<(), String> {
+        if strict {
+            if let Some(existing) = self.nodes.get(&key) {
+                if *existing != hash {
+                    return Err(format!(
+                        "PathHarvester node conflict at heap key {key} (level {level}): \
+                         {existing:?} vs {hash:?} — incoherent state"
+                    ));
+                }
             }
-        } else {
-            self.nodes.insert(key, hash);
         }
+        // Last-writer-wins: a node re-observed at a later position overwrites.
+        self.nodes.insert(key, hash);
         Ok(())
     }
 
@@ -396,8 +435,10 @@ mod tests {
         let mut harvester = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::new();
         for &(idx, seed) in residents {
             let proof = truth.proof(idx);
+            // strict: all proofs are against ONE fixed truth state, so no node
+            // may conflict.
             harvester
-                .record_proof(idx, mk_leaf(seed), &proof)
+                .record_proof_strict(idx, mk_leaf(seed), &proof)
                 .expect("coherent proofs record without conflict");
         }
 
@@ -432,11 +473,18 @@ mod tests {
         let proof0 = tree.proof(0);
 
         let mut harvester = PathHarvester::<ACCOUNT_MERKLE_LEVELS>::new();
-        harvester.record_proof(0, mk_leaf(1), &proof0).unwrap();
+        harvester.record_proof_strict(0, mk_leaf(1), &proof0).unwrap();
         // Feeding leaf 0 with a DIFFERENT hash but the same proof conflicts at
-        // the parent node — must be rejected.
-        let err = harvester.record_proof(0, mk_leaf(999), &proof0).unwrap_err();
+        // the parent node — strict mode must reject it.
+        let err = harvester
+            .record_proof_strict(0, mk_leaf(999), &proof0)
+            .unwrap_err();
         assert!(err.contains("conflict"), "incoherence must be a loud error: {err}");
+
+        // Non-strict last-writer-wins: the same overwrite is ACCEPTED (the sweep
+        // relies on this to absorb cross-position churn; the fold-back guard, not
+        // a conflict error, is what keeps emitted paths correct).
+        harvester.record_proof(0, mk_leaf(999), &proof0);
     }
 
     #[test]

@@ -1955,11 +1955,18 @@ fn run_cell(args: &Args) {
             // pre-state — exists) AND capture the empty-index sibling-paths the
             // padding empties need. Otherwise the roots-only sweep, unchanged.
             let snaps = if args.pad_final_chunk && remainder > 0 {
+                // Sweep through the REMAINDER txs too (total_available), so the
+                // padded chunk's pre-state position (`real_tx_limit`) is captured
+                // as a MID-loop snapshot — its sibling-path is harvested from the
+                // first remainder tx's proofs (which are against the root at
+                // `real_tx_limit`). Sweeping only `real_tx_limit` would leave that
+                // position as the trailing post-state snapshot, which carries no
+                // captured path (no following tx supplies proofs).
                 bench::prestate::sweep_per_tx_snapshots_with_paths(
                     block.block_number,
                     created_at,
                     initial,
-                    &block.txs[..real_tx_limit],
+                    &block.txs[..total_available],
                     &sweep_data,
                     &sweep_bt,
                     |_pos, _wall_ms| {},
