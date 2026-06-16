@@ -70,7 +70,7 @@ cell_command = [
   "--chunk-subscription", "lighter-prover-scale-0p5pct-chunk-sub",
   "--results-topic", "lighter-prover-scale-0p5pct-results",
   "--proof-mount-path", "/mnt/proof-store",
-  "--tx-per-proof", "9",
+  "--tx-per-proof", "18",
   "--poll-interval-s", "2",
 ]
 
@@ -125,7 +125,7 @@ coordinator_command = [
   "--merge-task-topic", "lighter-prover-scale-0p5pct-merge-task",
   "--merge-result-subscription", "lighter-prover-scale-0p5pct-merge-result-sub",
   "--native-merge-plane",
-  "--tx-per-proof", "9",
+  "--tx-per-proof", "18",
   "--poll-interval-s", "2",
 ]
 
@@ -166,7 +166,7 @@ fold_worker_command = [
   "--merge-result-topic", "lighter-prover-scale-0p5pct-merge-result",
   "--proof-mount-path", "/mnt/proof-store",
   "--native-merge-plane",
-  "--tx-per-proof", "9",
+  "--tx-per-proof", "18",
   "--poll-interval-s", "2",
 ]
 
