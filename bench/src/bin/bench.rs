@@ -1877,11 +1877,29 @@ fn run_cell(args: &Args) {
             // WITNESS RESOLVE (ADR-0008 §2.1): resolve the {height,
             // witness_index} REFERENCE that crossed the bus to local witness
             // bytes, measuring the real local-resolve floor. The corpus is
-            // keyed by this cell's local height; we map the wire witness_index
-            // into the local pool (round-robin if the wire height differs from
-            // the local fixture height — the k=1 fixture is a single block, so
-            // the index space is the pool).
-            let pool_idx = (chunk.witness_index as usize) % pool_total.max(1);
+            // keyed by this cell's local height.
+            //
+            // Issue #244 — resolve/upload index AGREEMENT. The cell UPLOADS the
+            // proven leaf under `proof_object_key(height, witness_index)` (the
+            // RAW dispatched wire index), and the coordinator's downstream fold
+            // (`coordinator_leaf_keys_ordered` / `coordinator_real_fold`) both
+            // ORDERS by `witness_index` and DOWNLOADS by that same raw-index
+            // key. So the raw dispatched `witness_index` is the authoritative
+            // position end-to-end — the RESOLVE must honor it whenever the
+            // corpus actually HOLDS that position. We only fall back to the
+            // modulo when the wire index exceeds the local corpus width (the
+            // k=1 single-block fixture case, where the index space wraps the
+            // pool). Pre-#244 the resolve ALWAYS took the modulo, so for
+            // `witness_index >= pool_total` the cell proved slice
+            // `witness_index % pool_total` but filed it under `witness_index` —
+            // a proven slice stored at a position it does not occupy. With the
+            // coordinator's #244 clamp every dispatched index is now < width,
+            // so resolve and upload agree on the dispatched position.
+            let pool_idx = if (chunk.witness_index as usize) < pool_total {
+                chunk.witness_index as usize
+            } else {
+                (chunk.witness_index as usize) % pool_total.max(1)
+            };
             let witness_key = WitnessKey::new(corpus_height, pool_idx as u64);
             let witness_fetch_ms = witness_corpus.resolve(witness_key).map(|r| r.fetch_ms);
 
@@ -2539,6 +2557,31 @@ fn run_coordinator(args: &Args) {
         None
     };
 
+    // ── Issue #244: corpus SPLIT-width (the authority on `k_available`) ──
+    // The coordinator owns SPLIT but the CORPUS is the authority on partition
+    // width (ADR-0008 §1.1). `run_coordinator` has no in-process resolver (the
+    // cells hold the mounted corpus in a separate process), but it CAN read
+    // the SAME baked `bench_test.json` fixture the cells mount, and derive the
+    // corpus width EXACTLY as the cell derives its `pool_total`
+    // (`aligned_limit = (tx_limit/S)*S`, `effective_limit =
+    // aligned_limit.min((txs.len()/S)*S)`, `slices = effective_limit / S`).
+    // This is the same height-invariant single fixture every block in this
+    // benchmark resolves from, so it is computed ONCE here. `0` means the
+    // width is unknown (fixture has no full chunk) — in which case we fall
+    // back to the requested k, matching `conductor/dispatch.rs:164-166`.
+    let k_available: u64 = {
+        let block = get_test_block_json_file("bench_test.json");
+        let s = args.tx_per_proof;
+        let aligned_limit = (args.tx_limit / s) * s;
+        let effective_limit = aligned_limit.min((block.txs.len() / s) * s);
+        (effective_limit / s) as u64
+    };
+    info!(
+        "coordinator: corpus SPLIT-width k_available={} (from bench_test.json, S={}); \
+         dispatched k will be clamped to this (issue #244)",
+        k_available, args.tx_per_proof
+    );
+
     let mut blocks_done: u64 = 0;
     loop {
         if args.max_units != 0 && blocks_done >= args.max_units {
@@ -2559,12 +2602,33 @@ fn run_coordinator(args: &Args) {
         };
 
         let block_start = Instant::now();
-        // SPLIT: k = ceil(tx / S) (ADR-0006 §1.2).
-        let k = split_k(block.tx_count, args.tx_per_proof).max(1);
-        info!(
-            "coordinator: block height={} tx_count={} -> SPLIT into k={} chunks (S={})",
-            block.height, block.tx_count, k, args.tx_per_proof
-        );
+        // SPLIT: k = ceil(tx / S) (ADR-0006 §1.2), but NEVER exceed what the
+        // corpus actually holds for this height (issue #244). This mirrors the
+        // already-correct clamp in `conductor/dispatch.rs:162-168`
+        // (`Coordinator::prove_block`): the corpus is the authority on the
+        // partition width, so dispatching `0..k_requested` references when the
+        // corpus only holds `k_available` slices would ask for chunks that do
+        // not exist. `k_available == 0` (width unknown) falls back to the
+        // requested k, exactly as dispatch.rs does. The `.max(1)` floor is
+        // preserved.
+        let k_requested = split_k(block.tx_count, args.tx_per_proof).max(1);
+        let k = if k_available == 0 {
+            k_requested
+        } else {
+            k_requested.min(k_available)
+        };
+        if k != k_requested {
+            info!(
+                "coordinator: block height={} tx_count={} -> SPLIT requested k={} \
+                 CLAMPED to k={} (corpus width; S={}) (issue #244)",
+                block.height, block.tx_count, k_requested, k, args.tx_per_proof
+            );
+        } else {
+            info!(
+                "coordinator: block height={} tx_count={} -> SPLIT into k={} chunks (S={})",
+                block.height, block.tx_count, k, args.tx_per_proof
+            );
+        }
 
         // DISPATCH: publish the k chunk REFERENCES to the chunk topic.
         let mut dispatched: u64 = 0;
