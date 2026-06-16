@@ -1,0 +1,37 @@
+# ─── Stage 1: Build Plonky2 STARK Proving Engine ─────────────────────
+FROM rust:1.82-bookworm AS builder
+
+WORKDIR /app
+
+# Install required upstream nightly toolchain
+COPY rust-toolchain ./
+RUN rustup install $(cat rust-toolchain) && rustup default $(cat rust-toolchain)
+
+# Copy manifests for dependency resolution
+COPY Cargo.toml Cargo.lock ./
+COPY circuit/Cargo.toml circuit/Cargo.toml
+COPY bench/Cargo.toml bench/Cargo.toml
+
+# Copy circuit and bench crates
+COPY circuit/ circuit/
+COPY bench/ bench/
+
+# Compile production ZKP prover binary
+RUN cargo build --release --bin zkp_prover
+
+# ─── Stage 2: Minimal High-Throughput Compute Runtime ────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /data
+
+# Copy compiled prover from builder stage
+COPY --from=builder /app/target/release/zkp_prover /usr/local/bin/zkp-prover
+
+ENV RUST_LOG=info
+
+ENTRYPOINT ["zkp-prover"]
