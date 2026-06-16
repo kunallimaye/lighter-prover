@@ -92,7 +92,21 @@ _verify_service_accounts_and_auth() {
   if [[ -n "${builder_sa}" ]]; then
     _log_info "Testing local caller access (actAs) on Build SA: ${builder_sa}..."
     if ! gcloud auth print-access-token --impersonate-service-account="${builder_sa}" &>/dev/null; then
-      _die "Active local caller identity lacks permission to act as Build SA ${builder_sa}. Ask the cloud owner to grant roles/iam.serviceAccountUser and roles/iam.serviceAccountTokenCreator."
+      local current_caller member_prefix="user"
+      current_caller="$(gcloud config get-value account 2>/dev/null || echo '<OPERATOR_EMAIL>')"
+      if [[ "${current_caller}" == *".gserviceaccount.com"* ]]; then
+        member_prefix="serviceAccount"
+      fi
+
+      printf '\n\033[1;31m[ERROR]\033[0m Active local caller identity (%s) lacks permission to act as Build SA %s.\n' "${current_caller}" "${builder_sa}" >&2
+      printf 'Ask the cloud administrator to run the following EXACT gcloud commands:\n\n' >&2
+      printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}" >&2
+      printf '    --member="%s:%s" \\\n' "${member_prefix}" "${current_caller}" >&2
+      printf '    --role="roles/iam.serviceAccountUser"\n\n' >&2
+      printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}" >&2
+      printf '    --member="%s:%s" \\\n' "${member_prefix}" "${current_caller}" >&2
+      printf '    --role="roles/iam.serviceAccountTokenCreator"\n\n' >&2
+      exit 1
     fi
     _log_ok "  Impersonation access confirmed."
   fi
