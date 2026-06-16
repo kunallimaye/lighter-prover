@@ -212,8 +212,10 @@ arrive without changing `k`.
 
 A third axis — **sampled per-block size** — drives a mainnet-faithful
 mix into the Tier-2 keep-pace phase (consumed by #214 Phase B). The
-canonical 7-band weights are the documented #212 mainnet shape
-(`bench/trace-format.md` §8.1): ~11% blocks at `tx==1`, ~74% pinned to
+canonical 7-band weights live in `bench/feeder/size_distributions.py`
+(`MAINNET_BIMODAL_COUNTS`) as the single-source-of-truth, with the
+same mix documented in `bench/trace-format.md` §4 (provenance header)
+for the #212 mainnet shape: ~11% blocks at `tx==1`, ~74% pinned to
 the chain's 500-tx cap, the long tail in between. Sampling is seeded
 and explicitly RNG-injected (no module-level `random`) so the same
 `--seed N` always produces a byte-identical stream.
@@ -249,8 +251,9 @@ python3 bench/feeder/feeder.py synth-peak \
 Honesty caveats:
 
 - Varies block **size/height** per the real distribution, **not tx
-  content** — stays inside the ADR-0009 §2.1 sanctioned size+height
-  boundary. Content variety remains gated on #184.
+  content** — stays inside the ADR-0009 §2 (decision) / §3 (scope)
+  sanctioned size+height boundary. Content variety remains gated on
+  #184.
 - Because the #212 mix is `k=56`-dominated (~74% of blocks pinned to
   the cap), driving this load is the **first live end-to-end k=56
   distributed fold** — never validated live before (prior runs were
