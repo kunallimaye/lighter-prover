@@ -95,6 +95,24 @@ When `synth-peak --rate` (aggregate tx/s) is used instead of
 legacy `peak_rate` axis is recorded in `params` too (back-compat: with
 the default `tx_count=500` this reproduces the old `cadence = 500/rate`).
 
+A third axis — **sampled per-block size** — is optionally enabled by
+`synth-peak --size-distribution <name>` (currently: `bimodal` = the
+documented mainnet 7-band mix from §8.1) or `--size-dist-file <PATH>`
+(custom JSON sampler config, same band partition). Required companion
+`--seed N` pins determinism. When in use, `params` carries
+(issue #220):
+
+- `size_distribution` — sampler name (`"bimodal"` or the file's `name`).
+- `seed` — RNG seed (integer).
+- `sampler_bands` — `{band_name: weight}` for the 7 canonical bands.
+- `tx_count` is **dropped** from `params` because it varies per block;
+  recording the default would falsify the trace.
+
+The realized per-band histogram is emitted on stderr at end-of-run as
+a single `REALIZED_HISTOGRAM eq_1=N1 2_49=N2 ... eq_500=N7 total=N`
+line (and optionally to a JSON sidecar via `--histogram-out PATH`).
+Per spec §1 the histogram never appears on per-event lines.
+
 The earlier single-axis form (only `peak_rate`, `tx_count` fixed at 500)
 remains valid provenance:
 
@@ -258,6 +276,14 @@ carries no provenance header. The fixture is a *verbatim* excerpt, so
 it is exempt from the header requirement (section 4); fabricating a
 header inside a file presented as a verbatim capture would falsify it.
 Tests using this fixture exercise the headerless pre-spec path.
+
+### 8.3 Committed synthetic fixtures (synth-peak)
+
+| Fixture | Generator invocation | Properties |
+|---|---|---|
+| `bench/feeder/fixtures/synth_k24_tx216.jsonl` | `synth-peak --tx-count 216 --block-rate 1 --duration 60s --dry-run` | constant `tx_count=216` (k=24 at S=9), ~61 blocks |
+| `bench/feeder/fixtures/synth_k32_tx288.jsonl` | `synth-peak --tx-count 288 --block-rate 1 --duration 60s --dry-run` | constant `tx_count=288` (k=32 at S=9), ~61 blocks |
+| `bench/feeder/fixtures/synth_bimodal_mainnet.jsonl` (issue #220) | `synth-peak --size-distribution bimodal --seed 220 --block-rate 11.08 --duration 60s --dry-run` | sampled per-block size (mainnet bimodal mix §8.1), ~665 blocks at mean cadence 11.08 blk/s; companion sidecar `synth_bimodal_mainnet.histogram.json` |
 
 ## 9. Cross-references
 

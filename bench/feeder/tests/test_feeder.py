@@ -433,6 +433,291 @@ class TestSynthPeakConfigurableLoad(unittest.TestCase):
         self._assert_fixture(SYNTH_K32, want_tx=288, want_k=32)
 
 
+SYNTH_BIMODAL_JSONL = Path(__file__).resolve().parents[1] / "fixtures" / \
+    "synth_bimodal_mainnet.jsonl"
+SYNTH_BIMODAL_HISTOGRAM = Path(__file__).resolve().parents[1] / \
+    "fixtures" / "synth_bimodal_mainnet.histogram.json"
+
+
+def run_cli_with_stderr(argv):
+    """Run feeder.main(), capture BOTH stdout and stderr; return
+    (rc, stdout_lines, stderr_text)."""
+    out = io.StringIO()
+    err = io.StringIO()
+    from contextlib import redirect_stderr
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = feeder.main(argv)
+    return rc, out.getvalue().splitlines(), err.getvalue()
+
+
+class TestSynthPeakBimodalSampling(unittest.TestCase):
+    """Issue #220 — synth-peak with a seeded per-block size distribution.
+
+    Mirrors TestSynthPeakConfigurableLoad's shape exactly: pure --dry-run,
+    no network, no sleeps; assertions on the stream + provenance + stderr.
+    """
+
+    def test_bimodal_sampler_pins_to_seed(self):
+        # Same --seed N -> byte-identical stream (header excepted, since
+        # generated_at is wall-clock). Body lines MUST match exactly.
+        argv = ["synth-peak", "--size-distribution", "bimodal",
+                "--seed", "220", "--block-rate", "11.08",
+                "--duration", "10s", "--dry-run"]
+        rc1, lines1 = run_cli(argv)
+        rc2, lines2 = run_cli(argv)
+        self.assertEqual((rc1, rc2), (0, 0))
+        # Drop the provenance header (carries timestamp).
+        self.assertEqual(lines1[1:], lines2[1:])
+
+    def test_bimodal_realized_matches_target_within_tolerance(self):
+        # ~300s at 11.08 blk/s -> ~3325 blocks; realized fractions per
+        # band must land within ±5% of the #212 target weights.
+        argv = ["synth-peak", "--size-distribution", "bimodal",
+                "--seed", "220", "--block-rate", "11.08",
+                "--duration", "300s", "--dry-run"]
+        rc, lines = run_cli(argv)
+        self.assertEqual(rc, 0)
+        _, events, _ = parse_stream(lines)
+        from size_distributions import (
+            BAND_NAMES, MAINNET_BIMODAL_COUNTS, realized_histogram)
+        tx_counts = [e["tx_count"] for e in events]
+        hist = realized_histogram(tx_counts)
+        total = len(tx_counts)
+        # Sanity: ~3325 blocks at 11.08 blk/s for 300s.
+        self.assertGreater(total, 3000)
+        target_total = sum(MAINNET_BIMODAL_COUNTS.values())
+        for name in BAND_NAMES:
+            target_frac = MAINNET_BIMODAL_COUNTS[name] / target_total
+            realized_frac = hist[name] / total
+            # ±5 percentage points (relaxed for the rare bands at this n).
+            self.assertLessEqual(
+                abs(realized_frac - target_frac), 0.05,
+                f"band {name}: realized {realized_frac:.4f} vs "
+                f"target {target_frac:.4f}")
+
+    def test_bimodal_histogram_stderr_summary(self):
+        # The end-of-run REALIZED_HISTOGRAM line on stderr is the
+        # always-on audit handle (sidecar is optional).
+        rc, _, stderr = run_cli_with_stderr([
+            "synth-peak", "--size-distribution", "bimodal",
+            "--seed", "220", "--block-rate", "11.08",
+            "--duration", "10s", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertIn("REALIZED_HISTOGRAM", stderr)
+        from size_distributions import BAND_NAMES
+        for name in BAND_NAMES:
+            self.assertIn(f"{name}=", stderr,
+                          f"stderr summary missing band {name}")
+        self.assertIn("total=", stderr)
+
+    def test_bimodal_histogram_out_sidecar(self):
+        # --histogram-out writes a JSON sidecar with sampler config + seed
+        # + realized counts. n_blocks matches what was emitted.
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                mode="r", suffix=".json", delete=False) as f:
+            sidecar_path = f.name
+        rc, lines = run_cli([
+            "synth-peak", "--size-distribution", "bimodal",
+            "--seed", "220", "--block-rate", "11.08",
+            "--duration", "10s", "--dry-run",
+            "--histogram-out", sidecar_path])
+        self.assertEqual(rc, 0)
+        with open(sidecar_path) as f:
+            sidecar = json.load(f)
+        from size_distributions import BAND_NAMES, MAINNET_BIMODAL_COUNTS
+        self.assertEqual(sidecar["seed"], 220)
+        self.assertEqual(sidecar["sampler"]["name"], "bimodal")
+        self.assertEqual(sidecar["sampler"]["bands"],
+                         MAINNET_BIMODAL_COUNTS)
+        self.assertEqual(set(sidecar["realized"].keys()), set(BAND_NAMES))
+        # n_blocks matches the emitted event count.
+        _, events, _ = parse_stream(lines)
+        self.assertEqual(sidecar["n_blocks"], len(events))
+        self.assertEqual(sum(sidecar["realized"].values()), len(events))
+
+    def test_bimodal_provenance_records_sampler(self):
+        rc, lines = run_cli([
+            "synth-peak", "--size-distribution", "bimodal",
+            "--seed", "220", "--block-rate", "11.08",
+            "--duration", "10s", "--dry-run"])
+        self.assertEqual(rc, 0)
+        header, _, _ = parse_stream(lines)
+        params = header["provenance"]["params"]
+        self.assertEqual(params["size_distribution"], "bimodal")
+        self.assertEqual(params["seed"], 220)
+        from size_distributions import MAINNET_BIMODAL_COUNTS
+        self.assertEqual(params["sampler_bands"], MAINNET_BIMODAL_COUNTS)
+        # When sampling, the constant tx_count axis is dropped (would
+        # falsify the trace).
+        self.assertNotIn("tx_count", params)
+        self.assertEqual(params["block_rate"], 11.08)
+
+    def test_bimodal_height_strictly_increasing_no_jumps(self):
+        rc, lines = run_cli([
+            "synth-peak", "--size-distribution", "bimodal",
+            "--seed", "220", "--block-rate", "11.08",
+            "--duration", "10s", "--dry-run"])
+        self.assertEqual(rc, 0)
+        _, events, _ = parse_stream(lines)
+        deltas = [b["height"] - a["height"]
+                  for a, b in zip(events, events[1:])]
+        self.assertTrue(deltas)
+        self.assertTrue(all(d == 1 for d in deltas),
+                        "every height delta MUST be +1 (no P2 expansion)")
+
+    def test_bimodal_tx_count_distribution_within_chain_cap(self):
+        rc, lines = run_cli([
+            "synth-peak", "--size-distribution", "bimodal",
+            "--seed", "220", "--block-rate", "11.08",
+            "--duration", "30s", "--dry-run"])
+        self.assertEqual(rc, 0)
+        _, events, _ = parse_stream(lines)
+        for ev in events:
+            self.assertIsInstance(ev["tx_count"], int)
+            self.assertGreaterEqual(ev["tx_count"], 1)
+            self.assertLessEqual(ev["tx_count"], 500)
+
+    def test_validation_rejects_bad_args(self):
+        # Cases that MUST exit with a non-zero status (argparse=2 for
+        # syntax errors; our own checks return 2 from cmd_synth_peak).
+        bad_argparse = [
+            # unknown distribution name
+            ["synth-peak", "--size-distribution", "unknown",
+             "--seed", "220", "--block-rate", "11.08",
+             "--duration", "10s", "--dry-run"],
+        ]
+        for argv in bad_argparse:
+            with self.subTest(case="argparse", argv=" ".join(argv)):
+                with self.assertRaises(SystemExit) as cm:
+                    feeder.main(argv)
+                self.assertEqual(cm.exception.code, 2)
+
+        # Runtime exit-2 cases: SystemExit(2) with an int code matching
+        # argparse's usage-error convention.
+        bad_runtime_exit2 = [
+            # --size-distribution without --seed
+            ["synth-peak", "--size-distribution", "bimodal",
+             "--block-rate", "11.08", "--duration", "10s", "--dry-run"],
+            # --size-distribution with --tx-count (mutex)
+            ["synth-peak", "--size-distribution", "bimodal",
+             "--seed", "220", "--tx-count", "216",
+             "--block-rate", "11.08", "--duration", "10s", "--dry-run"],
+            # --size-distribution with --rate (undefined)
+            ["synth-peak", "--size-distribution", "bimodal",
+             "--seed", "220", "--rate", "4000",
+             "--duration", "10s", "--dry-run"],
+        ]
+        for argv in bad_runtime_exit2:
+            with self.subTest(case="runtime-exit2", argv=" ".join(argv)):
+                with self.assertRaises(SystemExit) as cm:
+                    feeder.main(argv)
+                self.assertEqual(cm.exception.code, 2)
+
+        # File-error cases: SystemExit("msg") — .code is the string
+        # (Python's sys.exit convention), the process exits with status 1.
+        # We verify the message instead of the code-int.
+        bad_file_cases = [
+            # --size-dist-file: nonexistent path
+            (["synth-peak", "--size-dist-file",
+              "/nonexistent-issue-220-XYZ",
+              "--seed", "220", "--block-rate", "11.08",
+              "--duration", "10s", "--dry-run"],
+             "cannot read"),
+        ]
+        for argv, want_msg in bad_file_cases:
+            with self.subTest(case="file", argv=" ".join(argv)):
+                with self.assertRaises(SystemExit) as cm:
+                    feeder.main(argv)
+                self.assertIn(want_msg, str(cm.exception.code))
+
+        # Malformed JSON file -> SystemExit with a clear "not valid JSON"
+        # message.
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False) as f:
+            f.write("{not valid json")
+            malformed = f.name
+        argv = ["synth-peak", "--size-dist-file", malformed,
+                "--seed", "220", "--block-rate", "11.08",
+                "--duration", "10s", "--dry-run"]
+        with self.assertRaises(SystemExit) as cm:
+            feeder.main(argv)
+        self.assertIn("not valid JSON", str(cm.exception.code))
+
+        # --size-distribution AND --size-dist-file (mutex, argparse).
+        with self.assertRaises(SystemExit) as cm:
+            feeder.main([
+                "synth-peak", "--size-distribution", "bimodal",
+                "--size-dist-file", "/tmp/x.json",
+                "--seed", "220", "--block-rate", "11.08",
+                "--duration", "10s", "--dry-run"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_back_compat_constant_tx_count_unchanged(self):
+        # --tx-count N path with no sampler MUST match the post-#217
+        # behavior exactly: every block carries tx_count == N, no
+        # sampler keys in provenance, no REALIZED_HISTOGRAM on stderr.
+        rc, lines, stderr = run_cli_with_stderr([
+            "synth-peak", "--tx-count", "216", "--block-rate", "1",
+            "--duration", "60s", "--dry-run"])
+        self.assertEqual(rc, 0)
+        header, events, gaps = parse_stream(lines)
+        self.assertEqual(gaps, [])
+        self.assertTrue(all(e["tx_count"] == 216 for e in events))
+        params = header["provenance"]["params"]
+        self.assertEqual(params["tx_count"], 216)
+        self.assertNotIn("size_distribution", params)
+        self.assertNotIn("seed", params)
+        self.assertNotIn("sampler_bands", params)
+        # No sampler -> no realized histogram on stderr.
+        self.assertNotIn("REALIZED_HISTOGRAM", stderr)
+
+    def test_committed_fixture_bimodal_mainnet(self):
+        # Fixture exists, parses, and regenerates byte-identically
+        # (body) from the documented invocation. Histogram sidecar
+        # matches the re-run too.
+        self.assertTrue(SYNTH_BIMODAL_JSONL.exists(),
+                        f"missing committed fixture {SYNTH_BIMODAL_JSONL}")
+        self.assertTrue(SYNTH_BIMODAL_HISTOGRAM.exists(),
+                        f"missing committed sidecar {SYNTH_BIMODAL_HISTOGRAM}")
+        # Spec conformance.
+        with open(SYNTH_BIMODAL_JSONL) as f:
+            header, events, gaps, _ = feeder.load_trace(f)
+        self.assertIsNotNone(header)
+        self.assertEqual(header["generator"], "synth-peak")
+        self.assertEqual(gaps, 0)
+        feeder.validate_events(events)
+        params = header["params"]
+        self.assertEqual(params["size_distribution"], "bimodal")
+        self.assertEqual(params["seed"], 220)
+        # Heights strictly increasing by 1.
+        hs = [e["height"] for e in events]
+        self.assertEqual(hs, list(range(hs[0], hs[0] + len(hs))))
+        # Re-run the documented invocation and assert body bytes match.
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                mode="r", suffix=".json", delete=False) as f:
+            sidecar_path = f.name
+        rc, lines = run_cli([
+            "synth-peak", "--size-distribution", "bimodal",
+            "--seed", "220", "--block-rate", "11.08",
+            "--duration", "60s", "--dry-run",
+            "--histogram-out", sidecar_path])
+        self.assertEqual(rc, 0)
+        with open(SYNTH_BIMODAL_JSONL) as f:
+            committed_lines = f.read().splitlines()
+        # Body (post-header) MUST be byte-identical; header carries
+        # generated_at (wall-clock) so it is excepted.
+        self.assertEqual(lines[1:], committed_lines[1:])
+        # Sidecar JSON matches the committed copy as well.
+        with open(SYNTH_BIMODAL_HISTOGRAM) as f:
+            committed_sidecar = json.load(f)
+        with open(sidecar_path) as f:
+            rerun_sidecar = json.load(f)
+        self.assertEqual(rerun_sidecar, committed_sidecar)
+
+
 class TestSchemaAndMonotonicity(unittest.TestCase):
     """Test 6 — every emitted stream parses + spec §5 monotonicity."""
 

@@ -57,26 +57,25 @@ _SEED = os.path.join(_REPO, "bench", "bench_test.json")
 # Real seed block height (bench_test.json "bn"), the k=1 precedent height.
 _SEED_HEIGHT = 186974592
 
+# Shared 7-band partition + documented mainnet weights (issue #220):
+# single source of truth in `bench/feeder/size_distributions.py` so the
+# feeder's --size-distribution bimodal sampler and this corpus generator
+# stay in lockstep. Previously had local _BANDS / _DOC_BANDS copies here.
+sys.path.insert(
+    0, os.path.join(_REPO, "bench", "feeder"))
+import size_distributions as _sd  # noqa: E402
+
 # The analyzer's band order (`bands_spec` in analyze.py) with a representative
 # tx_count per band for sizing the slices. The cap band is exact (=500); the
 # range bands use the band MIDPOINT as the representative size (documented).
-_BANDS = [
-    ("eq_1", 1),
-    ("2_49", 25),
-    ("50_99", 75),
-    ("100_249", 175),
-    ("250_399", 325),
-    ("400_499", 450),
-    ("eq_500", 500),
-]
+# Shape preserved verbatim ((name, representative) tuples) so call sites
+# below are unchanged.
+_BANDS = [(name, rep) for name, _lo, _hi, rep in _sd.BANDS]
 
 # Documented fallback band counts (PR #163 body / trace-format.md §8.1), used
 # ONLY with --from-doc and clearly labeled. Recomputed-from-real-trace is the
 # default and strongly preferred.
-_DOC_BANDS = {
-    "eq_1": 660, "2_49": 122, "50_99": 124, "100_249": 301,
-    "250_399": 219, "400_499": 136, "eq_500": 4348,
-}
+_DOC_BANDS = dict(_sd.MAINNET_BIMODAL_COUNTS)
 
 
 def sha256_file(path):
