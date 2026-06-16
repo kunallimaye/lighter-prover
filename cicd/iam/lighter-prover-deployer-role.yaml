@@ -1,5 +1,9 @@
 title: "lighter-prover Deployer"
-description: "Curated permissions for the lighter-prover agent SA (operator identity). Daily operation: Cloud Build submits, AR push/pull, GCS results/TF-state access, logs read, plus Cloud Run (Jobs) perms for the Phase 2 runtime. Now also in scope: GKE Autopilot cluster + Pub/Sub dispatch plane lifecycle (apply+destroy) for the cicd/terraform/gke deploy automation (PR #154, #167), plus the GKE Workload-Identity deployer perms (proof-store bucket lifecycle + metrics-adapter project IAM binding) needed by the #231 WI apply. Bound with 30-day expiry by scripts/cloud.sh::admin-cloud-init."
+# NOTE: GCP caps custom-role descriptions at 300 chars. `gcloud iam roles
+# update --file=<this>` (scripts/cloud.sh::_step_create_custom_role) fails
+# with INVALID_ARGUMENT if this string exceeds 300 — keep it short. The
+# full rationale for each permission group lives in the comments below.
+description: "Curated permissions for the lighter-prover agent SA (operator identity): Cloud Build, AR, GCS, logs, Cloud Run Jobs, GKE Autopilot + Pub/Sub lifecycle (cicd/terraform/gke), plus GKE Workload-Identity deployer perms (#231). Bound with 30-day expiry by scripts/cloud.sh::admin-cloud-init."
 stage: GA
 includedPermissions:
   # Artifact Registry — push/pull bench images (cloud-bench-build matrix,
