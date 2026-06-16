@@ -178,7 +178,7 @@ configs deploy a **real proving** run. They carry **no** literal
 - **Image SHA is pinned.** `cell_image`/`coordinator_image` point at a REAL
   arm64 (`-neoverse-v2`/Axion) `bench` image that already EXISTS in Artifact
   Registry — **no build needed**. Currently pinned:
-  `us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:1d5036b5369fcf6a966738e6de8265b6e5a6e800-neoverse-v2`.
+  `us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:b0c84cb3bb1d8e799bf7b291bcf9e9b4560ea947-neoverse-v2`.
   Re-pin to a newer `cicd/cloudbuild.yaml` output as the bench binary advances
   (`gcloud artifacts docker tags list .../lighter-prover/bench --filter="tag~neoverse-v2"`).
 - **Project + proof bucket are auto-wired.** `--project` and `--proof-bucket`
