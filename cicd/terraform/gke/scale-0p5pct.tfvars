@@ -199,6 +199,11 @@ results_subscription = "lighter-prover-scale-0p5pct-results-sub"
 enable_proof_store = true
 enable_proof_mount = true
 enable_merge_plane = true
+# Issue #235: spread pods across zones so a single-zone c4a (Axion) stockout
+# doesn't strand this multi-node tier. FINDING C: c4a stocked out across ALL
+# us-central1 zones; us-east4 confirmed working. ScheduleAnyway (in main.tf) so
+# a real N-1-zone stockout never blocks scheduling — spread preferred, not forced.
+enable_zone_spread = true
 # Issue #233: tier-prefix the provisioned merge-plane Pub/Sub names (like the
 # chunk/results overrides above) so the PROVISIONED topic/sub names MATCH the
 # tier-prefixed flag values in coordinator_command/fold_worker_command, and so

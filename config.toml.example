@@ -23,10 +23,15 @@ name = "lighter-prover"
 #
 # Every role inherits from here when its own section is empty.
 # Set project + region; everything else has sensible defaults.
+#
+# Region note (issue #235 / docs/live-benchmark-results.md FINDING C):
+# us-east4 is the default because c4a (Axion) STOCKED OUT across all
+# us-central1 zones during the multi-node benchmark, while us-east4
+# confirmed real Axion capacity. Override per role below if needed.
 
 [gcp.defaults]
 project = "your-gcp-project-id"
-region  = "us-central1"
+region  = "us-east4"
 
 # ─── Role-axis sections ────────────────────────────────────────────
 #

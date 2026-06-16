@@ -96,6 +96,16 @@ locals {
   # (the #198 at-least-once contract). Pinning workers un-evictable would only
   # starve the bin-packer for no resilience gain.
   fold_worker_annotations = local.proof_mount_on ? { "gke-gcsfuse/volumes" = "true" } : {}
+
+  # Issue #235: cells ALSO transit their L2 leaf proofs through the SAME
+  # gcsfuse-mounted proof store (the cell command passes --proof-mount-path,
+  # so storage.rs selects file-I/O MOUNT mode over the gcloud-cp fallback —
+  # bench/src/conductor/storage.rs). Without the gcsfuse opt-in annotation +
+  # the volume below, the cell wrote leaf proofs to a NON-EXISTENT mount path.
+  # Mirrors local.fold_worker_annotations exactly: cells are stateless
+  # competing-pull consumers, so they carry the gcsfuse opt-in but NOT the
+  # coordinator's safe-to-evict=false.
+  cell_annotations = local.proof_mount_on ? { "gke-gcsfuse/volumes" = "true" } : {}
 }
 
 # ─── 1. GKE Autopilot cluster ────────────────────────────────────────
@@ -409,6 +419,12 @@ resource "kubernetes_deployment" "cells" {
           app           = "prover-cells"
           machine-class = "chunk-prover-cell"
         }
+        # Issue #235: the gcsfuse CSI opt-in (only when the proof mount is on),
+        # mirroring the coordinator/fold-worker. Required so the gcsfuse CSI
+        # driver injects the sidecar that backs the proof-store volume below.
+        # NO safe-to-evict=false here by design (cells are stateless
+        # competing-pull consumers, like the fold workers).
+        annotations = local.cell_annotations
       }
 
       spec {
@@ -422,6 +438,25 @@ resource "kubernetes_deployment" "cells" {
           var.cell_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.cell_compute_class },
           var.cell_machine_family == "" ? {} : { "cloud.google.com/machine-family" = var.cell_machine_family }
         )
+
+        # Issue #235: spread cell pods across zones so a single-zone c4a
+        # (Axion) stockout (FINDING C) doesn't strand the whole pool.
+        # when_unsatisfiable=ScheduleAnyway: prefer spread, but a real
+        # N-1-zone stockout must NOT block scheduling — we tolerate
+        # concentration over a stranded run. Gated by enable_zone_spread.
+        dynamic "topology_spread_constraint" {
+          for_each = var.enable_zone_spread ? [1] : []
+          content {
+            max_skew           = var.zone_spread_max_skew
+            topology_key       = "topology.kubernetes.io/zone"
+            when_unsatisfiable = "ScheduleAnyway"
+            label_selector {
+              match_labels = {
+                app = "prover-cells"
+              }
+            }
+          }
+        }
 
         container {
           name    = "cell"
@@ -440,6 +475,31 @@ resource "kubernetes_deployment" "cells" {
             }
           }
 
+          # Issue #235: point the bench binary at the gcsfuse mount so
+          # storage.rs selects mount-mode file I/O for the L2 leaf-proof
+          # upload (LIGHTER_PROOF_MOUNT). Only set when the bucket is actually
+          # mounted below. Mirrors the coordinator/fold-worker pattern (#206).
+          dynamic "env" {
+            for_each = local.proof_mount_on ? [1] : []
+            content {
+              name  = "LIGHTER_PROOF_MOUNT"
+              value = var.proof_mount_path
+            }
+          }
+
+          # Issue #235: mount the gcsfuse CSI volume into the container at the
+          # path the bench binary writes its L2 leaf proofs to.
+          dynamic "volume_mount" {
+            for_each = local.proof_mount_on ? [1] : []
+            content {
+              name       = "proof-store"
+              mount_path = var.proof_mount_path
+              # read_write: the cell WRITES its L2 leaf proof through this mount
+              # (the #206 transport surface, #235 cell side).
+              read_only = false
+            }
+          }
+
           resources {
             requests = {
               cpu    = var.cell_cpu_request
@@ -448,6 +508,26 @@ resource "kubernetes_deployment" "cells" {
             limits = {
               cpu    = var.cell_cpu_request
               memory = var.cell_memory_request
+            }
+          }
+        }
+
+        # Issue #235: the gcsfuse CSI ephemeral inline volume backed by the
+        # SAME proof-store bucket #179 created. The pod GSA already holds
+        # objectAdmin on it (proof_store_pod_object_admin), so NO new IAM is
+        # needed. implicit_dirs lets the `{height}/{witness_index}` key prefixes
+        # resolve as directories on the bucket. Mirrors coordinator/fold-worker.
+        dynamic "volume" {
+          for_each = local.proof_mount_on ? [1] : []
+          content {
+            name = "proof-store"
+            csi {
+              driver    = "gcsfuse.csi.storage.gke.io"
+              read_only = false
+              volume_attributes = {
+                bucketName   = local.proof_store_bucket_name
+                mountOptions = "implicit-dirs"
+              }
             }
           }
         }
@@ -515,6 +595,25 @@ resource "kubernetes_deployment" "coordinator" {
           var.coordinator_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.coordinator_compute_class },
           var.coordinator_machine_family == "" ? {} : { "cloud.google.com/machine-family" = var.coordinator_machine_family }
         )
+
+        # Issue #235: spread coordinator pods across zones so a single-zone
+        # c4a (Axion) stockout (FINDING C) doesn't strand the pool.
+        # when_unsatisfiable=ScheduleAnyway: prefer spread, but a real
+        # N-1-zone stockout must NOT block scheduling. Gated by
+        # enable_zone_spread.
+        dynamic "topology_spread_constraint" {
+          for_each = var.enable_zone_spread ? [1] : []
+          content {
+            max_skew           = var.zone_spread_max_skew
+            topology_key       = "topology.kubernetes.io/zone"
+            when_unsatisfiable = "ScheduleAnyway"
+            label_selector {
+              match_labels = {
+                app = "prover-coordinator"
+              }
+            }
+          }
+        }
 
         container {
           name    = "coordinator"
@@ -692,6 +791,25 @@ resource "kubernetes_deployment" "fold_worker" {
           var.fold_worker_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.fold_worker_compute_class },
           var.fold_worker_machine_family == "" ? {} : { "cloud.google.com/machine-family" = var.fold_worker_machine_family }
         )
+
+        # Issue #235: spread fold-worker pods across zones so a single-zone
+        # c4a (Axion) stockout (FINDING C) doesn't strand the pool.
+        # when_unsatisfiable=ScheduleAnyway: prefer spread, but a real
+        # N-1-zone stockout must NOT block scheduling. Gated by
+        # enable_zone_spread.
+        dynamic "topology_spread_constraint" {
+          for_each = var.enable_zone_spread ? [1] : []
+          content {
+            max_skew           = var.zone_spread_max_skew
+            topology_key       = "topology.kubernetes.io/zone"
+            when_unsatisfiable = "ScheduleAnyway"
+            label_selector {
+              match_labels = {
+                app = "prover-fold-worker"
+              }
+            }
+          }
+        }
 
         container {
           name    = "fold-worker"
