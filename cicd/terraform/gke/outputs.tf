@@ -91,5 +91,26 @@ output "machine_classes" {
       safe_to_evict     = "false (hardwired — ADR-0003 amendment §3)"
       pdb_min_available = var.coordinator_pdb_min_available
     }
+    fold_workers = {
+      enabled       = var.enable_fold_workers
+      replicas      = var.enable_fold_workers ? var.fold_worker_replicas : 0
+      arch          = var.fold_worker_arch
+      compute_class = var.fold_worker_compute_class
+      cpu_request   = var.fold_worker_cpu_request
+      image         = var.fold_worker_image
+      safe_to_evict = "true (stateless competing-pull consumer — #232; un-acked merge task is redelivered)"
+    }
+  }
+}
+
+output "fold_workers" {
+  description = "The fold-worker pool (issue #232) that competing-pulls the MERGE-TASK subscription for the cross-machine distributed fold (issue #198). replicas = 0 when enable_fold_workers = false."
+  value = {
+    enabled                 = var.enable_fold_workers
+    replicas                = var.enable_fold_workers ? var.fold_worker_replicas : 0
+    merge_task_subscription = var.enable_merge_plane ? var.merge_task_subscription : null
+    merge_result_topic      = var.enable_merge_plane ? var.merge_result_topic : null
+    service_account_name    = var.enable_pod_workload_identity ? var.pod_ksa_name : "default (no Workload Identity)"
+    proof_mount_path        = var.enable_proof_mount && var.enable_proof_store ? var.proof_mount_path : null
   }
 }

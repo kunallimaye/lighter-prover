@@ -104,6 +104,13 @@ coordinator_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/ben
 # Issue #216: --project and --proof-bucket are injected as LIGHTER_PROJECT /
 # LIGHTER_PROOF_BUCKET env vars by terraform (main.tf local.prover_wiring_env)
 # from var.project_id + the resolved bucket name — no literal placeholders.
+#
+# Issue #232: --fold-distributed makes the leader PUBLISH merge tasks; for the
+# fold-worker pool (added below) to pull them, the leader and workers must
+# agree on the merge-plane names. The leader is wired with the merge-TASK topic
+# it publishes to + the merge-RESULT subscription it barriers on; the fold
+# workers (fold_worker_command) take the matching merge-task SUBSCRIPTION +
+# merge-result TOPIC. These names are the enable_merge_plane defaults.
 coordinator_command = [
   "/usr/local/bin/prover", "--mode", "coordinator",
   "--dispatch-subscription", "lighter-prover-scale-0p2pct-dispatch-sub",
@@ -111,6 +118,9 @@ coordinator_command = [
   "--results-subscription", "lighter-prover-scale-0p2pct-results-sub",
   "--proof-mount-path", "/mnt/proof-store",
   "--fold-distributed",
+  "--merge-task-topic", "lighter-prover-merge-task",
+  "--merge-result-subscription", "lighter-prover-merge-result-sub",
+  "--native-merge-plane",
   "--tx-per-proof", "9",
   "--poll-interval-s", "2",
 ]
@@ -121,6 +131,42 @@ coordinator_command = [
 # minAvailable=1 pins it fully un-evictable so a bin-pack/eviction never
 # takes an in-flight, key-resident coordinator.
 coordinator_pdb_min_available = 1
+
+# ── Machine CLASS 3: FOLD WORKERS (issue #232 — the consumer of #198) ──
+# The coordinator above runs --fold-distributed, so the leader publishes one
+# merge task per merge pair. WITHOUT a worker pool to competing-pull them, the
+# per-level barrier times out and the run fails. The #198 governing principle
+# is "one merge per worker, scale by worker count" — so the lever is
+# fold_worker_replicas, NOT a bigger box. A handful of workers lets a depth-6
+# block's wide level-1 actually fan out (its first merge level has the most
+# pairs). Sized SEPARATELY from cells + coordinators (ADR-0006: never summed).
+# Same full-core c4a/Axion shape + REAL bench image as the coordinator, run in
+# --mode fold-worker. NO safe-to-evict/PDB by design: an evicted mid-merge task
+# is redelivered to another worker (the #198 at-least-once contract).
+enable_fold_workers        = true
+fold_worker_replicas       = 4 # a handful so a wide level-1 fans out; scale the fold by worker count (#198)
+fold_worker_compute_class  = "Performance"
+fold_worker_machine_family = "c4a"
+fold_worker_arch           = "arm64"
+fold_worker_cpu_request    = "43"   # whole c4a-highcpu-64 minus Autopilot reservation; a merge runs on the FULL core budget (#198)
+fold_worker_memory_request = "44Gi" # resident merge proving key + headroom (worker RSS proxy, like the coordinator)
+# Issue #216: same REAL arm64 (neoverse-v2) bench image as cells/coordinator.
+fold_worker_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:1d5036b5369fcf6a966738e6de8265b6e5a6e800-neoverse-v2"
+# The worker competing-pulls the merge-task subscription, proves ONE merge,
+# transits the output through the gcsfuse proof mount, and reports on the
+# merge-result topic. --project/--proof-bucket are injected as LIGHTER_PROJECT/
+# LIGHTER_PROOF_BUCKET env vars by terraform (no literal tokens here).
+# --native-merge-plane selects the native manual-ack streaming-pull client
+# (#205). --tx-per-proof 9 matches the cell leaf granularity.
+fold_worker_command = [
+  "/usr/local/bin/prover", "--mode", "fold-worker",
+  "--merge-task-subscription", "lighter-prover-merge-task-sub",
+  "--merge-result-topic", "lighter-prover-merge-result",
+  "--proof-mount-path", "/mnt/proof-store",
+  "--native-merge-plane",
+  "--tx-per-proof", "9",
+  "--poll-interval-s", "2",
+]
 
 # ── Inner chunk-dispatch + results planes (#172, the real coordination) ──
 # Beyond the outer block-dispatch backlog signal, the distributed run needs
