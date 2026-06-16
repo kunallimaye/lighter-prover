@@ -21,6 +21,7 @@ future GKE-Standard or MIG backend is a sibling root selected by the
 | `google_pubsub_topic` + `subscription` | The block-dispatch backlog signal (ADR-0006 §1.1). |
 | `kubernetes_deployment.cells` | **Machine CLASS 1** — chunk-prover cells (CPU-saturating; c4a/Axion in prod). |
 | `kubernetes_deployment.coordinator` | **Machine CLASS 2** — coordinators (fold L2 + prove L4; distinct class). |
+| `kubernetes_deployment.fold_worker` | **Machine CLASS 3** — fold workers (issue #232) that competing-pull the MERGE-TASK subscription for the cross-machine distributed fold (issue #198). Gated by `enable_fold_workers`. |
 | `kubernetes_pod_disruption_budget_v1.coordinator` | **HARD DAY-1** — PDB for the coordinator pool. |
 | coordinator pod annotation `safe-to-evict=false` | **HARD DAY-1** — hardwired in `locals`, cannot be turned off by tfvars. |
 | `kubernetes_horizontal_pod_autoscaler_v2.backlog` | HPA on `num_undelivered_messages` external metric. |
@@ -28,10 +29,10 @@ future GKE-Standard or MIG backend is a sibling root selected by the
 
 ## Workload Identity for the prover pods (issue #231)
 
-The cell/coordinator pods authenticate to **Pub/Sub** and **GCS** via
-Workload Identity. Terraform creates a dedicated KSA, annotates it to the
+The cell/coordinator/fold-worker pods authenticate to **Pub/Sub** and **GCS**
+via Workload Identity. Terraform creates a dedicated KSA, annotates it to the
 pod GSA, binds `roles/iam.workloadIdentityUser`, and sets
-`service_account_name` on both deployments. Without this, pods run as the
+`service_account_name` on all three deployments. Without this, pods run as the
 `default` KSA and cannot auth — the whole pipeline fails.
 
 All four knobs are **defaulted** so the existing `smoke.tfvars` /
@@ -39,7 +40,7 @@ All four knobs are **defaulted** so the existing `smoke.tfvars` /
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `enable_pod_workload_identity` | `true` | Create the prover KSA + `workloadIdentityUser` binding and set `service_account_name` on the cell/coordinator pods. WI is harmless when planes are off (smoke), required whenever pods must auth. |
+| `enable_pod_workload_identity` | `true` | Create the prover KSA + `workloadIdentityUser` binding and set `service_account_name` on the cell/coordinator/fold-worker pods. WI is harmless when planes are off (smoke), required whenever pods must auth. |
 | `pod_ksa_name` | `prover` | Name of the KSA (in the `default` namespace) the pods run as, annotated to the pod GSA. |
 | `proof_store_pod_gsa_email` | `null` → derives `lighter-prover-pods@${project_id}.iam.gserviceaccount.com` | The pod GSA the KSA impersonates. `null` makes the email **follow `project_id`**; set a value to override. The GSA itself is **not** created here (exists out-of-band). |
 | `enable_pubsub_iam` | `false` | When `false`, the pod GSA's `pubsub.publisher`/`pubsub.subscriber` are relied on **out-of-band** (VERIFY) — Terraform does not touch them. Set `true` to bring those grants under Terraform management (GRANT). Satisfies "grant (or verify)". |
@@ -51,11 +52,34 @@ The WI member pattern follows the proven metrics-adapter binding:
 > Pub/Sub + GCS (no auth errors) is the operator's separate verification of
 > the #231 acceptance criteria — out of scope for the Terraform change itself.
 
-## The two machine classes are sized SEPARATELY (never summed)
+## The machine classes are sized SEPARATELY (never summed)
 
 Each class has its own machine-shape, resource-request, and replica-count
 variables. The cell tier is the large, CPU-saturating fleet; the
 coordinator tier is ~1% of it but a **distinct** compute class.
+
+A third class, the **fold workers** (issue #232), is the consumer side of the
+cross-machine distributed fold (issue #198). When a coordinator runs
+`--fold-distributed`, the leader publishes one merge task per merge pair to the
+MERGE-TASK Pub/Sub plane; the fold-worker pods competing-pull them, prove ONE
+merge each on their **full core budget**, transit the output through the
+gcsfuse-mounted proof store, and report on the MERGE-RESULT plane. **Without a
+fold-worker pool, those merge tasks are pulled by nobody → the per-level
+barrier times out → the run fails.** The #198 governing principle is *one merge
+per worker, scale by worker count* — so the lever is `fold_worker_replicas`,
+not a bigger box. Fold workers deliberately carry **no** `safe-to-evict=false`
+and **no** PDB: they are stateless competing-pull consumers, so an evicted
+mid-merge task is simply redelivered to another worker (the #198 at-least-once
+contract). The pool is gated behind `enable_fold_workers` (off at smoke scale;
+the scale tfvars turn it on alongside `enable_merge_plane` +
+`enable_proof_store` + `enable_proof_mount`).
+
+The fold worker reaches Pub/Sub (pull the merge-task subscription, publish
+merge results) and GCS (transit intermediate proofs), so it runs under
+**Workload Identity** via the SAME knobs as the cell/coordinator pods — it sets
+`service_account_name` to the prover KSA when `enable_pod_workload_identity` is
+true (the default; see the Workload Identity section above), and falls back to
+the `default` KSA when WI is off. No fold-worker-specific WI variable is needed.
 
 ## Which image tag wires to each class
 

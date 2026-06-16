@@ -27,6 +27,11 @@ locals {
   workloads_on = var.enable_workloads ? 1 : 0
   adapter_on   = var.enable_workloads && var.metrics_adapter_enabled ? 1 : 0
 
+  # Issue #232: the fold-worker pool exists only when workloads are on AND it
+  # is explicitly enabled. AND-ing enable_workloads keeps a phased
+  # cluster-only apply (enable_workloads=false) from deploying workers.
+  fold_workers_on = var.enable_workloads && var.enable_fold_workers ? 1 : 0
+
   # Which deployment the backlog HPA targets.
   hpa_target_deployment = var.hpa_target_class == "coordinator" ? "coordinator" : "cells"
 
@@ -81,6 +86,16 @@ locals {
     local.coordinator_safe_to_evict_annotation,
     local.proof_mount_on ? { "gke-gcsfuse/volumes" = "true" } : {}
   )
+
+  # Issue #232: fold workers transit intermediate merge proofs through the SAME
+  # gcsfuse-mounted proof store as the coordinator (#206 transport). They carry
+  # the gcsfuse opt-in annotation when the mount is on, but DELIBERATELY NOT the
+  # coordinator's safe-to-evict=false: a fold worker is a stateless,
+  # competing-pull consumer of the merge-task subscription — if Autopilot evicts
+  # one mid-merge, the un-acked task is simply redelivered to another worker
+  # (the #198 at-least-once contract). Pinning workers un-evictable would only
+  # starve the bin-packer for no resilience gain.
+  fold_worker_annotations = local.proof_mount_on ? { "gke-gcsfuse/volumes" = "true" } : {}
 }
 
 # ─── 1. GKE Autopilot cluster ────────────────────────────────────────
@@ -613,6 +628,155 @@ resource "kubernetes_pod_disruption_budget_v1" "coordinator" {
   }
 
   depends_on = [kubernetes_deployment.coordinator]
+}
+
+# CLASS 3 — FOLD WORKERS (issue #232; the consumer side of issue #198).
+#
+# Idle worker pods that competing-pull the MERGE-TASK subscription and prove
+# ONE merge each on their FULL core budget (no thread rationing — #198), then
+# transit the output through the gcsfuse-mounted proof store and report on the
+# merge-RESULT plane. WITHOUT this pool a `--fold-distributed` leader publishes
+# merge tasks that NOBODY pulls -> the per-level barrier times out -> the run
+# fails. Scale the fold by adding MORE workers, not bigger boxes (#198).
+#
+# Gated by local.fold_workers_on (enable_workloads AND enable_fold_workers).
+# Sized SEPARATELY from cells + coordinators — its own machine-shape /
+# resource-request / replica-count variables (ADR-0006: classes never summed).
+# UNLIKE the coordinator, fold workers carry NO safe-to-evict=false + NO PDB:
+# they are stateless competing-pull consumers, so an evicted mid-merge task is
+# simply redelivered to another worker (the #198 at-least-once contract).
+
+resource "kubernetes_deployment" "fold_worker" {
+  count = local.fold_workers_on
+
+  metadata {
+    name      = "prover-fold-worker"
+    namespace = "default"
+    labels = {
+      app           = "prover-fold-worker"
+      machine-class = "fold-worker"
+    }
+  }
+
+  spec {
+    replicas = var.fold_worker_replicas
+
+    selector {
+      match_labels = {
+        app = "prover-fold-worker"
+      }
+    }
+
+    template {
+      metadata {
+        labels = {
+          app           = "prover-fold-worker"
+          machine-class = "fold-worker"
+        }
+        # Issue #232: the gcsfuse CSI opt-in (only when the proof mount is on).
+        # NO safe-to-evict=false here by design (see the comment above the
+        # resource + local.fold_worker_annotations).
+        annotations = local.fold_worker_annotations
+      }
+
+      spec {
+        # Issue #231/#232: run as the WI-bound prover KSA (kubernetes_service_account.prover,
+        # created by #245) so the worker authenticates to Pub/Sub + GCS as the
+        # pod GSA. Uses the SAME enable_pod_workload_identity / pod_ksa_name
+        # knobs as the cell/coordinator pods; null falls back to the `default`
+        # KSA when WI is off (smoke topology, no GCP auth).
+        service_account_name = var.enable_pod_workload_identity ? var.pod_ksa_name : null
+
+        node_selector = merge(
+          { "kubernetes.io/arch" = var.fold_worker_arch },
+          var.fold_worker_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.fold_worker_compute_class },
+          var.fold_worker_machine_family == "" ? {} : { "cloud.google.com/machine-family" = var.fold_worker_machine_family }
+        )
+
+        container {
+          name    = "fold-worker"
+          image   = var.fold_worker_image
+          command = length(var.fold_worker_command) > 0 ? var.fold_worker_command : null
+
+          # Issue #216: wire the project + proof bucket from REAL terraform
+          # values as the env vars the bench binary reads (LIGHTER_PROJECT /
+          # LIGHTER_PROOF_BUCKET), so the worker uploads its merge output to and
+          # reads its merge inputs from the right bucket without literal
+          # PROJECT/bucket tokens in the command.
+          dynamic "env" {
+            for_each = local.prover_wiring_env
+            content {
+              name  = env.key
+              value = env.value
+            }
+          }
+
+          # Issue #206/#232: point the bench binary at the gcsfuse mount so
+          # storage.rs selects mount-mode file I/O for the intermediate-proof
+          # transit. Only set when the bucket is actually mounted below.
+          dynamic "env" {
+            for_each = local.proof_mount_on ? [1] : []
+            content {
+              name  = "LIGHTER_PROOF_MOUNT"
+              value = var.proof_mount_path
+            }
+          }
+
+          # Issue #206/#232: mount the gcsfuse CSI volume into the container at
+          # the path the bench binary reads/writes intermediate merge proofs.
+          dynamic "volume_mount" {
+            for_each = local.proof_mount_on ? [1] : []
+            content {
+              name       = "proof-store"
+              mount_path = var.proof_mount_path
+              # read_write: workers WRITE merge outputs + READ merge inputs
+              # through this mount (the #206 transit surface, #232 worker side).
+              read_only = false
+            }
+          }
+
+          resources {
+            requests = {
+              cpu    = var.fold_worker_cpu_request
+              memory = var.fold_worker_memory_request
+            }
+            limits = {
+              cpu    = var.fold_worker_cpu_request
+              memory = var.fold_worker_memory_request
+            }
+          }
+        }
+
+        # Issue #206/#232: the gcsfuse CSI ephemeral inline volume backed by the
+        # SAME proof-store bucket #179 created. The pod GSA already holds
+        # objectAdmin on it (proof_store_pod_object_admin), so NO new IAM is
+        # needed. implicit_dirs lets the `{height}/m/{level}/` key prefixes
+        # resolve as directories on the bucket.
+        dynamic "volume" {
+          for_each = local.proof_mount_on ? [1] : []
+          content {
+            name = "proof-store"
+            csi {
+              driver    = "gcsfuse.csi.storage.gke.io"
+              read_only = false
+              volume_attributes = {
+                bucketName   = local.proof_store_bucket_name
+                mountOptions = "implicit-dirs"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  # Issue #231/#232: also depend on the prover KSA so it exists before the
+  # fold-worker pod references it via service_account_name (safe with count —
+  # the list ref is empty when WI off).
+  depends_on = [
+    google_container_cluster.autopilot,
+    kubernetes_service_account.prover,
+  ]
 }
 
 # ─── 5. The custom-metrics-stackdriver-adapter (external-metrics path) ─

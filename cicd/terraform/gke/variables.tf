@@ -162,6 +162,79 @@ variable "coordinator_command" {
   default     = []
 }
 
+# ─── Machine CLASS 3: FOLD WORKERS (ADR-0006 §1.1; issue #198/#232) ───
+# The cross-machine fold fan-out (issue #198) needs idle worker pods that
+# competing-pull the MERGE-TASK subscription and prove ONE merge each on
+# their FULL core budget. WITHOUT this pool, a `--fold-distributed` leader
+# publishes merge tasks that NOBODY pulls -> the per-level barrier times out
+# -> the run fails. The #198 governing principle is "one merge per worker,
+# scale by worker count" — so the lever is the REPLICA COUNT, not a bigger
+# box. Sized SEPARATELY from cells + coordinators, NEVER summed.
+#
+# Gated by enable_fold_workers so the default smoke topology (which does not
+# exercise the distributed fold) is unchanged; the scale tfvars turn it on
+# alongside enable_merge_plane + enable_proof_store + enable_proof_mount.
+
+variable "enable_fold_workers" {
+  description = "Deploy the fold-worker pod pool (issue #232) that competing-pulls the MERGE-TASK subscription for the cross-machine distributed fold (issue #198). false at smoke scale; MUST be true whenever a coordinator runs --fold-distributed, else the leader's merge tasks are pulled by nobody and the per-level barrier times out. Requires enable_merge_plane (the subscription) + enable_proof_store (the intermediate-proof transit)."
+  type        = bool
+  default     = false
+}
+
+variable "fold_worker_replicas" {
+  description = "Number of fold-worker pods. The #198 governing principle is one merge per worker — scale the fold by adding MORE workers, not bigger boxes. Start with a handful so a depth-6 block's wide level-1 actually fans out. SMOKE: 0/off; SCALE: a few."
+  type        = number
+  default     = 2
+}
+
+variable "fold_worker_compute_class" {
+  description = "Autopilot compute class for fold workers. Same shape as the coordinator (full-core c4a/Performance for a real merge prove). Empty = default Autopilot class."
+  type        = string
+  default     = ""
+}
+
+variable "fold_worker_arch" {
+  description = "kubernetes.io/arch nodeSelector for fold workers (arm64 for c4a/Axion, amd64 otherwise). Matches the bench image's microarch (a neoverse-v2 binary SIGILLs on non-c4a arm64 — see cell_machine_family)."
+  type        = string
+  default     = "amd64"
+}
+
+variable "fold_worker_machine_family" {
+  description = "Optional Autopilot machine-family nodeSelector for fold workers (cloud.google.com/machine-family). Set to 'c4a' to PIN Axion/neoverse-v2 nodes (see cell_machine_family for the SIGILL rationale). Empty = no family pin."
+  type        = string
+  default     = ""
+}
+
+variable "fold_worker_cpu_request" {
+  description = "CPU request per fold-worker pod. A merge prove runs on the worker's FULL core budget (no thread rationing — #198), so PRODUCTION requests the whole box; SMOKE requests a fraction of a vCPU."
+  type        = string
+  default     = "250m"
+}
+
+variable "fold_worker_memory_request" {
+  description = "Memory request per fold-worker pod. PRODUCTION holds the resident merge proving key; SMOKE: tiny."
+  type        = string
+  default     = "512Mi"
+}
+
+variable "fold_worker_image" {
+  description = "Container image for fold-worker pods. SMOKE: trivial no-op; PRODUCTION: the same arm64/Axion bench image as cells/coordinators, run in --mode fold-worker."
+  type        = string
+  default     = "registry.k8s.io/pause:3.10"
+}
+
+variable "fold_worker_command" {
+  description = "Container command for fold-worker pods. PRODUCTION runs the prover in --mode fold-worker pulling the merge-task subscription (set via tfvars). Empty = no override (smoke no-op image)."
+  type        = list(string)
+  default     = []
+}
+
+# Issue #232: the fold-worker reaches Pub/Sub (pull the merge-task subscription,
+# publish merge results) + GCS (transit intermediate proofs), so it runs under
+# Workload Identity via the SAME knobs the cell/coordinator pods use — the
+# prover KSA created by issue #231 (`enable_pod_workload_identity` +
+# `pod_ksa_name`, defined below). No fold-worker-specific WI variable is needed.
+
 # ─── HARD DAY-1 eviction mitigation (ADR-0003 amendment §3) ──────────
 # NON-NEGOTIABLE: every coordinator pod carries
 # cluster-autoscaler.kubernetes.io/safe-to-evict=false AND the
