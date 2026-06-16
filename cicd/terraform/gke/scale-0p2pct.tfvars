@@ -52,7 +52,7 @@ cell_memory_request = "44Gi" # measured cell RSS 5.1 GiB (peak_rss_mb=5266) + L4
 # Issue #216: a REAL arm64 (neoverse-v2/Axion) bench image that already EXISTS
 # in Artifact Registry — no build needed, just this pinned SHA. Re-pin to a
 # newer cicd/cloudbuild.yaml output as the bench binary advances.
-cell_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:1d5036b5369fcf6a966738e6de8265b6e5a6e800-neoverse-v2"
+cell_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:b0c84cb3bb1d8e799bf7b291bcf9e9b4560ea947-neoverse-v2"
 # /usr/local/bin/prover is the bench binary, symlinked in cicd/Containerfile
 # (#172). The cell pulls chunk refs and publishes results over the inner
 # planes; the Pub/Sub config is passed as flags.
@@ -88,7 +88,7 @@ coordinator_arch           = "arm64"
 coordinator_cpu_request    = "43"   # whole box; coordinator-specific profile UNMODELED (#113) — proxy
 coordinator_memory_request = "44Gi" # resident L4/L5 keys; coordinator-specific RSS UNMODELED — worker proxy
 # Issue #216: same REAL arm64 (neoverse-v2) bench image as the cells.
-coordinator_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:1d5036b5369fcf6a966738e6de8265b6e5a6e800-neoverse-v2"
+coordinator_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:b0c84cb3bb1d8e799bf7b291bcf9e9b4560ea947-neoverse-v2"
 # The coordinator pulls blocks from the dispatch subscription, fans chunk refs
 # to the chunk topic, and gathers results from the results subscription (#172).
 # Issue #209: --proof-bucket / --proof-mount-path point the coordinator at
@@ -157,7 +157,7 @@ fold_worker_arch           = "arm64"
 fold_worker_cpu_request    = "43"   # whole c4a-highcpu-64 minus Autopilot reservation; a merge runs on the FULL core budget (#198)
 fold_worker_memory_request = "44Gi" # resident merge proving key + headroom (worker RSS proxy, like the coordinator)
 # Issue #216: same REAL arm64 (neoverse-v2) bench image as cells/coordinator.
-fold_worker_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:1d5036b5369fcf6a966738e6de8265b6e5a6e800-neoverse-v2"
+fold_worker_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:b0c84cb3bb1d8e799bf7b291bcf9e9b4560ea947-neoverse-v2"
 # The worker competing-pulls the merge-task subscription, proves ONE merge,
 # transits the output through the gcsfuse proof mount, and reports on the
 # merge-result topic. --project/--proof-bucket are injected as LIGHTER_PROJECT/
