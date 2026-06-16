@@ -202,6 +202,13 @@ struct Args {
     #[arg(long, env = "LIGHTER_POLL_INTERVAL_S", default_value_t = 2)]
     poll_interval_s: u64,
 
+    /// Distributed fold LEADER: max wall-clock seconds to wait for a merge
+    /// level's results before failing the barrier honestly (issue #234).
+    /// Previously hardcoded to 900s; now configurable so slow/large levels
+    /// or fast smoke runs can tune the deadline.
+    #[arg(long, env = "LIGHTER_LEVEL_DEADLINE_S", default_value_t = 900)]
+    level_deadline_s: u64,
+
     /// Issue #200 (`--mode fold-leader-bench`): number of leaf proofs in the
     /// fixed fold batch (k). The leader folds these k leaves into one block
     /// proof via a depth-`ceil(log2(k))` merge tree (k-1 merges). The batch is
@@ -1853,9 +1860,21 @@ fn run_cell(args: &Args) {
     };
     info!("cell: circuits resident; entering chunk-prove loop");
 
+    // Graceful shutdown (issue #234): a SIGINT/SIGTERM flips this flag; we
+    // check it at the TOP of the loop so the CURRENT in-flight chunk finishes
+    // its L1/L2 prove + optional upload + publish_result before we exit.
+    let sig = bench::stream::install_signal_handlers();
+
     // ---- Pull → resolve → REAL prove → report loop ----
     let mut proven: u64 = 0;
     loop {
+        if sig.load(std::sync::atomic::Ordering::SeqCst) {
+            info!(
+                "cell: shutdown signal received; exiting after in-flight chunk (proven={})",
+                proven
+            );
+            break;
+        }
         if args.max_units != 0 && proven >= args.max_units {
             info!("cell: reached max_units={}, exiting", args.max_units);
             break;
@@ -2306,6 +2325,7 @@ fn coordinator_leaf_keys_ordered(
 /// Honest-failure throughout: a missing key, a failed download, a bad
 /// deserialize, a failed merge, or a failed L4 all return `Err` — the caller
 /// marks the block partial. No proof is ever fabricated (issue #179 rule).
+#[allow(clippy::too_many_arguments)]
 fn coordinator_real_fold(
     real: &CoordinatorRealFold,
     proof_store: &bench::conductor::GcloudStorage,
@@ -2313,6 +2333,8 @@ fn coordinator_real_fold(
     native: Option<&NativeMergeClient>,
     block_results: &[bench::conductor::ChunkResultMessage],
     height: u64,
+    poll_interval_s: u64,
+    level_deadline_s: u64,
 ) -> anyhow::Result<CoordinatorFoldOutcome> {
     // GATHER → key list: validate every chunk reported ok + carried a
     // proof_object, and order the keys by witness_index (chunk order). This
@@ -2352,9 +2374,17 @@ fn coordinator_real_fold(
             leaves,
             real.fold_workers,
         )?,
-        FoldTopology::Distributed => {
-            coordinator_distributed_fold(real, proof_store, bus, native, height, leaves, &keys)?
-        }
+        FoldTopology::Distributed => coordinator_distributed_fold(
+            real,
+            proof_store,
+            bus,
+            native,
+            height,
+            leaves,
+            &keys,
+            poll_interval_s,
+            level_deadline_s,
+        )?,
     };
     let merge_ms = merge_start.elapsed().as_millis() as u64;
     info!(
@@ -2597,8 +2627,21 @@ fn run_coordinator(args: &Args) {
         k_available, args.tx_per_proof
     );
 
+    // Graceful shutdown (issue #234): a SIGINT/SIGTERM flips this flag; we
+    // check it at the TOP of the loop so the CURRENT in-flight block finishes
+    // (dispatch -> gather -> fold -> L4 -> emit completion -> blocks_done += 1)
+    // before we exit cleanly.
+    let sig = bench::stream::install_signal_handlers();
+
     let mut blocks_done: u64 = 0;
     loop {
+        if sig.load(std::sync::atomic::Ordering::SeqCst) {
+            info!(
+                "coordinator: shutdown signal received; exiting after in-flight block (blocks_done={})",
+                blocks_done
+            );
+            break;
+        }
         if args.max_units != 0 && blocks_done >= args.max_units {
             info!("coordinator: reached max_units={}, exiting", args.max_units);
             break;
@@ -2726,6 +2769,8 @@ fn run_coordinator(args: &Args) {
                 native.as_ref(),
                 &block_results,
                 block.height,
+                args.poll_interval_s,
+                args.level_deadline_s,
             ) {
                 Ok(outcome) => {
                     merge_ms = outcome.merge_ms;
@@ -4131,6 +4176,7 @@ impl GcloudFoldTransport<'_> {
 /// proof store + merge-task plane, supplies the SHARED `prove_merge_pair` as
 /// the single merge implementation, runs the fold, and emits the first-class
 /// (measured, NOT gated) per-level barrier/straggler/transit instrumentation.
+#[allow(clippy::too_many_arguments)]
 fn coordinator_distributed_fold(
     real: &CoordinatorRealFold,
     proof_store: &bench::conductor::GcloudStorage,
@@ -4139,6 +4185,8 @@ fn coordinator_distributed_fold(
     height: u64,
     leaves: Vec<ProofWithPublicInputs<F, C, D>>,
     leaf_keys: &[String],
+    poll_interval_s: u64,
+    level_deadline_s: u64,
 ) -> anyhow::Result<CoordinatorFold> {
     // Validate the merge-task plane is configured before we start (honest
     // up-front failure rather than a mid-fold timeout).
@@ -4175,8 +4223,10 @@ fn coordinator_distributed_fold(
         bus,
         native,
         merge_result_sub: bus.config().merge_result_subscription.clone(),
-        poll_interval_s: 2,
-        level_deadline: Duration::from_secs(900),
+        // Issue #234: honor the configurable poll interval + barrier deadline
+        // instead of the previously hardcoded 2s / 900s.
+        poll_interval_s,
+        level_deadline: Duration::from_secs(level_deadline_s),
     };
 
     let outcome = bench::conductor::fold_distributed(
@@ -4405,8 +4455,21 @@ fn run_fold_worker(args: &Args) {
     // coordinator/cells build (the cyclic fixed point), so its VK matches.
     let real = CoordinatorRealFold::build(args);
 
+    // Graceful shutdown (issue #234): a SIGINT/SIGTERM (e.g. k8s pod
+    // termination) flips this flag; we check it at the TOP of the loop so the
+    // CURRENT in-flight merge finishes prove -> upload -> publish_merge_result
+    // -> MANUAL ack before we exit, never losing acked work.
+    let sig = bench::stream::install_signal_handlers();
+
     let mut merges_done: u64 = 0;
     loop {
+        if sig.load(std::sync::atomic::Ordering::SeqCst) {
+            info!(
+                "fold-worker: shutdown signal received; exiting after in-flight merge (merges_done={})",
+                merges_done
+            );
+            break;
+        }
         if args.max_units != 0 && merges_done >= args.max_units {
             info!("fold-worker: reached max_units={}, exiting", args.max_units);
             break;
@@ -4783,6 +4846,8 @@ fn run_fold_leader_bench(args: &Args) {
             height,
             leaves.clone(),
             &leaf_keys,
+            args.poll_interval_s,
+            args.level_deadline_s,
         );
         let wall_ms = t0.elapsed().as_millis() as u64;
 

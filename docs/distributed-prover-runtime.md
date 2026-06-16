@@ -109,8 +109,16 @@ Every flag also has an env-var equivalent (clap `env`), so the alternative is
 | `--results-topic` | `LIGHTER_RESULTS_TOPIC` | cell |
 | `--tx-per-proof` | `LIGHTER_TX_PER_PROOF` | both |
 | `--max-units` | `LIGHTER_MAX_UNITS` | both (0 = run forever) |
-| `--poll-interval-s` | `LIGHTER_POLL_INTERVAL_S` | both |
+| `--poll-interval-s` | `LIGHTER_POLL_INTERVAL_S` | both (also the fold leader's per-level result poll cadence, issue #234) |
+| `--level-deadline-s` | `LIGHTER_LEVEL_DEADLINE_S` | fold leader (max wall-clock seconds to wait for a merge level before failing the barrier; default 900, issue #234) |
 | `--gcloud-bin` | `LIGHTER_GCLOUD_BIN` | both (default `gcloud`) |
+
+> **Graceful shutdown (issue #234).** The `coordinator`, `cell`, and
+> `fold-worker` roles install SIGINT/SIGTERM handlers and check the flag at the
+> top of their main loop, so a Kubernetes `SIGTERM` lets the **current in-flight
+> unit finish and ack** (cell: chunk prove+publish; coordinator: block
+> dispatch→fold→L4; fold-worker: merge prove→upload→publish→manual ack) before
+> the process exits cleanly — no acked work is lost.
 
 ---
 
