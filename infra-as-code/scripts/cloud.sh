@@ -83,11 +83,10 @@ _verify_service_accounts_and_auth() {
     _log_ok "  ${sa_email} verified."
   done < <(python3 -c "import json; [print(k) for k in json.load(open('${target_sa}')).get('target_sas', {}).keys()]" 2>/dev/null || true)
 
-  # Explicit dry-run token test to ensure active local operator can actAs / impersonate Build SA
   local builder_sa
   builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
   if [[ -n "${builder_sa}" ]]; then
-    _log_info "Testing local caller impersonation access (actAs) on Build SA: ${builder_sa}..."
+    _log_info "Testing local caller access (actAs) on Build SA: ${builder_sa}..."
     if ! gcloud auth print-access-token --impersonate-service-account="${builder_sa}" &>/dev/null; then
       _die "Active local caller identity lacks permission to impersonate Build SA ${builder_sa}. Ask the cloud owner to grant roles/iam.serviceAccountUser and roles/iam.serviceAccountTokenCreator."
     fi
@@ -127,6 +126,36 @@ _provision_sa_and_roles() {
       --condition=None \
       --quiet >/dev/null
   done < <(python3 -c "import json; [print(r) for r in json.load(open('${json_file}')).get('target_sas', {}).get('${sa_key}', {}).get('roles', [])]" 2>/dev/null || true)
+}
+
+_teardown_sa_and_roles() {
+  local project="$1"
+  local sa_email="$2"
+  local sa_key="$3"
+  local json_file="$4"
+
+  if [[ -z "${sa_email}" ]]; then return 0; fi
+
+  _log_info "Tearing down SA identity (${sa_key}) and role allocations: ${sa_email}..."
+
+  local role
+  while IFS= read -r role; do
+    if [[ -z "${role}" ]]; then continue; fi
+    _log_info "  Revoking IAM role '${role}' from ${sa_email}..."
+    gcloud projects remove-iam-policy-binding "${project}" \
+      --member="serviceAccount:${sa_email}" \
+      --role="${role}" \
+      --condition=None \
+      --quiet >/dev/null 2>&1 || true
+  done < <(python3 -c "import json; [print(r) for r in json.load(open('${json_file}')).get('target_sas', {}).get('${sa_key}', {}).get('roles', [])]" 2>/dev/null || true)
+
+  if gcloud iam service-accounts describe "${sa_email}" --project="${project}" &>/dev/null; then
+    _log_info "  Deleting Service Account ${sa_email}..."
+    gcloud iam service-accounts delete "${sa_email}" --project="${project}" --quiet
+    _log_ok "  Deleted ${sa_email}"
+  else
+    _log_ok "  SA identity already removed."
+  fi
 }
 
 _execute_cloudbuild() {
@@ -213,6 +242,33 @@ cloud_admin_init() {
   fi
 }
 
+cloud_admin_undo() {
+  local build_project
+  build_project="$(_resolve_build_project)"
+
+  _log_info "Tearing down target GCP Service Accounts & IAM roles (cloud-admin-undo)..."
+  _log_info "  Target Project: ${build_project}"
+
+  local config_path="${CONFIG_TOML:-config.toml}"
+  if [[ ! -f "${config_path}" ]]; then
+    _die "Configuration file ${config_path} missing. Cannot determine target identities to teardown."
+  fi
+
+  _generate_tfvars
+  local target_json="infra-as-code/terraform/target.auto.tfvars.json"
+
+  local sa_key sa_email
+  while IFS= read -r sa_key; do
+    if [[ -z "${sa_key}" ]]; then continue; fi
+    sa_email="$(python3 -c "import json; print(json.load(open('${target_json}')).get('target_sas', {}).get('${sa_key}', {}).get('email', ''))" 2>/dev/null || true)"
+    if [[ -z "${sa_email}" ]]; then continue; fi
+
+    _teardown_sa_and_roles "${build_project}" "${sa_email}" "${sa_key}" "${target_json}"
+  done < <(python3 -c "import json; [print(k) for k in json.load(open('${target_json}')).get('target_sas', {}).keys()]" 2>/dev/null || true)
+
+  _log_ok "All target Service Accounts and IAM role allocations successfully torn down."
+}
+
 cloud_deploy() {
   _execute_cloudbuild "apply"
 }
@@ -229,8 +285,9 @@ cloud_destroy() {
 
 case "${1:-}" in
   cloud-admin-init) cloud_admin_init ;;
+  cloud-admin-undo) cloud_admin_undo ;;
   cloud-deploy)     cloud_deploy ;;
   cloud-plan)       cloud_plan ;;
   cloud-destroy)    cloud_destroy ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-deploy|cloud-plan|cloud-destroy}" ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-deploy|cloud-plan|cloud-destroy}" ;;
 esac

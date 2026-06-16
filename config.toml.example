@@ -18,6 +18,7 @@ region  = "us-central1"
 # Note: You may add ANY arbitrary Service Account entries below (e.g. [gcp.target.monitor_sa]).
 # Run `make cloud-admin-init` to automatically create all defined Service Accounts
 # and bind the enumerated IAM roles on your Google Cloud project.
+# Run `make cloud-admin-undo` to symmetrically revoke these roles and delete the SAs.
 
 [gcp.target]
 # Cloud Build execution machine type (e.g. UNSPECIFIED, E2_HIGHCPU_8, E2_HIGHCPU_32)

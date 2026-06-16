@@ -1,4 +1,4 @@
-.PHONY: help cloud-admin-init cloud-deploy cloud-plan cloud-destroy
+.PHONY: help cloud-admin-init cloud-admin-undo cloud-deploy cloud-plan cloud-destroy
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -6,6 +6,9 @@ help: ## Show this help
 
 cloud-admin-init: ## Bootstrap target GCP Service Accounts & IAM roles (Owner-tier)
 	@bash infra-as-code/scripts/cloud.sh cloud-admin-init
+
+cloud-admin-undo: ## Tear down target GCP Service Accounts & IAM roles (Owner-tier)
+	@bash infra-as-code/scripts/cloud.sh cloud-admin-undo
 
 cloud-deploy: ## Run Cloud Build to deploy infrastructure using Terraform (infra-as-code/cloudbuild.yaml)
 	@bash infra-as-code/scripts/cloud.sh cloud-deploy
