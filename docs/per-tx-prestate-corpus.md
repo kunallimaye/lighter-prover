@@ -125,6 +125,44 @@ proves the 55 full chunks (the partial is a different L1 circuit shape). At S=4
 there are `floor(500/4) = 125` full chunks. The fix is chunk-size-agnostic; the
 partial-tail chunk is handled by the coordinator's SPLIT exactly as before.
 
+## 5a. Corpus PERSISTENCE — serialize once, mount thereafter (issue #257)
+
+Implemented in `bench::prestate_store`. The §4 sweep is INTRINSIC (the static
+`bench_test.json` cannot be stitched without proving — see #243), but it used to
+be REGENERATED IN-MEMORY on every `run_cell` startup. #257 removes the REPEATED
+cost: the swept `PreStateSnapshots` is serialized to a versioned, path-aware
+corpus and mounted, so the sweep runs **at most once per height**.
+
+- **Serde:** `Serialize` was added to the 8-field state types (`Asset`,
+  `MarketDetails`, `RegisterStack` + nested `BaseRegisterInfo`, `SystemConfig`),
+  including a matching `bigint_to_int` serializer for `MarketDetails`'s
+  custom-deserialized `funding_rate_prefix_sum: BigInt` so it round-trips with
+  its existing `int_to_bigint` deserializer.
+- **Format:** versioned (`schema_version`, currently `1.0`), gzip-framed JSON.
+  Each position carries the 8 state fields AND an OPTIONAL, per-position
+  `sibling_paths` field — present-but-unpopulated in #257. Issue **#243** fills
+  that field (shipping as schema `1.1`, same MAJOR) **without a format
+  revision**; a `1.0` reader loads a `1.1` corpus unchanged. A different MAJOR
+  is rejected honestly.
+- **Measured size (501-snapshot probe,
+  `prestate_store::tests::probe_corpus_size_501_snapshots`):** raw JSON
+  ≈ 19.5 MiB, gzip ≈ 0.30 MiB — **≈ 65× compression**. (The probe corpus is
+  mostly-empty arrays, so this is a representative compressibility floor; a
+  denser real corpus is larger raw but gzip still dominates.) A full delta
+  scheme is deliberately NOT implemented — gzip is sufficient for this issue.
+- **Wiring:** `save_prestate_corpus_to_path` / `load_prestate_corpus_from_path`
+  (local disk, tests + mounted corpus) and
+  `save_prestate_corpus_to_store` / `load_prestate_corpus_from_store` over the
+  existing `GcloudStorage` byte transport, keyed by
+  `prestate_object_key(height) = "{height}/p/corpus"` (the `/p/` segment is
+  disjoint from the leaf `{height}/{wi}` and merge `{height}/m/...` namespaces).
+- **Cache-or-generate:** `run_cell` LOADs the corpus (local path
+  `--prestate-corpus-path` / `LIGHTER_PRESTATE_CORPUS`, else the proof store)
+  when present and only falls back to the sweep when absent — saving the
+  freshly-swept corpus on the miss path. A clear log line states LOADED-from-
+  cache vs REGENERATED-via-sweep. The `LIGHTER_DISABLE_PRESTATE_FIX=1` A/B
+  toggle is preserved (it skips the corpus entirely).
+
 ## 6. Corpus schema (Layer 1 — design; generation gated on Layer 0)
 
 The 100-block synthetic corpus (Decision 3) reuses PR #166's 100-height

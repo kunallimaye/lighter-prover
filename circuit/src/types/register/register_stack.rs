@@ -9,7 +9,7 @@ use plonky2::field::types::PrimeField64;
 use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::base_register_info::BaseRegisterInfo;
 use super::{BaseRegisterInfoTarget, BaseRegisterInfoTargetWitness, select_register_target};
@@ -24,7 +24,7 @@ use crate::utils::CircuitBuilderUtils;
 
 pub const REGISTER_INFO_SIZE: usize = 1 + REGISTER_STACK_SIZE * BASE_REGISTER_INFO_SIZE;
 
-#[derive(Clone, Debug, Deserialize, Copy)]
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
 #[serde(default)]
 pub struct RegisterStack {
     pub stack: [BaseRegisterInfo; REGISTER_STACK_SIZE],

@@ -52,6 +52,13 @@ paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
 c-kzg = { workspace = true }
 libc = "0.2"
+# Issue #257: gzip the per-tx pre-state corpus. The serialized corpus for a
+# 500-tx block is hundreds of MB raw (501 snapshots x [Asset;64] +
+# [MarketDetails;255] + RegisterStack + SystemConfig + 4 roots) but highly
+# compressible (consecutive snapshots differ in only the few accounts one tx
+# touches). Promoted from a dev-dependency to a production dependency because
+# `run_cell` loads the (gzip-framed) corpus on the cache path.
+flate2 = "1.0"
 # Issue #203 (optional, behind the `native-pubsub` feature): a minimal BLOCKING
 # HTTP client for the native merge-task-plane streaming-pull client. rustls/ring
 # TLS only (default-features off drops the openssl-sys backend) to stay

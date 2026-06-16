@@ -8,7 +8,7 @@ use plonky2::field::types::PrimeField64;
 use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::config::Builder;
 use crate::bigint::biguint::{BigUintTarget, CircuitBuilderBiguint, WitnessBigUint};
@@ -24,7 +24,7 @@ use crate::utils::CircuitBuilderUtils;
 
 pub const ASSET_SIZE: usize = 7;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(bound = "")]
 #[serde(default)]
 pub struct Asset {

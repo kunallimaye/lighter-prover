@@ -26,7 +26,7 @@ use crate::uint::u16::gadgets::arithmetic_u16::CircuitBuilderU16;
 
 pub const MARKET_DETAIL_SIZE: usize = 23;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct MarketDetails {
     #[serde(rename = "i", default)]
     pub market_index: u16,
@@ -51,6 +51,7 @@ pub struct MarketDetails {
 
     #[serde(rename = "f", default)]
     #[serde(deserialize_with = "deserializers::int_to_bigint")]
+    #[serde(serialize_with = "deserializers::bigint_to_int")]
     pub funding_rate_prefix_sum: BigInt, // 63 bits
 
     #[serde(rename = "ap", default)]

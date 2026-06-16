@@ -6,7 +6,7 @@ use plonky2::field::types::{Field, Field64, PrimeField64};
 use plonky2::hash::hash_types::RichField;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
@@ -15,7 +15,7 @@ use crate::utils::CircuitBuilderUtils;
 
 pub const BASE_REGISTER_INFO_SIZE: usize = 20;
 
-#[derive(Clone, Debug, Deserialize, Copy)]
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
 #[serde(default)]
 pub struct BaseRegisterInfo {
     #[serde(rename = "it")]
