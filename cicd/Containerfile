@@ -37,6 +37,17 @@
 #                     to TARGET_CPU=native when TARGET_CPU is portable.
 #   RUST_TOOLCHAIN    Rust toolchain version (default matches the
 #                     rust-toolchain file at the repo root).
+#   CARGO_FEATURES    Comma/space-separated cargo feature list passed to
+#                     `cargo build` as `--features "${CARGO_FEATURES}"`.
+#                     Default "" (empty) — no `--features` flag is emitted,
+#                     so the portable multi-arch path stays byte-identical
+#                     when unset. cicd/cloudbuild.yaml passes
+#                     `native-pubsub` (issue #230) so the cross-machine
+#                     fold-worker / `--native-merge-plane` paths are
+#                     compiled in (bench/Cargo.toml [features]
+#                     native-pubsub = ["dep:ureq"], rustls/ring TLS — no
+#                     openssl-sys, stays cross-compile-safe on the
+#                     x86->aarch64 build host).
 #
 # The builder asserts the produced binary's ELF architecture with
 # file(1) and FAILS THE BUILD on mismatch — an amd64 binary can never
@@ -46,6 +57,7 @@ ARG LIGHTER_REF=unknown
 ARG TARGET_CPU=portable
 ARG TARGET_CPU_NATIVE=0
 ARG RUST_TOOLCHAIN=nightly-2025-12-06
+ARG CARGO_FEATURES=""
 
 # ─── Stage 1: builder (native on $BUILDPLATFORM, cross-compiles) ─────
 FROM --platform=$BUILDPLATFORM rustlang/rust:nightly-bookworm AS builder
@@ -54,6 +66,7 @@ ARG LIGHTER_REF
 ARG TARGET_CPU
 ARG TARGET_CPU_NATIVE
 ARG RUST_TOOLCHAIN
+ARG CARGO_FEATURES
 # Provided by buildx from --platform: "amd64" or "arm64" (the platform
 # of the image being PRODUCED, not the host this stage runs on).
 ARG TARGETARCH
@@ -99,9 +112,11 @@ RUN set -eux; \
     CPU="${TARGET_CPU}"; \
     if [ "${CPU}" = "portable" ] && [ "${TARGET_CPU_NATIVE}" = "1" ]; then CPU=native; fi; \
     if [ "${CPU}" != "portable" ]; then export RUSTFLAGS="-C target-cpu=${CPU}"; fi; \
-    echo "Building bench: arch=${TARGETARCH} target=${RUST_TARGET} cpu=${CPU} RUSTFLAGS=${RUSTFLAGS:-<none>} LIGHTER_REF=${LIGHTER_REF}"; \
+    FEATURES_FLAG=""; \
+    if [ -n "${CARGO_FEATURES}" ]; then FEATURES_FLAG="--features ${CARGO_FEATURES}"; fi; \
+    echo "Building bench: arch=${TARGETARCH} target=${RUST_TARGET} cpu=${CPU} RUSTFLAGS=${RUSTFLAGS:-<none>} CARGO_FEATURES=${CARGO_FEATURES:-<none>} LIGHTER_REF=${LIGHTER_REF}"; \
     cargo +"${RUST_TOOLCHAIN}" fetch; \
-    cargo +"${RUST_TOOLCHAIN}" build --release -p bench --bin bench --target "${RUST_TARGET}"; \
+    cargo +"${RUST_TOOLCHAIN}" build --release -p bench --bin bench --target "${RUST_TARGET}" ${FEATURES_FLAG}; \
     mkdir -p /out; \
     cp "target/${RUST_TARGET}/release/bench" /out/bench; \
     "${STRIP}" /out/bench || true; \
