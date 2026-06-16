@@ -109,6 +109,17 @@ export AGENT_SA_EMAIL="${AGENT_SA_EMAIL:-${AGENT_SA_NAME}@${ORCH_PROJECT:-${BUIL
 export BUILDER_SA_EMAIL="${BUILDER_SA_EMAIL:-${BUILDER_SA_NAME}@${BUILD_PROJECT}.iam.gserviceaccount.com}"
 export RUNTIME_SA_EMAIL="${RUNTIME_SA_EMAIL:-${RUNTIME_SA_NAME}@${RUNTIME_PROJECT}.iam.gserviceaccount.com}"
 
+# Pod GSA — the EXISTING (out-of-band) Google Service Account the prover
+# cell/coordinator pods impersonate via GKE Workload Identity (#231). It
+# already holds the pubsub roles; cicd/terraform/gke binds it
+# roles/iam.workloadIdentityUser for the prover KSA + storage.objectAdmin
+# on the proof-store bucket. admin-cloud-init grants the agent SA
+# serviceAccountAdmin RESOURCE-SCOPED on this SA so it can create that WI
+# binding (_step_grant_agent_wi_binding_on_pod_gsa). Defaults to the
+# project-derived email (mirrors the terraform default in
+# cicd/terraform/gke variables.tf::proof_store_pod_gsa_email).
+export POD_GSA_EMAIL="${POD_GSA_EMAIL:-lighter-prover-pods@${RUNTIME_PROJECT}.iam.gserviceaccount.com}"
+
 # Legacy alias: some downstream snippets still reference CB_SERVICE_ACCOUNT.
 # Map it to the builder SA (which is what Cloud Build submits as).
 export CB_SERVICE_ACCOUNT="${CB_SERVICE_ACCOUNT:-${BUILDER_SA_EMAIL}}"
