@@ -685,6 +685,22 @@ cloud_infra() {
   log_ok "Infrastructure ready (${ENVIRONMENT})"
 }
 
+cloud_deploy() {
+  log_info "Deploying infrastructure via Cloud Build (infra-as-code/cloudbuild.yaml)..."
+  require_cmd gcloud
+  _require_topology
+  if [[ -z "${TF_STATE_BUCKET}" ]]; then die "TF_STATE_BUCKET not set."; fi
+
+  gcloud builds submit "${PROJECT_ROOT}" \
+    --project="${BUILD_PROJECT}" \
+    --service-account="projects/${BUILD_PROJECT}/serviceAccounts/${BUILDER_SA_EMAIL}" \
+    --config="${PROJECT_ROOT}/infra-as-code/cloudbuild.yaml" \
+    --substitutions="_TF_ACTION=apply,$(_tf_substitutions)" \
+    --quiet
+
+  log_ok "Infrastructure successfully deployed."
+}
+
 # ─── cloud-app-deploy / promote / undeploy ────────────────────────────
 #
 # Phase 1 (#2) intentionally does NOT ship a long-lived Cloud Run
@@ -848,6 +864,7 @@ case "${1:-}" in
   admin-cloud-destroy)    admin_cloud_destroy ;;
   cloud-preflight)        cloud_preflight ;;
   cloud-infra)            cloud_infra ;;
+  cloud-deploy)           cloud_deploy ;;
   cloud-app-deploy)       cloud_app_deploy ;;
   cloud-bench-build)      cloud_bench_build ;;
   cloud-app-promote)      cloud_app_promote ;;
@@ -863,5 +880,5 @@ case "${1:-}" in
   app-promote)  _legacy_stub app-promote cloud-app-promote ;;
   app-undeploy) _legacy_stub app-undeploy cloud-app-undeploy ;;
   clean)        _legacy_stub clean cloud-clean ;;
-   *) die "Usage: $0 {help|admin-cloud-init|admin-cloud-destroy|cloud-preflight|cloud-infra|cloud-app-deploy|cloud-bench-build|cloud-app-promote|cloud-app-undeploy|cloud-clean|cloud-status|cloud-recover}" ;;
+   *) die "Usage: $0 {help|admin-cloud-init|admin-cloud-destroy|cloud-preflight|cloud-infra|cloud-deploy|cloud-app-deploy|cloud-bench-build|cloud-app-promote|cloud-app-undeploy|cloud-clean|cloud-status|cloud-recover}" ;;
 esac

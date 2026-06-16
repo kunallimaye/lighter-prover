@@ -26,7 +26,7 @@
   container-test container-bench container-fanout \
   local-build-alias local-fanout-alias \
   cloud-help admin-cloud-init admin-cloud-destroy \
-  cloud-preflight cloud-infra cloud-bench-build cloud-app-deploy \
+  cloud-preflight cloud-infra cloud-deploy cloud-bench-build cloud-app-deploy \
   cloud-app-promote cloud-app-undeploy cloud-clean \
   cloud-txmix-build cloud-txmix-deploy cloud-txmix-smoke \
   cloud-txmix-capture cloud-txmix-results cloud-txmix-post \
@@ -129,6 +129,9 @@ cloud-preflight: ## Read-only audit of APIs, AR, builder SA roles
 
 cloud-infra: ## TF apply via Cloud Build (provisions AR repo + IAM)
 	@bash scripts/cloud.sh cloud-infra
+
+cloud-deploy: ## Run Cloud Build to deploy infrastructure using Terraform (infra-as-code/cloudbuild.yaml)
+	@bash scripts/cloud.sh cloud-deploy
 
 cloud-bench-build: ## Build + push the bench container via Cloud Build (issue #2 acceptance)
 	@bash scripts/cloud.sh cloud-bench-build
