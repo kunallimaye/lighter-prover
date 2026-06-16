@@ -29,16 +29,26 @@ def main():
 
   if out_mode == 'vms':
     vms = data.get('vms', {})
+    defaults = vms.get('default', {}) if isinstance(vms, dict) else {}
+    if not isinstance(defaults, dict):
+      defaults = {}
+
+    def_machine = str(defaults.get('machine_type', 'c4-standard-8'))
+    def_zone = str(defaults.get('zone', 'us-central1-a'))
+    def_disk_size = int(defaults.get('disk_size_gb', 100))
+    def_disk_type = str(defaults.get('disk_type', 'pd-ssd'))
+
     cleaned = {}
     if isinstance(vms, dict):
       for k, v in vms.items():
-        if isinstance(v, dict):
-          cleaned[k] = {
-              'machine_type': str(v.get('machine_type', 'c4-standard-8')),
-              'zone': str(v.get('zone', 'us-central1-a')),
-              'disk_size_gb': int(v.get('disk_size_gb', 100)),
-              'disk_type': str(v.get('disk_type', 'pd-ssd')),
-          }
+        if k == 'default' or not isinstance(v, dict):
+          continue
+        cleaned[k] = {
+            'machine_type': str(v.get('machine_type', def_machine)),
+            'zone': str(v.get('zone', def_zone)),
+            'disk_size_gb': int(v.get('disk_size_gb', def_disk_size)),
+            'disk_type': str(v.get('disk_type', def_disk_type)),
+        }
     print(json.dumps(cleaned))
 
   elif out_mode == 'target':

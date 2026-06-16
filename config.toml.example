@@ -36,20 +36,21 @@ roles = [
   "roles/monitoring.metricWriter"
 ]
 
-# ─── Virtual Machines List ─────────────────────────────────────────────
-# Add or remove VM entries below. Each block defines an individual GCE instance
-# provisioned when running `make cloud-deploy`.
+# ─── Virtual Machines List & Default Inheritance ───────────────────────
+# Define GCE instances provisioned when running `make cloud-deploy`.
+# All individual VMs inherit properties from `[vms.default]` unless explicitly overridden.
 
-[vms]
-
-[vms.prover-vm-1]
+[vms.default]
 machine_type = "c4-standard-8"
 zone         = "us-central1-a"
 disk_size_gb = 100
 disk_type    = "pd-ssd"
 
+[vms.prover-vm-1]
+# Inherits machine_type, zone, disk_size_gb, and disk_type exactly from [vms.default]
+
 [vms.prover-vm-2]
 machine_type = "c4-standard-16"
 zone         = "us-central1-b"
 disk_size_gb = 200
-disk_type    = "pd-ssd"
+# Inherits disk_type ("pd-ssd") from [vms.default]
