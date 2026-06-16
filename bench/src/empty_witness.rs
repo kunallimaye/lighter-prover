@@ -398,8 +398,25 @@ pub fn mid_block_empty_tx(
 ) -> Tx<F> {
     let mut tx = empty_tx_with_fee_partial(fee_partial, fee_delta_partial);
 
-    // Substitute the honest current-state index-2 paths at the four
-    // account-family proof-array sites (all three account slots are index 2).
+    // Issue #263: the empty index is ADAPTIVE (derived per position from a real
+    // touched account's coherent proof), not the fixed constant 2. Point every
+    // empty account / delta slot at `paths.account_index` and the empty market
+    // leaf at `paths.market_index`, so the in-circuit Merkle path bits
+    // (`split_le(account_index)` / `market_index`) match the emitted siblings.
+    // The leaf hashes stay ZERO (an empty account at any non-special index
+    // hashes to ZERO), so the empty tx still mutates nothing.
+    let account_index = paths.account_index as i64;
+    for account in tx.accounts_before.iter_mut() {
+        account.account_index = account_index;
+    }
+    for delta in tx.accounts_delta_before.iter_mut() {
+        delta.account_index = account_index;
+    }
+    tx.market_before.market_index = paths.market_index as u16;
+
+    // Substitute the honest current-state paths at the four account-family
+    // proof-array sites (all NB_ACCOUNTS_PER_TX account slots share the same
+    // empty index, so they share one path per tree).
     tx.account_tree_merkle_proofs = core::array::from_fn(|_| paths.account);
     tx.account_pub_data_tree_merkle_proofs = core::array::from_fn(|_| paths.account_pub_data);
     tx.account_delta_tree_merkle_proofs = core::array::from_fn(|_| paths.account_delta);
@@ -510,6 +527,8 @@ mod tests {
         // here (the real honest mid-block paths come from the sweep). We use the
         // module's own empty paths so the substitution sites are exercised.
         let paths = EmptyIndexSiblingPaths {
+            account_index: EMPTY_ACCOUNT_INDEX as u128,
+            market_index: NIL_MARKET_INDEX as u128,
             account: empty_merkle_proof::<ACCOUNT_MERKLE_LEVELS>(),
             account_pub_data: empty_merkle_proof::<ACCOUNT_MERKLE_LEVELS>(),
             account_delta: empty_merkle_proof::<ACCOUNT_MERKLE_LEVELS>(),
@@ -524,8 +543,19 @@ mod tests {
         assert!(tx.is_empty());
         assert_eq!(tx.market_before.order_book_root, EMPTY_ORDER_BOOK_TREE_ROOT);
 
+        // The empty accounts / deltas were pointed at the (adaptive) account
+        // index and the market leaf at the market index.
+        for account in tx.accounts_before.iter() {
+            assert_eq!(account.account_index, paths.account_index as i64);
+        }
+        for delta in tx.accounts_delta_before.iter() {
+            assert_eq!(delta.account_index, paths.account_index as i64);
+        }
+        assert_eq!(tx.market_before.market_index, paths.market_index as u16);
+
         // The four account-family proof arrays were substituted with the
-        // supplied honest paths (all NB_ACCOUNTS_PER_TX slots share index 2).
+        // supplied honest paths (all NB_ACCOUNTS_PER_TX slots share one empty
+        // index, so they share one path per tree).
         for slot in tx.account_tree_merkle_proofs.iter() {
             assert_eq!(*slot, paths.account);
         }

@@ -143,20 +143,40 @@ root, "Partition … set twice").
   in-circuit `AccountTarget::hash` / `AccountDeltaTarget::hash` / `MarketTarget::hash`
   to plain Rust over Poseidon2, verified **bit-for-bit** against the circuit by
   cheap one-shot extractor proves.
-- An **off-circuit sparse Merkle tree + path harvester** (`bench::account_family_tree`)
-  reconstructs index 2's honest sibling-path from the per-tx `(leaf, proof)` data
-  the S=1 sweep already iterates over (each proof pins the honest node hashes on
-  its leaf's root-path; unioned they cover index 2's path).
-- The sweep variant `sweep_per_tx_snapshots_with_paths` captures those paths at
-  each position and stores them in the corpus's optional `sibling_paths` field
-  (**schema 1.1**, backward-compatible with #257's 1.0 — a 1.0 reader loads 1.1
-  unchanged). Each captured path is fold-validated to the position's PROVEN root,
-  so a wrong path is never emitted (incomplete-data positions store `None`).
+- An **off-circuit sparse Merkle tree** (`bench::account_family_tree`) reconstructs
+  an EMPTY leaf's honest sibling-path from the per-tx `(leaf, proof)` data the S=1
+  sweep already iterates over. **Issue #263 correction:** the original #243
+  approach harvested a FIXED empty index (2) by unioning per-tx proofs across
+  positions; this never worked — index 2's neighbouring subtrees ({0,1}
+  treasury/insurance, index 3) are never touched so their nodes are never
+  observed, and unioning nodes across positions with different evolving roots is
+  incoherent, so the harvester returned `None` for all four trees at every
+  position (the gate failed). The fix derives an **adaptive** empty index per
+  position from a SINGLE real touched account's coherent proof
+  (`account_family_tree::empty_path_from_proof`): descend into the account's
+  first empty sibling subtree (common to the account / pub_data / delta trees) to
+  a guaranteed-empty leaf whose full path folds a ZERO leaf to that position's
+  root — no accumulation, fully coherent. The chosen index is constrained to a
+  normal account slot (`2 ..= MAX_ACCOUNT_INDEX`, excluding the `NIL_ACCOUNT_INDEX`
+  sentinel that the circuit treats specially).
+- The sweep variant `sweep_per_tx_snapshots_with_paths` captures those paths +
+  their chosen indices at each position and stores them in the corpus's optional
+  `sibling_paths` field (**schema 1.1**, backward-compatible with #257's 1.0 — a
+  1.0 reader loads 1.1 unchanged). Each captured path is fold-validated to the
+  position's PROVEN root, so a wrong path is never emitted (incomplete-data
+  positions store `None`).
 - `empty_witness::mid_block_empty_tx(paths)` substitutes those honest paths into
-  an otherwise-empty tx, and `run_cell --pad-final-chunk` (off by default) appends
-  the padded 56th chunk so the cell reaches the true `ceil(tx_count/S)`.
+  an otherwise-empty tx and points its empty leaves at the chosen adaptive
+  indices. `run_cell --pad-final-chunk` (off by default) appends the padded 56th
+  chunk so the cell reaches the true `ceil(tx_count/S)`. **The empties go FIRST in
+  the chunk** (before the real leftover txs): an empty tx mutates nothing, so it
+  must verify its empty leaf against the root it ENTERS with — the chunk's INPUT
+  pre-state, which the captured paths fold to. Placing empties after the real txs
+  would verify them against the (evolved) post-real-tx root the captured path does
+  NOT match (a "Partition … set twice" witness conflict). Empties-first leaves the
+  chunk's net mutation and output roots identical.
 
-The padded 56th chunk (5 real + 4 empties) is a benchmark-valid stand-in (per-tx
+The padded 56th chunk (4 empties + 5 real) is a benchmark-valid stand-in (per-tx
 prove cost is tx-type-flat), NOT a novel mainnet block; pre-state DELIVERY remains
 a separate production term. See the env-gated `padded_final_chunk_proves_with_honest_paths`
 gate (`LAYER0_PAD_FINAL_CHUNK=1`).

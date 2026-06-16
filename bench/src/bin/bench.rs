@@ -2048,8 +2048,18 @@ fn run_cell(args: &Args) {
                 let fee_delta_partial =
                     bench::empty_witness::empty_account_delta_partial_hash();
 
-                let mut final_chunk = final_chunk_real_txs.clone();
+                // Issue #263: the empties go FIRST, then the real leftover txs.
+                // The captured sibling-paths are honest against the chunk's INPUT
+                // pre-state (`snapshot[pad_pre_pos]`). An empty tx mutates nothing,
+                // so it must verify its empty leaf against the root it ENTERS with
+                // — i.e. the chunk's input root. Placing empties AFTER the real
+                // txs would make them verify against the (evolved) post-real-tx
+                // root, which the captured path does NOT match (a "set twice"
+                // witness conflict). Empties-first keeps every empty's verify on
+                // the chunk-entry root and leaves the chunk's net mutation (and
+                // output roots) identical, since empties are no-ops.
                 let pad_count = args.tx_per_proof - remainder;
+                let mut final_chunk = Vec::with_capacity(args.tx_per_proof);
                 for _ in 0..pad_count {
                     final_chunk.push(bench::empty_witness::mid_block_empty_tx(
                         fee_partial,
@@ -2057,6 +2067,7 @@ fn run_cell(args: &Args) {
                         &paths,
                     ));
                 }
+                final_chunk.extend_from_slice(&final_chunk_real_txs);
                 assert_eq!(
                     final_chunk.len(),
                     args.tx_per_proof,
