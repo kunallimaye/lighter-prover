@@ -204,7 +204,12 @@ class TestGatherProvenance(unittest.TestCase):
         out = lsv._render(_report())
         self.assertIn("REAL", out)
         self.assertIn("Fully-measured end-to-end lag", out)
-        self.assertNotIn("WARNING", out)
+        # Scope the assertion to THIS test's concern: the GATHER term is fully
+        # measured, so the GATHER-PROXY banner (#222) must NOT appear. We must
+        # not assert the absence of any "WARNING": this fixture supplies no
+        # --drive-rate-blocks-s, so the keep-pace WEAK-proxy WARNING (#223)
+        # legitimately fires and is unrelated to this test's intent.
+        self.assertNotIn("GATHER is an ESTIMATE", out)
 
     def test_per_block_summary_join_keys_on_height(self):
         # The measured wall must join on the matching height: h102's summary
@@ -363,7 +368,12 @@ class TestKeepPaceBasis(unittest.TestCase):
     def test_strong_basis_label_in_rendered_output(self):
         out = lsv._render(_report(self._RUN, drive_rate_blocks_s=3.0))
         self.assertIn("finish-vs-arrival (STRONG", out)
-        self.assertNotIn("WARNING:", out)
+        # Scope the assertion to THIS test's concern: the keep-pace basis is
+        # STRONG, so the keep-pace WEAK-proxy WARNING (#223) must NOT appear. We
+        # must not assert the absence of any "WARNING:": this fixture is
+        # chunk_proven-only (no block_complete summaries), so the GATHER-proxy
+        # WARNING (#222) legitimately fires and is unrelated to this test's intent.
+        self.assertNotIn("keep-pace is the WEAK queue-only proxy", out)
 
 
 class TestVerdict(unittest.TestCase):
