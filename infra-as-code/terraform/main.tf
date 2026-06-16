@@ -103,7 +103,7 @@ resource "google_compute_instance" "prover_vms" {
   }
 
   service_account {
-    email  = var.runtime_sa_email != "" ? var.runtime_sa_email : "${var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id}-compute@developer.gserviceaccount.com"
+    email  = each.value.service_account != "" ? each.value.service_account : (var.runtime_sa_email != "" ? var.runtime_sa_email : "${var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id}-compute@developer.gserviceaccount.com")
     scopes = ["cloud-platform"]
   }
 

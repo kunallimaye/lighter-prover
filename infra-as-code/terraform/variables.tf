@@ -64,15 +64,25 @@ variable "runtime_sa_email" {
   default     = ""
 }
 
+variable "target_sas" {
+  description = "Map of target Service Accounts and their expected IAM roles."
+  type = map(object({
+    email = string
+    roles = optional(list(string), [])
+  }))
+  default = {}
+}
+
 # ─── GCE Virtual Machines ────────────────────────────────────────────
 
 variable "vms" {
   description = "Map of VM configurations to provision."
   type = map(object({
-    machine_type = string
-    zone         = string
-    disk_size_gb = optional(number, 100)
-    disk_type    = optional(string, "pd-ssd")
+    machine_type    = string
+    zone            = string
+    disk_size_gb    = optional(number, 100)
+    disk_type       = optional(string, "pd-ssd")
+    service_account = optional(string, "")
   }))
   default = {}
 }

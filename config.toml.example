@@ -15,7 +15,8 @@ region  = "us-central1"
 
 # ─── Target Service Accounts & Role Allocations ────────────────────────
 # Identities and IAM permissions required by Cloud Build and runtime workloads.
-# Run `make cloud-admin-init` to automatically create these Service Accounts
+# Note: You may add ANY arbitrary Service Account entries below (e.g. [gcp.target.monitor_sa]).
+# Run `make cloud-admin-init` to automatically create all defined Service Accounts
 # and bind the enumerated IAM roles on your Google Cloud project.
 
 [gcp.target.build_sa]
@@ -41,16 +42,17 @@ roles = [
 # All individual VMs inherit properties from `[vms.default]` unless explicitly overridden.
 
 [vms.default]
-machine_type = "c4-standard-8"
-zone         = "us-central1-a"
-disk_size_gb = 100
-disk_type    = "pd-ssd"
+machine_type    = "c4-standard-8"
+zone            = "us-central1-a"
+disk_size_gb    = 100
+disk_type       = "pd-ssd"
+service_account = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
 
 [vms.prover-vm-1]
-# Inherits machine_type, zone, disk_size_gb, and disk_type exactly from [vms.default]
+# Inherits machine_type, zone, disk_size_gb, disk_type, and service_account exactly from [vms.default]
 
 [vms.prover-vm-2]
 machine_type = "c4-standard-16"
 zone         = "us-central1-b"
 disk_size_gb = 200
-# Inherits disk_type ("pd-ssd") from [vms.default]
+# Inherits disk_type and service_account from [vms.default]

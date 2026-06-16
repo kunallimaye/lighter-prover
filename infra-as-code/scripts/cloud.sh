@@ -70,41 +70,31 @@ _verify_service_accounts() {
     _die "Service account configuration file missing."
   fi
 
-  local build_sa runtime_sa
-  build_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
-  runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+  local sa_key sa_email
+  while IFS= read -r sa_key; do
+    if [[ -z "${sa_key}" ]]; then continue; fi
+    sa_email="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('target_sas', {}).get('${sa_key}', {}).get('email', ''))" 2>/dev/null || true)"
+    if [[ -z "${sa_email}" ]]; then continue; fi
 
-  if [[ -z "${build_sa}" ]]; then
-    _die "Build SA (build_sa) not specified in ${CONFIG_TOML:-config.toml} [gcp.target]."
-  fi
-  if [[ -z "${runtime_sa}" ]]; then
-    _die "Runtime SA (runtime_sa) not specified in ${CONFIG_TOML:-config.toml} [gcp.target]."
-  fi
-
-  _log_info "Verifying Build SA existence: ${build_sa}..."
-  if ! gcloud iam service-accounts describe "${build_sa}" &>/dev/null; then
-    _die "Build SA ${build_sa} does not exist or is not accessible. Contract violation: job failed."
-  fi
-  _log_ok "  Build SA verified."
-
-  _log_info "Verifying Runtime SA existence: ${runtime_sa}..."
-  if ! gcloud iam service-accounts describe "${runtime_sa}" &>/dev/null; then
-    _die "Runtime SA ${runtime_sa} does not exist or is not accessible. Contract violation: job failed."
-  fi
-  _log_ok "  Runtime SA verified."
+    _log_info "Preflight verification for SA (${sa_key}): ${sa_email}..."
+    if ! gcloud iam service-accounts describe "${sa_email}" &>/dev/null; then
+      _die "Service Account ${sa_email} (${sa_key}) does not exist or is not accessible. Contract violation: job failed."
+    fi
+    _log_ok "  ${sa_email} verified."
+  done < <(python3 -c "import json; [print(k) for k in json.load(open('${target_sa}')).get('target_sas', {}).keys()]" 2>/dev/null || true)
 }
 
 _provision_sa_and_roles() {
   local project="$1"
   local sa_email="$2"
-  local roles_key="$3"
+  local sa_key="$3"
   local json_file="$4"
 
   if [[ -z "${sa_email}" ]]; then return 0; fi
 
   local sa_name="${sa_email%%@*}"
 
-  _log_info "Checking SA identity: ${sa_email}..."
+  _log_info "Checking SA identity (${sa_key}): ${sa_email}..."
   if ! gcloud iam service-accounts describe "${sa_email}" --project="${project}" &>/dev/null; then
     _log_info "  SA not found, creating '${sa_name}'..."
     gcloud iam service-accounts create "${sa_name}" \
@@ -125,7 +115,7 @@ _provision_sa_and_roles() {
       --role="${role}" \
       --condition=None \
       --quiet >/dev/null
-  done < <(python3 -c "import json; [print(r) for r in json.load(open('${json_file}')).get('${roles_key}', [])]" 2>/dev/null || true)
+  done < <(python3 -c "import json; [print(r) for r in json.load(open('${json_file}')).get('target_sas', {}).get('${sa_key}', {}).get('roles', [])]" 2>/dev/null || true)
 }
 
 _execute_cloudbuild() {
@@ -164,7 +154,7 @@ cloud_admin_init() {
   local build_project
   build_project="$(_resolve_build_project)"
 
-  _log_info "Bootstrapping GCP target Service Accounts & IAM roles (cloud-admin-init)..."
+  _log_info "Bootstrapping arbitrary GCP target Service Accounts & IAM roles (cloud-admin-init)..."
   _log_info "  Target Project: ${build_project}"
 
   local config_path="${CONFIG_TOML:-config.toml}"
@@ -175,14 +165,16 @@ cloud_admin_init() {
   _generate_tfvars
   local target_json="infra-as-code/terraform/target.auto.tfvars.json"
 
-  local build_sa runtime_sa
-  build_sa="$(python3 -c "import json; print(json.load(open('${target_json}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
-  runtime_sa="$(python3 -c "import json; print(json.load(open('${target_json}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+  local sa_key sa_email
+  while IFS= read -r sa_key; do
+    if [[ -z "${sa_key}" ]]; then continue; fi
+    sa_email="$(python3 -c "import json; print(json.load(open('${target_json}')).get('target_sas', {}).get('${sa_key}', {}).get('email', ''))" 2>/dev/null || true)"
+    if [[ -z "${sa_email}" ]]; then continue; fi
 
-  _provision_sa_and_roles "${build_project}" "${build_sa}" "builder_sa_roles" "${target_json}"
-  _provision_sa_and_roles "${build_project}" "${runtime_sa}" "runtime_sa_roles" "${target_json}"
+    _provision_sa_and_roles "${build_project}" "${sa_email}" "${sa_key}" "${target_json}"
+  done < <(python3 -c "import json; [print(k) for k in json.load(open('${target_json}')).get('target_sas', {}).keys()]" 2>/dev/null || true)
 
-  _log_ok "Target Service Accounts and IAM role allocations successfully provisioned."
+  _log_ok "All target Service Accounts and IAM role allocations successfully provisioned."
 }
 
 cloud_deploy() {
