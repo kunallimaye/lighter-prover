@@ -525,8 +525,18 @@ resource "kubernetes_deployment" "cells" {
               driver    = "gcsfuse.csi.storage.gke.io"
               read_only = false
               volume_attributes = {
-                bucketName   = local.proof_store_bucket_name
-                mountOptions = "implicit-dirs"
+                bucketName = local.proof_store_bucket_name
+                # Issue #261: the gcsfuse mount otherwise comes up ROOT-OWNED
+                # (uid=0, dir-mode 755) while the prover runs NON-ROOT (`bench`,
+                # uid=1000/gid=1000 — cicd/Containerfile). A non-root process
+                # then gets `Permission denied (os error 13)` on every write
+                # (the Phase A live run: 968/968 leaf-proof uploads failed → all
+                # blocks folded "modeled" → verdict FAIL). The gcsfuse CSI driver
+                # honors uid/gid/file-mode/dir-mode mount flags to set FS
+                # ownership/permissions (chmod/chown do NOT work on a gcsfuse FS),
+                # so set them to the `bench` user. implicit-dirs is preserved so
+                # the {height}/... key prefixes still resolve as directories.
+                mountOptions = "uid=1000,gid=1000,file-mode=0664,dir-mode=0775,implicit-dirs"
               }
             }
           }
@@ -682,8 +692,18 @@ resource "kubernetes_deployment" "coordinator" {
               driver    = "gcsfuse.csi.storage.gke.io"
               read_only = false
               volume_attributes = {
-                bucketName   = local.proof_store_bucket_name
-                mountOptions = "implicit-dirs"
+                bucketName = local.proof_store_bucket_name
+                # Issue #261: the gcsfuse mount otherwise comes up ROOT-OWNED
+                # (uid=0, dir-mode 755) while the prover runs NON-ROOT (`bench`,
+                # uid=1000/gid=1000 — cicd/Containerfile). A non-root process
+                # then gets `Permission denied (os error 13)` on every write
+                # (the Phase A live run: 968/968 leaf-proof uploads failed → all
+                # blocks folded "modeled" → verdict FAIL). The gcsfuse CSI driver
+                # honors uid/gid/file-mode/dir-mode mount flags to set FS
+                # ownership/permissions (chmod/chown do NOT work on a gcsfuse FS),
+                # so set them to the `bench` user. implicit-dirs is preserved so
+                # the {height}/... key prefixes still resolve as directories.
+                mountOptions = "uid=1000,gid=1000,file-mode=0664,dir-mode=0775,implicit-dirs"
               }
             }
           }
@@ -878,8 +898,18 @@ resource "kubernetes_deployment" "fold_worker" {
               driver    = "gcsfuse.csi.storage.gke.io"
               read_only = false
               volume_attributes = {
-                bucketName   = local.proof_store_bucket_name
-                mountOptions = "implicit-dirs"
+                bucketName = local.proof_store_bucket_name
+                # Issue #261: the gcsfuse mount otherwise comes up ROOT-OWNED
+                # (uid=0, dir-mode 755) while the prover runs NON-ROOT (`bench`,
+                # uid=1000/gid=1000 — cicd/Containerfile). A non-root process
+                # then gets `Permission denied (os error 13)` on every write
+                # (the Phase A live run: 968/968 leaf-proof uploads failed → all
+                # blocks folded "modeled" → verdict FAIL). The gcsfuse CSI driver
+                # honors uid/gid/file-mode/dir-mode mount flags to set FS
+                # ownership/permissions (chmod/chown do NOT work on a gcsfuse FS),
+                # so set them to the `bench` user. implicit-dirs is preserved so
+                # the {height}/... key prefixes still resolve as directories.
+                mountOptions = "uid=1000,gid=1000,file-mode=0664,dir-mode=0775,implicit-dirs"
               }
             }
           }
