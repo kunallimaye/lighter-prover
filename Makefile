@@ -5,4 +5,4 @@ help: ## Show this help
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
 cloud-deploy: ## Run Cloud Build to deploy infrastructure using Terraform (infra-as-code/cloudbuild.yaml)
-	@bash scripts/cloud.sh cloud-deploy
+	@bash infra-as-code/scripts/cloud.sh cloud-deploy
