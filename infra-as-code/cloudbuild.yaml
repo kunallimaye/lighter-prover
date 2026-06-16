@@ -26,6 +26,10 @@ steps:
     args:
       - '-c'
       - |
+        if [ "${_TF_ACTION}" = "apply" ] || [ "${_TF_ACTION}" = "plan" ]; then
+          terraform import google_artifact_registry_repository.bench "projects/${_BUILD_PROJECT_ID}/locations/${_REGION}/repositories/${_AR_REPO}" 2>/dev/null || true
+        fi
+
         if [ "${_TF_ACTION}" = "plan" ]; then
           terraform plan -no-color -input=false
         else
