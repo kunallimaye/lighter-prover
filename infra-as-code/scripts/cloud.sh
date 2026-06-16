@@ -64,7 +64,7 @@ _generate_tfvars() {
   fi
 }
 
-_verify_service_accounts() {
+_verify_service_accounts_and_auth() {
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   if [[ ! -f "${target_sa}" ]]; then
     _die "Service account configuration file missing."
@@ -82,6 +82,17 @@ _verify_service_accounts() {
     fi
     _log_ok "  ${sa_email} verified."
   done < <(python3 -c "import json; [print(k) for k in json.load(open('${target_sa}')).get('target_sas', {}).keys()]" 2>/dev/null || true)
+
+  # Explicit dry-run token test to ensure active local operator can actAs / impersonate Build SA
+  local builder_sa
+  builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+  if [[ -n "${builder_sa}" ]]; then
+    _log_info "Testing local caller impersonation access (actAs) on Build SA: ${builder_sa}..."
+    if ! gcloud auth print-access-token --impersonate-service-account="${builder_sa}" &>/dev/null; then
+      _die "Active local caller identity lacks permission to impersonate Build SA ${builder_sa}. Ask the cloud owner to grant roles/iam.serviceAccountUser and roles/iam.serviceAccountTokenCreator."
+    fi
+    _log_ok "  Impersonation access confirmed."
+  fi
 }
 
 _provision_sa_and_roles() {
@@ -124,7 +135,7 @@ _execute_cloudbuild() {
   build_project="$(_resolve_build_project)"
 
   _generate_tfvars
-  _verify_service_accounts
+  _verify_service_accounts_and_auth
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   local builder_sa runtime_sa
@@ -139,8 +150,14 @@ _execute_cloudbuild() {
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "${action}" "${builder_sa}" "${runtime_sa}")"
 
+  local sa_args=()
+  if [[ -n "${builder_sa}" ]]; then
+    sa_args=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+
   gcloud builds submit . \
     --project="${build_project}" \
+    "${sa_args[@]}" \
     --config="infra-as-code/cloudbuild.yaml" \
     --substitutions="${substitutions}" \
     --quiet
@@ -174,7 +191,21 @@ cloud_admin_init() {
     _provision_sa_and_roles "${build_project}" "${sa_email}" "${sa_key}" "${target_json}"
   done < <(python3 -c "import json; [print(k) for k in json.load(open('${target_json}')).get('target_sas', {}).keys()]" 2>/dev/null || true)
 
+  local builder_sa
+  builder_sa="$(python3 -c "import json; print(json.load(open('${target_json}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+
   _log_ok "All target Service Accounts and IAM role allocations successfully provisioned."
+
+  if [[ -n "${builder_sa}" ]]; then
+    printf '\n\033[1;33m[OWNER ACTION REQUIRED]\033[0m To allow operators or CI identities to execute cloud deployment targets,\n'
+    printf 'grant impersonation permissions on Build SA (%s) by running:\n\n' "${builder_sa}"
+    printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}"
+    printf '    --member="user:<OPERATOR_EMAIL>" \\\n'
+    printf '    --role="roles/iam.serviceAccountUser"\n\n'
+    printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}"
+    printf '    --member="user:<OPERATOR_EMAIL>" \\\n'
+    printf '    --role="roles/iam.serviceAccountTokenCreator"\n\n'
+  fi
 }
 
 cloud_deploy() {
