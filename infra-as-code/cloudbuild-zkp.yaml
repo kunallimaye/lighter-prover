@@ -1,0 +1,17 @@
+steps:
+  # 1. Compile and containerize isolated ZKP STARK generation engine
+  - id: build-zkp-prover
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-f'
+      - 'Dockerfile.zkp'
+      - '-t'
+      - '${_IMAGE_URI}'
+      - '.'
+
+images:
+  - '${_IMAGE_URI}'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

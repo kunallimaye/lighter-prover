@@ -301,6 +301,46 @@ cloud_destroy() {
   _execute_cloudbuild "destroy"
 }
 
+cloud_zkp_build() {
+  local build_project
+  build_project="$(_resolve_build_project)"
+
+  _generate_tfvars
+  _verify_service_accounts_and_auth "${build_project}"
+
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local builder_sa build_machine ar_repo region
+  builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+  build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'UNSPECIFIED'))" 2>/dev/null || true)"
+
+  region="${GCP_REGION:-us-central1}"
+  ar_repo="${AR_REPO:-lighter-prover-iac}"
+  local image_uri="${region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:latest"
+
+  _log_info "Submitting isolated ZKP container image build to Cloud Build..."
+  _log_info "  Build Project: ${build_project}"
+  _log_info "  Builder SA:    ${builder_sa}"
+  _log_info "  Target Image:  ${image_uri}"
+  _log_info "  Machine Type:  ${build_machine}"
+
+  local cb_args=()
+  if [[ -n "${builder_sa}" ]]; then
+    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
+    cb_args+=(--machine-type="${build_machine}")
+  fi
+
+  gcloud builds submit . \
+    --project="${build_project}" \
+    "${cb_args[@]}" \
+    --config="infra-as-code/cloudbuild-zkp.yaml" \
+    --substitutions="_IMAGE_URI=${image_uri}" \
+    --quiet
+
+  _log_ok "ZKP container image built and pushed successfully to ${image_uri}."
+}
+
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -309,5 +349,6 @@ case "${1:-}" in
   cloud-deploy)     cloud_deploy ;;
   cloud-plan)       cloud_plan ;;
   cloud-destroy)    cloud_destroy ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-deploy|cloud-plan|cloud-destroy}" ;;
+  cloud-zkp-build)  cloud_zkp_build ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-deploy|cloud-plan|cloud-destroy|cloud-zkp-build}" ;;
 esac
