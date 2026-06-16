@@ -59,8 +59,14 @@ cell_replicas       = 9
 cell_compute_class  = "Performance"
 cell_machine_family = "c4a"
 cell_arch           = "arm64"
-cell_cpu_request    = "7"    # whole c4a-highcpu-8 (8 vCPU) minus ~1 vCPU Autopilot system reservation
-cell_memory_request = "12Gi" # clears ~5.2 GB prove peak; 12/7 = 1.71 GB/vCPU ≤ 2 GB/vCPU so it stays on the highcpu SKU (not upsized to standard)
+cell_cpu_request    = "7"   # whole c4a-highcpu-8 (8 vCPU) minus ~1 vCPU Autopilot system reservation
+# LIVE FINDING (this run): 12Gi made Autopilot silently UPSIZE to c4a-standard-8
+# (32 GB). highcpu-8 allocatable is only ~13 GB, and the pod also carries the
+# gke-gcsfuse-sidecar (250m / 256Mi) → total 12.25Gi was too close to the
+# allocatable ceiling, so the bin-packer chose the standard SKU. 8Gi keeps the
+# pod total (8.25Gi) comfortably inside highcpu-8's ~13 GB allocatable AND still
+# clears the ~5.2 GB prove peak (~2.8 GB headroom). 8/7 = 1.14 GB/vCPU ≪ 2.
+cell_memory_request = "8Gi" # forces the c4a-HIGHCPU-8 SKU (see finding above); clears ~5.2 GB peak
 cell_image = "us-central1-docker.pkg.dev/kunal-scratch/lighter-prover/bench:b0c84cb3bb1d8e799bf7b291bcf9e9b4560ea947-neoverse-v2"
 cell_command = [
   "/usr/local/bin/prover", "--mode", "cell",
