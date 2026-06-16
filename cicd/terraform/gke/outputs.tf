@@ -47,7 +47,7 @@ output "proof_store" {
     bucket         = var.enable_proof_store ? google_storage_bucket.proof_store[0].name : null
     url            = var.enable_proof_store ? google_storage_bucket.proof_store[0].url : null
     location       = var.enable_proof_store ? google_storage_bucket.proof_store[0].location : null
-    pod_gsa_member = var.enable_proof_store ? "serviceAccount:${var.proof_store_pod_gsa_email}" : null
+    pod_gsa_member = var.enable_proof_store ? "serviceAccount:${local.pod_gsa_email}" : null
     pod_gsa_role   = var.enable_proof_store ? "roles/storage.objectAdmin (bucket-scoped)" : null
   }
 }
@@ -55,6 +55,16 @@ output "proof_store" {
 output "proof_store_bucket" {
   description = "Convenience scalar: the proof-store bucket NAME (issue #179) downstream cell/coordinator config references via --proof-bucket. null when enable_proof_store = false."
   value       = var.enable_proof_store ? google_storage_bucket.proof_store[0].name : null
+}
+
+output "pod_ksa_name" {
+  description = "Name of the Kubernetes ServiceAccount the prover cell/coordinator pods run as via Workload Identity (issue #231). null when enable_pod_workload_identity = false (pods run as the `default` KSA)."
+  value       = var.enable_pod_workload_identity ? var.pod_ksa_name : null
+}
+
+output "pod_workload_identity_member" {
+  description = "The Workload Identity member string bound to roles/iam.workloadIdentityUser on the pod GSA (issue #231): serviceAccount:<project>.svc.id.goog[default/<ksa>]. null when enable_pod_workload_identity = false."
+  value       = var.enable_pod_workload_identity ? "serviceAccount:${var.project_id}.svc.id.goog[default/${var.pod_ksa_name}]" : null
 }
 
 output "hpa_target_class" {

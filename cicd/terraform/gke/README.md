@@ -26,6 +26,31 @@ future GKE-Standard or MIG backend is a sibling root selected by the
 | `kubernetes_horizontal_pod_autoscaler_v2.backlog` | HPA on `num_undelivered_messages` external metric. |
 | metrics adapter (applied by the deploy pipeline) | custom-metrics-stackdriver-adapter — the external-metrics path. |
 
+## Workload Identity for the prover pods (issue #231)
+
+The cell/coordinator pods authenticate to **Pub/Sub** and **GCS** via
+Workload Identity. Terraform creates a dedicated KSA, annotates it to the
+pod GSA, binds `roles/iam.workloadIdentityUser`, and sets
+`service_account_name` on both deployments. Without this, pods run as the
+`default` KSA and cannot auth — the whole pipeline fails.
+
+All four knobs are **defaulted** so the existing `smoke.tfvars` /
+`scale-*.tfvars` deploy WI with **no tfvars edit**:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `enable_pod_workload_identity` | `true` | Create the prover KSA + `workloadIdentityUser` binding and set `service_account_name` on the cell/coordinator pods. WI is harmless when planes are off (smoke), required whenever pods must auth. |
+| `pod_ksa_name` | `prover` | Name of the KSA (in the `default` namespace) the pods run as, annotated to the pod GSA. |
+| `proof_store_pod_gsa_email` | `null` → derives `lighter-prover-pods@${project_id}.iam.gserviceaccount.com` | The pod GSA the KSA impersonates. `null` makes the email **follow `project_id`**; set a value to override. The GSA itself is **not** created here (exists out-of-band). |
+| `enable_pubsub_iam` | `false` | When `false`, the pod GSA's `pubsub.publisher`/`pubsub.subscriber` are relied on **out-of-band** (VERIFY) — Terraform does not touch them. Set `true` to bring those grants under Terraform management (GRANT). Satisfies "grant (or verify)". |
+
+The WI member pattern follows the proven metrics-adapter binding:
+`serviceAccount:${project_id}.svc.id.goog[default/${pod_ksa_name}]`.
+
+> **Operator step:** a live `terraform apply` + verifying real pod auth to
+> Pub/Sub + GCS (no auth errors) is the operator's separate verification of
+> the #231 acceptance criteria — out of scope for the Terraform change itself.
+
 ## The two machine classes are sized SEPARATELY (never summed)
 
 Each class has its own machine-shape, resource-request, and replica-count

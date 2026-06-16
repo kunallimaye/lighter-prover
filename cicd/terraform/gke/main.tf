@@ -32,6 +32,19 @@ locals {
 
   proof_store_on = var.enable_proof_store ? 1 : 0
 
+  # Issue #231: the pod GSA email FOLLOWS project_id by default. An explicit
+  # proof_store_pod_gsa_email overrides it; null (the default) derives the
+  # conventional pod-GSA name in the configured project. (TF variable defaults
+  # cannot reference other variables, so the project-follow is resolved here.)
+  pod_gsa_email = coalesce(
+    var.proof_store_pod_gsa_email,
+    "lighter-prover-pods@${var.project_id}.iam.gserviceaccount.com"
+  )
+
+  # Issue #231: gate the prover KSA + workloadIdentityUser binding. When off,
+  # pods fall back to the `default` KSA (no WI) and service_account_name is unset.
+  pod_wi_on = var.enable_pod_workload_identity ? 1 : 0
+
   # Resolved proof-store bucket name: an explicit override, else a
   # deterministic project-derived name (bucket names are globally unique).
   proof_store_bucket_name = var.proof_store_bucket != "" ? var.proof_store_bucket : "${var.project_id}-lighter-prover-proofs"
@@ -269,7 +282,68 @@ resource "google_storage_bucket_iam_member" "proof_store_pod_object_admin" {
 
   bucket = google_storage_bucket.proof_store[0].name
   role   = "roles/storage.objectAdmin"
-  member = "serviceAccount:${var.proof_store_pod_gsa_email}"
+  member = "serviceAccount:${local.pod_gsa_email}"
+}
+
+# ─── 2b. Workload Identity for the PROVER pods (issue #231) ──────────
+# Without this, the cell/coordinator pods run as the `default` KSA and
+# cannot authenticate to Pub/Sub or GCS — the whole pipeline fails.
+#
+# We (a) create a dedicated KSA in the `default` namespace, annotated to
+# the pod GSA; (b) bind roles/iam.workloadIdentityUser so that KSA may
+# impersonate the GSA; and (c) set service_account_name on both
+# deployments (below). The pod GSA itself is NOT created here (it exists
+# out-of-band); the binding references it by full resource name.
+#
+# This follows the PROVEN WI member pattern already used for the metrics
+# adapter (google_project_iam_member.adapter_monitoring_viewer):
+#   serviceAccount:${project_id}.svc.id.goog[<namespace>/<ksa>]
+
+resource "kubernetes_service_account" "prover" {
+  count = local.pod_wi_on
+
+  metadata {
+    name      = var.pod_ksa_name
+    namespace = "default"
+    annotations = {
+      "iam.gke.io/gcp-service-account" = local.pod_gsa_email
+    }
+  }
+
+  # The kubernetes provider needs the cluster ready; the token is
+  # short-lived so we also depend on the cluster explicitly.
+  depends_on = [google_container_cluster.autopilot]
+}
+
+resource "google_service_account_iam_member" "prover_wi" {
+  count = local.pod_wi_on
+
+  # The pod GSA exists out-of-band; reference it by full resource name so
+  # the binding does not require Terraform to manage the GSA itself.
+  service_account_id = "projects/${var.project_id}/serviceAccounts/${local.pod_gsa_email}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.project_id}.svc.id.goog[default/${var.pod_ksa_name}]"
+}
+
+# ─── 2c. OPTIONAL: pubsub IAM for the pod GSA (issue #231) ───────────
+# The pod GSA already holds pubsub.publisher + pubsub.subscriber out-of-band.
+# DEFAULT OFF (enable_pubsub_iam = false): we do NOT disturb those working
+# grants — the default path VERIFIES them. Set enable_pubsub_iam = true to
+# bring the grants under Terraform management (GRANT). Satisfies the issue's
+# "grant (or verify)".
+
+resource "google_project_iam_member" "pod_pubsub_publisher" {
+  count   = var.enable_pubsub_iam ? 1 : 0
+  project = var.project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${local.pod_gsa_email}"
+}
+
+resource "google_project_iam_member" "pod_pubsub_subscriber" {
+  count   = var.enable_pubsub_iam ? 1 : 0
+  project = var.project_id
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${local.pod_gsa_email}"
 }
 
 # ─── 3. Workload Identity for the metrics adapter ────────────────────
@@ -323,6 +397,11 @@ resource "kubernetes_deployment" "cells" {
       }
 
       spec {
+        # Issue #231: run as the prover KSA (bound to the pod GSA via WI) so
+        # the cell can authenticate to Pub/Sub + GCS. null when WI is disabled
+        # (pods fall back to the `default` KSA).
+        service_account_name = var.enable_pod_workload_identity ? var.pod_ksa_name : null
+
         node_selector = merge(
           { "kubernetes.io/arch" = var.cell_arch },
           var.cell_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.cell_compute_class },
@@ -362,8 +441,13 @@ resource "kubernetes_deployment" "cells" {
   }
 
   # The provider needs the cluster ready; the token is short-lived so we
-  # also depend on the cluster explicitly.
-  depends_on = [google_container_cluster.autopilot]
+  # also depend on the cluster explicitly. Issue #231: also depend on the
+  # prover KSA so it exists before the pod references it via
+  # service_account_name (safe with count — list ref is empty when WI off).
+  depends_on = [
+    google_container_cluster.autopilot,
+    kubernetes_service_account.prover,
+  ]
 }
 
 # CLASS 2 — COORDINATORS. A DISTINCT compute class (fold L2 + prove L4).
@@ -406,6 +490,11 @@ resource "kubernetes_deployment" "coordinator" {
       }
 
       spec {
+        # Issue #231: run as the prover KSA (bound to the pod GSA via WI) so
+        # the coordinator (and the fold-worker role it hosts) can authenticate
+        # to Pub/Sub + GCS. null when WI is disabled (fall back to `default`).
+        service_account_name = var.enable_pod_workload_identity ? var.pod_ksa_name : null
+
         node_selector = merge(
           { "kubernetes.io/arch" = var.coordinator_arch },
           var.coordinator_compute_class == "" ? {} : { "cloud.google.com/compute-class" = var.coordinator_compute_class },
@@ -489,7 +578,13 @@ resource "kubernetes_deployment" "coordinator" {
     }
   }
 
-  depends_on = [google_container_cluster.autopilot]
+  # Issue #231: also depend on the prover KSA so it exists before the pod
+  # references it via service_account_name (safe with count — list ref is
+  # empty when WI off).
+  depends_on = [
+    google_container_cluster.autopilot,
+    kubernetes_service_account.prover,
+  ]
 }
 
 # ── HARD DAY-1 REQUIREMENT (ADR-0003 amendment §3) ──
