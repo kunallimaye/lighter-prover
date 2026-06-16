@@ -8,7 +8,7 @@
 # Verbs (role-aware vocabulary, #141 lesson 6):
 #
 #   help                — print resolved three-role topology
-#   admin-cloud-init    — Owner-tier 12-step bootstrap (run as Owner once)
+#   admin-cloud-init    — Owner-tier 13-step bootstrap (run as Owner once)
 #   admin-cloud-destroy — symmetric teardown (preserves TF state + AR by default)
 #   cloud-preflight     — read-only audit (per-role-aware messaging)
 #   cloud-infra         — TF apply via Cloud Build (builder SA in build project)
@@ -118,7 +118,7 @@ help_cmd() {
 }
 
 # ─── admin-cloud-init ─────────────────────────────────────────────────
-# Owner-tier 12-step bootstrap. Runs in the orchestration project as Owner.
+# Owner-tier 13-step bootstrap. Runs in the orchestration project as Owner.
 # Cross-project-aware: each grant branches on local-vs-cross-project.
 # Stepwise checkpointed via run_detached_stepwise — re-run resumes; the
 # step-list hash invalidates stale checkpoints automatically (#141 lesson 3).
@@ -339,6 +339,38 @@ _step_enable_gke_pubsub_access() {
   log_ok "  GKE + Pub/Sub deploy access ready for agent SA (#167)"
 }
 
+# ─── GKE Workload-Identity binding enablement (#231) ─────────────────
+# The #231 WI work (PR #245) added google_service_account_iam_member.
+# prover_wi to cicd/terraform/gke: it binds roles/iam.workloadIdentityUser
+# on the EXISTING pod GSA (lighter-prover-pods@<runtime>.iam.gserviceaccount.com)
+# so the in-cluster `prover` KSA may impersonate it. Creating that binding
+# requires iam.serviceAccounts.setIamPolicy ON THE TARGET pod GSA.
+#
+# We grant that as roles/iam.serviceAccountAdmin RESOURCE-SCOPED to the
+# pod GSA only — NOT project-wide. Granting project-wide setIamPolicy (or
+# adding it to the curated lighterProverDeployer role) would let the agent
+# rewrite the IAM of every SA in the project; scoping the binding to the
+# single target SA keeps it strictly least-privilege. This is why GAP A
+# lives here in the script (resource-scoped grant) rather than in
+# cicd/iam/lighter-prover-deployer-role.yaml — see the comment block there.
+#
+# Idempotent: `gcloud iam service-accounts add-iam-policy-binding` is a
+# no-op when the binding already exists. The other two #231 gaps
+# (proof-store bucket lifecycle + the metrics-adapter project IAM member)
+# ride on the curated role, which _step_create_custom_role re-applies from
+# the YAML — no extra step needed for those.
+_step_grant_agent_wi_binding_on_pod_gsa() {
+  log_info "  granting agent SA serviceAccountAdmin (resource-scoped) on pod GSA: ${POD_GSA_EMAIL}"
+  log_info "    (so terraform can create google_service_account_iam_member.prover_wi, #231)"
+  gcloud iam service-accounts add-iam-policy-binding "${POD_GSA_EMAIL}" \
+    --project="${RUNTIME_PROJECT}" \
+    --member="serviceAccount:${AGENT_SA_EMAIL}" \
+    --role="roles/iam.serviceAccountAdmin" \
+    --condition=None \
+    --quiet
+  log_ok "  agent SA can now set IAM policy on the pod GSA (WI binding enabled, #231)"
+}
+
 # ─── Fleet bootstrap steps (bench-fleet toolkit, #33) ────────────────
 # Appended to the admin-cloud-init step list. All idempotent. Note: the
 # run_detached_stepwise checkpoint hash invalidates when the step list
@@ -422,7 +454,7 @@ admin_cloud_init() {
   if [[ -z "${TF_STATE_BUCKET}" ]]; then die "TF_STATE_BUCKET is not set."; fi
 
   if [[ "${CONFIRM:-}" != "yes" ]]; then
-    confirm "Proceed with 12-step bootstrap?" || { log_warn "Aborted."; exit 0; }
+    confirm "Proceed with 13-step bootstrap?" || { log_warn "Aborted."; exit 0; }
   fi
 
   run_detached_stepwise "admin-cloud-init" \
@@ -435,6 +467,7 @@ admin_cloud_init() {
     _step_grant_agent_actas_builder \
     _step_grant_builder_roles \
     _step_enable_gke_pubsub_access \
+    _step_grant_agent_wi_binding_on_pod_gsa \
     _step_fleet_create_results_bucket \
     _step_fleet_grant_orchestrator \
     _step_fleet_grant_compute_sa

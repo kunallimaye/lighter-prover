@@ -1,5 +1,5 @@
 title: "lighter-prover Deployer"
-description: "Curated permissions for the lighter-prover agent SA (operator identity). Daily operation: Cloud Build submits, AR push/pull, GCS results/TF-state access, logs read, plus Cloud Run (Jobs) perms for the Phase 2 runtime. Now also in scope: GKE Autopilot cluster + Pub/Sub dispatch plane lifecycle (apply+destroy) for the cicd/terraform/gke deploy automation (PR #154, #167). Bound with 30-day expiry by scripts/cloud.sh::admin-cloud-init."
+description: "Curated permissions for the lighter-prover agent SA (operator identity). Daily operation: Cloud Build submits, AR push/pull, GCS results/TF-state access, logs read, plus Cloud Run (Jobs) perms for the Phase 2 runtime. Now also in scope: GKE Autopilot cluster + Pub/Sub dispatch plane lifecycle (apply+destroy) for the cicd/terraform/gke deploy automation (PR #154, #167), plus the GKE Workload-Identity deployer perms (proof-store bucket lifecycle + metrics-adapter project IAM binding) needed by the #231 WI apply. Bound with 30-day expiry by scripts/cloud.sh::admin-cloud-init."
 stage: GA
 includedPermissions:
   # Artifact Registry — push/pull bench images (cloud-bench-build matrix,
@@ -53,7 +53,7 @@ includedPermissions:
   # GCS — TF state bucket, Cloud Build staging bucket, and the bench-fleet
   # results bucket (read results, write probes, clean up run prefixes).
   # buckets.setIamPolicy intentionally omitted: bucket IAM grants are
-  # Owner-tier (admin-cloud-init steps 10-11).
+  # Owner-tier (admin-cloud-init fleet steps 11-12).
   - storage.buckets.get
   - storage.buckets.list
   - storage.buckets.getIamPolicy
@@ -150,6 +150,54 @@ includedPermissions:
   - pubsub.subscriptions.consume
   - pubsub.subscriptions.getIamPolicy
   - pubsub.subscriptions.setIamPolicy
+  # ─── GKE Workload Identity + proof-store enablement (ref #231) ──────
+  # The #231 WI work (PR #245) added three resources to cicd/terraform/gke
+  # that the agent SA could not create with the permissions above:
+  #
+  #   * google_storage_bucket.proof_store (+ its bucket IAM member) — the
+  #     shared GCS proof-store cells write L2 leaf proofs to and the
+  #     coordinator reads/gcsfuse-mounts (issues #179, #206). The agent SA
+  #     needs to create/delete the bucket and set its IAM policy. The
+  #     curated-minimal stance previously omitted buckets.setIamPolicy as
+  #     "Owner-tier" (see the GCS block above), but the GKE module now
+  #     genuinely manages the proof-store bucket lifecycle end-to-end, so
+  #     these verbs are enumerated here with that justification.
+  #
+  #   * google_project_iam_member.adapter_monitoring_viewer — binds the
+  #     custom-metrics-stackdriver-adapter KSA to roles/monitoring.viewer
+  #     at the PROJECT level (main.tf §3). Creating a project IAM member
+  #     requires resourcemanager.projects.setIamPolicy.
+  #
+  # Bucket lifecycle (proof-store, GAP B):
+  - storage.buckets.create
+  - storage.buckets.delete
+  - storage.buckets.setIamPolicy
+  #
+  # CAVEAT (privilege escalation — read before adding more): the next
+  # permission is PROJECT-WIDE setIamPolicy. It is intentionally broad:
+  # whoever holds it can grant themselves (or anyone) any role on the
+  # project. We add it ONLY because google_project_iam_member.
+  # adapter_monitoring_viewer (the metrics adapter's monitoring.viewer
+  # binding, main.tf §3) cannot be created without it, and the metrics
+  # adapter is required for the HPA to scale on Pub/Sub backlog (#231).
+  # Mitigations: (1) this role is bound to the agent SA with a 30-day
+  # EXPIRY condition (scripts/cloud.sh::_step_create_agent_sa_and_bind),
+  # so the escalation surface is time-boxed and forces re-bootstrap; and
+  # (2) admin-cloud-init is ALREADY an Owner-tier flow. REVISIT this if
+  # the adapter binding is ever moved out-of-band (e.g. applied by the
+  # Owner directly, or count-gated off in terraform) — at which point
+  # this project-wide grant should be removed to restore least-privilege.
+  - resourcemanager.projects.setIamPolicy
+  #
+  # GAP A is deliberately NOT here. The WI binding itself
+  # (google_service_account_iam_member.prover_wi) needs
+  # iam.serviceAccounts.setIamPolicy on the TARGET pod GSA
+  # (lighter-prover-pods@<project>.iam.gserviceaccount.com), NOT on this
+  # project. Granting that project-wide would let the agent rewrite the
+  # IAM of every SA in the project. Instead it is granted RESOURCE-SCOPED
+  # to the pod GSA only, via roles/iam.serviceAccountAdmin bound on that
+  # one SA resource in scripts/cloud.sh::_step_grant_agent_wi_binding_on_pod_gsa.
+  # That is strictly least-privilege; keep it out of this curated role.
 # NOTE on compute.*: this role DELIBERATELY remains free of compute.*
 # permissions, preserving the original curated-minimal stance. The GKE
 # deployment uses Autopilot (cicd/terraform/gke/main.tf §1:
