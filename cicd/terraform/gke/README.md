@@ -74,6 +74,16 @@ contract). The pool is gated behind `enable_fold_workers` (off at smoke scale;
 the scale tfvars turn it on alongside `enable_merge_plane` +
 `enable_proof_store` + `enable_proof_mount`).
 
+The leader and the fold workers must agree on the merge-plane names, and those
+names must match what `enable_merge_plane` provisions. The scale tfvars
+**tier-prefix** the merge-task/merge-result topic+subscription names
+(`lighter-prover-scale-<tier>-merge-*`, exactly like the chunk/results planes)
+via `merge_*` variable overrides — set on both the `coordinator_command` /
+`fold_worker_command` flags and the provisioned Pub/Sub names — so two scale
+tiers running concurrently get tier-isolated merge planes and never collide
+(issue #233). The generic `enable_merge_plane` defaults in `variables.tf` are
+unchanged; the per-tier names are tfvars overrides.
+
 The fold worker reaches Pub/Sub (pull the merge-task subscription, publish
 merge results) and GCS (transit intermediate proofs), so it runs under
 **Workload Identity** via the SAME knobs as the cell/coordinator pods — it sets
