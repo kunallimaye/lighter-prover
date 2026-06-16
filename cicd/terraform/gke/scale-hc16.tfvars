@@ -5,7 +5,7 @@
 # machine-class comparison (#214 runbook). EVERYTHING is identical to the
 # proven S=9 Phase A config EXCEPT:
 #   (1) the CELL machine type is changed c4a-highcpu-48 → c4a-highcpu-16
-#       (cell_cpu_request 43 → 15, cell_memory_request 44Gi → 28Gi). The
+#       (cell_cpu_request 43 → 15, cell_memory_request 44Gi → 12Gi). The
 #       coordinator + fold-worker machine types stay c4a-highcpu-48 (the
 #       comparison axis is the CELL machine ONLY). S stays 9, k stays 8.
 #   (2) ALL tier-prefixed names use a UNIQUE `hc16` prefix (cluster_name,
@@ -21,8 +21,10 @@
 # allocatable (~7.5 vCPU) and fits within a -16 node's allocatable (16 vCPU
 # minus ~0.5-1 vCPU Autopilot system reservation ≈ ~15 schedulable), so the
 # pod lands one-per-node on a c4a-highcpu-16 and CPU-saturates it — exactly
-# how 43 lands one pod per c4a-highcpu-48. memory 28Gi fits the -16's 32 GB
-# physical (minus the ~3-4 GB Autopilot/system reservation).
+# how 43 lands one pod per c4a-highcpu-48. memory 12Gi keeps the pod on the
+# LEAN-MEMORY highcpu SKU (2 GB/vCPU); a too-large request bumps Autopilot to
+# the higher-RAM c4a-standard-16 (4 GB/vCPU) — see the cell_memory_request
+# calibration note below for the attempt-1 finding.
 #
 # Validation-ladder tier 3 of 3 (0.2% / 0.3% / 0.5%). Sizes are 0.5% of
 # the full-scale steady fleet sized in docs/fleet-sizing-full-scale.md from
@@ -76,8 +78,17 @@ cell_replicas       = 9
 cell_compute_class  = "Performance" # Autopilot: Performance+c4a = real Axion; Scale-Out=t2a/neoverse-n1 SIGILLs the neoverse-v2 binary (live finding)
 cell_machine_family = "c4a"
 cell_arch           = "arm64"
-cell_cpu_request    = "15"   # whole c4a-highcpu-16 minus Autopilot system reservation (mirrors 48→43; lands one pod per c4a-highcpu-16 node)
-cell_memory_request = "28Gi" # fits c4a-highcpu-16's 32 GB physical minus ~3-4 GB system reservation; measured S=9 cell RSS ~5.3 GiB leaves ample headroom
+cell_cpu_request    = "15"   # whole c4a-highcpu-16 minus Autopilot system reservation (mirrors 48→43; lands one pod per 16-vCPU node)
+# MEMORY-REQUEST CALIBRATION (attempt-1 finding, #270): a first apply with
+# cell_memory_request=28Gi landed the cells on c4a-STANDARD-16 (16 vCPU / 64 GB)
+# instead of c4a-HIGHCPU-16 (16 vCPU / 32 GB) — 28Gi exceeded the highcpu-16's
+# post-reservation allocatable memory, so Autopilot upgraded to the higher-RAM
+# standard SKU to satisfy the request (the highcpu family is the lean-memory
+# 2 GB/vCPU shape; standard is 4 GB/vCPU). Since the measured S=9 cell RSS is
+# only ~5.3 GiB, request 12Gi (0.8 GB/vCPU) — well above the workload peak with
+# headroom, comfortably within highcpu-16's allocatable, so Autopilot keeps the
+# pod on a c4a-HIGHCPU-16 node (one pod per node, CPU-saturating).
+cell_memory_request = "12Gi" # leans onto c4a-highcpu-16 (32 GB / 2-GB-per-vCPU SKU); >2x the measured ~5.3 GiB S=9 cell RSS
 # Issue #216: a REAL arm64 (neoverse-v2/Axion) bench image that already EXISTS
 # in Artifact Registry — no build needed, just this pinned SHA. Re-pin to a
 # newer cicd/cloudbuild.yaml output as the bench binary advances.
