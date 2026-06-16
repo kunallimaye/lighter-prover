@@ -62,8 +62,12 @@ def main():
     build_email = ""
     runtime_email = ""
 
+    build_machine = "UNSPECIFIED"
     if isinstance(target, dict):
+      build_machine = str(target.get('build_machine_type', 'UNSPECIFIED'))
       for sa_key, sa_obj in target.items():
+        if sa_key == 'build_machine_type' or (isinstance(sa_obj, str) and '@' not in sa_obj):
+          continue
         email = sa_obj.get('email', '') if isinstance(sa_obj, dict) else str(sa_obj)
         roles = sa_obj.get('roles', []) if isinstance(sa_obj, dict) else []
         target_sas[sa_key] = {'email': email, 'roles': roles}
@@ -85,6 +89,7 @@ def main():
         'target_sas': target_sas,
         'builder_sa_email': build_email,
         'runtime_sa_email': runtime_email,
+        'build_machine_type': build_machine,
     }
     print(json.dumps(cleaned))
 

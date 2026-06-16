@@ -138,26 +138,31 @@ _execute_cloudbuild() {
   _verify_service_accounts_and_auth
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-  local builder_sa runtime_sa
+  local builder_sa runtime_sa build_machine
   builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
   runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+  build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'UNSPECIFIED'))" 2>/dev/null || true)"
 
   _log_info "Submitting IaC pipeline to Cloud Build (action: ${action})..."
   _log_info "  Build Project: ${build_project}"
   _log_info "  Builder SA:    ${builder_sa}"
   _log_info "  Runtime SA:    ${runtime_sa}"
+  _log_info "  Machine Type:  ${build_machine}"
 
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "${action}" "${builder_sa}" "${runtime_sa}")"
 
-  local sa_args=()
+  local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
-    sa_args=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
+    cb_args+=(--machine-type="${build_machine}")
   fi
 
   gcloud builds submit . \
     --project="${build_project}" \
-    "${sa_args[@]}" \
+    "${cb_args[@]}" \
     --config="infra-as-code/cloudbuild.yaml" \
     --substitutions="${substitutions}" \
     --quiet

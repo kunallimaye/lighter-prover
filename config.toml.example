@@ -19,6 +19,10 @@ region  = "us-central1"
 # Run `make cloud-admin-init` to automatically create all defined Service Accounts
 # and bind the enumerated IAM roles on your Google Cloud project.
 
+[gcp.target]
+# Cloud Build execution machine type (e.g. UNSPECIFIED, E2_HIGHCPU_8, E2_HIGHCPU_32)
+build_machine_type = "UNSPECIFIED"
+
 [gcp.target.build_sa]
 email = "lighter-builder@kunal-scratch.iam.gserviceaccount.com"
 # Roles expected by Cloud Build to execute Terraform pipelines and push images.

@@ -51,6 +51,12 @@ variable "ar_repo" {
   default     = "lighter-prover"
 }
 
+variable "build_machine_type" {
+  description = "Cloud Build execution machine type specification."
+  type        = string
+  default     = "UNSPECIFIED"
+}
+
 # ─── Service account identities ──────────────────────────────────────
 
 variable "builder_sa_email" {
