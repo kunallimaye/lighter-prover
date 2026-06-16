@@ -39,7 +39,7 @@ deletion_protection = false # ephemeral benchmark variant — keep teardown clea
 
 resource_labels = {
   managed = "terraform"
-  purpose = "gke-scale-phaseA-variant"
+  purpose = "gke-scale-phasea-variant"
   issue   = "273"
   tier    = "s8hc16"
 }
