@@ -69,6 +69,7 @@ _build_substitutions() {
 # ─── Preflight & IAM Bootstrapping ────────────────────────────────────
 
 _verify_service_accounts_and_auth() {
+  local build_project="${1:-$(_resolve_build_project)}"
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   if [[ ! -f "${target_sa}" ]]; then
     _die "Service account configuration file missing."
@@ -101,9 +102,11 @@ _verify_service_accounts_and_auth() {
       printf '\n\033[1;31m[ERROR]\033[0m Active local caller identity (%s) lacks permission to act as Build SA %s.\n' "${current_caller}" "${builder_sa}" >&2
       printf 'Ask the cloud administrator to run the following EXACT gcloud commands:\n\n' >&2
       printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}" >&2
+      printf '    --project="%s" \\\n' "${build_project}" >&2
       printf '    --member="%s:%s" \\\n' "${member_prefix}" "${current_caller}" >&2
       printf '    --role="roles/iam.serviceAccountUser"\n\n' >&2
       printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}" >&2
+      printf '    --project="%s" \\\n' "${build_project}" >&2
       printf '    --member="%s:%s" \\\n' "${member_prefix}" "${current_caller}" >&2
       printf '    --role="roles/iam.serviceAccountTokenCreator"\n\n' >&2
       exit 1
@@ -191,7 +194,7 @@ _execute_cloudbuild() {
   local build_project
   build_project="$(_resolve_build_project)"
 
-  _verify_service_accounts_and_auth
+  _verify_service_accounts_and_auth "${build_project}"
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   local builder_sa runtime_sa build_machine
@@ -255,9 +258,11 @@ cloud_admin_init() {
     printf '\n\033[1;33m[OWNER ACTION REQUIRED]\033[0m To allow operators or CI identities to execute cloud deployment targets,\n'
     printf 'grant impersonation permissions on Build SA (%s) by running:\n\n' "${builder_sa}"
     printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}"
+    printf '    --project="%s" \\\n' "${build_project}"
     printf '    --member="user:<OPERATOR_EMAIL>" \\\n'
     printf '    --role="roles/iam.serviceAccountUser"\n\n'
     printf '  gcloud iam service-accounts add-iam-policy-binding %s \\\n' "${builder_sa}"
+    printf '    --project="%s" \\\n' "${build_project}"
     printf '    --member="user:<OPERATOR_EMAIL>" \\\n'
     printf '    --role="roles/iam.serviceAccountTokenCreator"\n\n'
   fi
