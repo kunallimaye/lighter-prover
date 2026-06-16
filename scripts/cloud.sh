@@ -366,6 +366,7 @@ _step_grant_agent_wi_binding_on_pod_gsa() {
     --project="${RUNTIME_PROJECT}" \
     --member="serviceAccount:${AGENT_SA_EMAIL}" \
     --role="roles/iam.serviceAccountAdmin" \
+    --condition=None \
     --quiet
   log_ok "  agent SA can now set IAM policy on the pod GSA (WI binding enabled, #231)"
 }
