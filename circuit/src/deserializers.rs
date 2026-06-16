@@ -11,8 +11,9 @@ use plonky2::field::secp256k1_base::Secp256K1Base;
 use plonky2::field::secp256k1_scalar::Secp256K1Scalar;
 use plonky2::field::types::Field;
 use plonky2::hash::hash_types::{HashOut, RichField};
-use serde::Deserialize;
 use serde::de::{self, Deserializer};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 
 use crate::blob::constants::*;
 use crate::ecdsa::curve::curve_types::AffinePoint;
@@ -48,6 +49,26 @@ where
 {
     let num: i128 = Deserialize::deserialize(deserializer)?;
     Ok(BigInt::from(num))
+}
+
+/// Serialize a [`BigInt`] back to the SAME `i128` integer wire form that
+/// [`int_to_bigint`] reads (issue #257). The pre-state corpus persistence
+/// round-trips `MarketDetails` through serde, so its single custom-deserialized
+/// `funding_rate_prefix_sum: BigInt` field needs a matching serializer or the
+/// `#[derive(Serialize)]` cannot be generated. The field is documented as 63
+/// bits, so it always fits an `i128`; a value that did not fit would be a
+/// corpus-corruption bug and is surfaced as an honest serialization error
+/// rather than silently truncated.
+pub fn bigint_to_int<S>(value: &BigInt, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let num = i128::try_from(value.clone()).map_err(|_| {
+        serde::ser::Error::custom(format!(
+            "BigInt {value} does not fit in i128 for integer wire serialization"
+        ))
+    })?;
+    num.serialize(serializer)
 }
 
 pub fn strategies<'de, D, const SIZE: usize>(deserializer: D) -> Result<[BigInt; SIZE], D::Error>

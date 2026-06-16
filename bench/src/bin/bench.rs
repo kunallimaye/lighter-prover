@@ -165,6 +165,20 @@ struct Args {
     #[arg(long, env = "LIGHTER_PROOF_MOUNT", default_value = "")]
     proof_mount_path: String,
 
+    /// Issue #257: local-disk path to a SAVED per-tx positional pre-state
+    /// corpus (gzip-framed JSON, see `bench::prestate_store`). When set and the
+    /// file EXISTS, `run_cell` LOADS the corpus in seconds instead of
+    /// regenerating it via the ~2h S=1 sweep; when the path is empty or the
+    /// file is absent, the cell falls back to the sweep AND (if the path is
+    /// set) saves the freshly-swept corpus there so the NEXT run loads it.
+    /// This makes the sweep run AT MOST ONCE per height. Empty (the default)
+    /// preserves the pre-#257 always-sweep behavior. Honors the
+    /// `LIGHTER_DISABLE_PRESTATE_FIX=1` A/B toggle (which skips the corpus
+    /// entirely). The proof store (`--proof-bucket` / `--proof-mount-path`) is
+    /// also consulted as a corpus source when this local path is empty.
+    #[arg(long, env = "LIGHTER_PRESTATE_CORPUS", default_value = "")]
+    prestate_corpus_path: String,
+
     /// Issue #209: explicit opt-in to the COORDINATOR'S accounting-only
     /// fold path (the legacy `--mode coordinator` behavior when no
     /// `--proof-bucket` is set: no real merge tree, no real `BlockCircuit`
@@ -1812,44 +1826,127 @@ fn run_cell(args: &Args) {
         .map(|v| v != "1")
         .unwrap_or(true);
     let positional_snapshots: Option<PreStateSnapshots> = if prestate_fix_enabled {
-        info!(
-            "cell: FINDING D fix ON -- materializing per-tx positional pre-state corpus \
-             via S=1 L1 sweep over {} txs (one-time, off the prove-loop critical path)...",
-            effective_limit
-        );
-        let initial = ChunkPreState {
-            register_stack: block.register_stack_before,
-            all_assets: block.all_assets.clone(),
-            all_market_details: pre_exec_witness.new_market_details.clone(),
-            system_config: block.old_system_config,
-            account_tree_root: block.old_account_tree_root,
-            account_pub_data_tree_root: block.old_account_pub_data_tree_root,
-            account_delta_tree_root: block.old_account_delta_tree_root,
-            market_tree_root: block.old_market_tree_root,
+        // ── CACHE-OR-GENERATE (issue #257) ──────────────────────────────
+        // Try to LOAD a previously-saved corpus before paying the ~2h sweep.
+        // Sources, in order: (1) the explicit local-disk path
+        // (`--prestate-corpus-path` / LIGHTER_PRESTATE_CORPUS); (2) the proof
+        // store (`--proof-bucket` / `--proof-mount-path`) under
+        // `prestate_object_key(height)`. On a hit, the sweep is skipped and the
+        // corpus is consumed in seconds; on a miss the cell falls back to the
+        // sweep and SAVES the result so the NEXT run loads it — making the
+        // sweep run AT MOST ONCE per height.
+        let corpus_path = args.prestate_corpus_path.trim();
+        let mut loaded: Option<PreStateSnapshots> = None;
+
+        if !corpus_path.is_empty() && std::path::Path::new(corpus_path).exists() {
+            match bench::prestate_store::load_prestate_corpus_from_path(corpus_path) {
+                Ok(snaps) => {
+                    info!(
+                        "cell: FINDING D fix ON -- LOADED per-tx positional pre-state corpus \
+                         from cache '{}' ({} snapshots); SKIPPING the S=1 sweep (issue #257)",
+                        corpus_path,
+                        snaps.len()
+                    );
+                    loaded = Some(snaps);
+                }
+                Err(e) => log::warn!(
+                    "cell: pre-state corpus at '{corpus_path}' failed to load ({e}); \
+                     falling back to S=1 sweep"
+                ),
+            }
+        }
+
+        if loaded.is_none() && proof_store.config().enabled() {
+            match bench::prestate_store::load_prestate_corpus_from_store(
+                block.block_number,
+                &proof_store,
+            ) {
+                Ok(snaps) => {
+                    info!(
+                        "cell: FINDING D fix ON -- LOADED per-tx positional pre-state corpus \
+                         from proof store key '{}' ({} snapshots); SKIPPING the S=1 sweep \
+                         (issue #257)",
+                        bench::prestate_store::prestate_object_key(block.block_number),
+                        snaps.len()
+                    );
+                    loaded = Some(snaps);
+                }
+                Err(e) => log::info!(
+                    "cell: no cached pre-state corpus in proof store for height {} ({e}); \
+                     will regenerate via S=1 sweep",
+                    block.block_number
+                ),
+            }
+        }
+
+        let snaps = if let Some(snaps) = loaded {
+            snaps
+        } else {
+            info!(
+                "cell: FINDING D fix ON -- no cached corpus; REGENERATING per-tx positional \
+                 pre-state corpus via S=1 L1 sweep over {} txs (one-time, off the prove-loop \
+                 critical path)...",
+                effective_limit
+            );
+            let initial = ChunkPreState {
+                register_stack: block.register_stack_before,
+                all_assets: block.all_assets.clone(),
+                all_market_details: pre_exec_witness.new_market_details.clone(),
+                system_config: block.old_system_config,
+                account_tree_root: block.old_account_tree_root,
+                account_pub_data_tree_root: block.old_account_pub_data_tree_root,
+                account_delta_tree_root: block.old_account_delta_tree_root,
+                market_tree_root: block.old_market_tree_root,
+            };
+            // The sweep proves SINGLE-tx steps, so it needs an S=1 L1 circuit --
+            // NOT the cell's serving circuit `data` (built at S=tx_per_proof). A
+            // single-tx BlockTx fed to the S=9 circuit trips the in-circuit
+            // `zip_eq` (the circuit expects exactly tx_per_proof txs). This is a
+            // separate, transient circuit used only for the one-time sweep.
+            let sweep_circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, 1, CHAIN_ID);
+            let sweep_bt = sweep_circuit.target;
+            let sweep_data = sweep_circuit.builder.build::<C>();
+            let sweep_t = Instant::now();
+            let snaps = sweep_per_tx_snapshots(
+                block.block_number,
+                created_at,
+                initial,
+                &block.txs[..effective_limit],
+                &sweep_data,
+                &sweep_bt,
+                |_pos, _wall_ms| {},
+            );
+            info!(
+                "cell: positional pre-state corpus REGENERATED via sweep: {} snapshots in {:?}",
+                snaps.len(),
+                sweep_t.elapsed()
+            );
+
+            // SAVE the freshly-swept corpus so the sweep runs at most once per
+            // height. Persist to whichever sink is configured; save failures are
+            // non-fatal (the corpus is already in memory for this run).
+            if !corpus_path.is_empty() {
+                match bench::prestate_store::save_prestate_corpus_to_path(&snaps, corpus_path) {
+                    Ok(n) => info!(
+                        "cell: saved pre-state corpus to '{corpus_path}' ({n} gzip bytes); \
+                         future runs LOAD instead of sweeping (issue #257)"
+                    ),
+                    Err(e) => {
+                        log::warn!("cell: failed to save pre-state corpus to '{corpus_path}': {e}")
+                    }
+                }
+            }
+            if proof_store.config().enabled() {
+                match bench::prestate_store::save_prestate_corpus_to_store(&snaps, &proof_store) {
+                    Ok(key) => info!(
+                        "cell: saved pre-state corpus to proof store key '{key}'; \
+                         future runs LOAD instead of sweeping (issue #257)"
+                    ),
+                    Err(e) => log::warn!("cell: failed to save pre-state corpus to proof store: {e}"),
+                }
+            }
+            snaps
         };
-        // The sweep proves SINGLE-tx steps, so it needs an S=1 L1 circuit --
-        // NOT the cell's serving circuit `data` (built at S=tx_per_proof). A
-        // single-tx BlockTx fed to the S=9 circuit trips the in-circuit
-        // `zip_eq` (the circuit expects exactly tx_per_proof txs). This is a
-        // separate, transient circuit used only for the one-time sweep.
-        let sweep_circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, 1, CHAIN_ID);
-        let sweep_bt = sweep_circuit.target;
-        let sweep_data = sweep_circuit.builder.build::<C>();
-        let sweep_t = Instant::now();
-        let snaps = sweep_per_tx_snapshots(
-            block.block_number,
-            created_at,
-            initial,
-            &block.txs[..effective_limit],
-            &sweep_data,
-            &sweep_bt,
-            |_pos, _wall_ms| {},
-        );
-        info!(
-            "cell: positional pre-state corpus ready: {} snapshots in {:?}",
-            snaps.len(),
-            sweep_t.elapsed()
-        );
         Some(snaps)
     } else {
         log::warn!(

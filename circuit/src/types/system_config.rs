@@ -7,7 +7,7 @@ use plonky2::hash::hash_types::{HashOutTarget, RichField};
 use plonky2::hash::poseidon2::hash::Poseidon2Hash;
 use plonky2::iop::target::{BoolTarget, Target};
 use plonky2::iop::witness::Witness;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bool_utils::CircuitBuilderBoolUtils;
 use crate::circuit_logger::CircuitBuilderLogging;
@@ -16,7 +16,7 @@ use crate::utils::CircuitBuilderUtils;
 
 pub const SYSTEM_CONFIG_SIZE: usize = 4;
 
-#[derive(Clone, Debug, Deserialize, Copy)]
+#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq)]
 #[serde(default)]
 pub struct SystemConfig {
     #[serde(rename = "llpai")]
