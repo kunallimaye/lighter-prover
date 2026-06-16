@@ -21,12 +21,16 @@ steps:
   # 2. Execute Terraform action (plan/apply/destroy)
   - id: tf-action
     name: 'hashicorp/terraform:1.14'
+    entrypoint: 'sh'
     dir: 'infra-as-code/terraform'
     args:
-      - '${_TF_ACTION}'
-      - '-auto-approve'
-      - '-no-color'
-      - '-input=false'
+      - '-c'
+      - |
+        if [ "${_TF_ACTION}" = "plan" ]; then
+          terraform plan -no-color -input=false
+        else
+          terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
+        fi
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
