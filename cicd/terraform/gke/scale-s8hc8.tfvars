@@ -47,7 +47,7 @@ resource_labels = {
   purpose = "gke-scale-ladder"
   issue   = "214"
   tier    = "s8hc8"
-  variant = "phaseA-s8-c4a-highcpu-8"
+  variant = "phasea-s8-c4a-highcpu-8" # GCP labels must be lowercase ([a-z0-9_-])
 }
 
 # ── Machine CLASS 1: chunk-prover CELLS — VARIANT: c4a-highcpu-8 ──
