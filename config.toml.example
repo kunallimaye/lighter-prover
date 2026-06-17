@@ -72,7 +72,7 @@ roles = [
 machine_type    = "c4a-highcpu-16"
 zone            = "us-east4-b"
 disk_size_gb    = 100
-disk_type       = "pd-ssd"
+disk_type       = "hyperdisk-balanced"
 # Default OS boot image (e.g. debian-cloud/debian-12, ubuntu-os-cloud/ubuntu-2204-lts)
 image           = "debian-cloud/debian-12"
 # Optional CPU Turbo Mode (e.g. ALL_CORE_MAX or empty). Keeps cores boosted during ZKP generation.
