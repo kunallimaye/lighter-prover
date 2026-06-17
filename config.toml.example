@@ -11,13 +11,18 @@ name = "lighter-prover"
 
 [gcp.defaults]
 project = "kunal-scratch"
-region  = "us-central1"
+region  = "us-east4"
 
 [gcp.state]
 # Google Cloud Storage bucket used as remote backend for Terraform state files.
 # Automatically verified and created by `make cloud-admin-init`.
 bucket = "kunal-scratch-tfstate"
-prefix = "lighter-prover-iac"
+prefix = "lighter-prover-perf"
+
+[gcp.registry]
+# Google Cloud Artifact Registry repository name for managed container workloads.
+# Automatically provisioned by Terraform during `make cloud-deploy`.
+repository = "lighter-prover-iac"
 
 # ─── Target Service Accounts & Role Allocations ────────────────────────
 # Identities and IAM permissions required by Cloud Build and runtime workloads.
@@ -53,8 +58,8 @@ roles = [
 # All individual VMs inherit properties from `[vms.default]` unless explicitly overridden.
 
 [vms.default]
-machine_type    = "c4-standard-8"
-zone            = "us-central1-a"
+machine_type    = "c4a-highcpu-16"
+zone            = "us-east4-b"
 disk_size_gb    = 100
 disk_type       = "pd-ssd"
 # Default OS boot image (e.g. debian-cloud/debian-12, ubuntu-os-cloud/ubuntu-2204-lts)
@@ -67,7 +72,7 @@ service_account = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
 # Inherits machine_type, zone, disk_size_gb, disk_type, and service_account exactly from [vms.default]
 
 [vms.prover-vm-2]
-machine_type = "c4-standard-16"
-zone         = "us-central1-b"
+machine_type = "c4a-highcpu-32"
+zone         = "us-east4-b"
 disk_size_gb = 200
 # Inherits disk_type and service_account from [vms.default]

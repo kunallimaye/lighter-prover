@@ -43,6 +43,12 @@ variable "runtime_region" {
   default     = "us-central1"
 }
 
+variable "region" {
+  description = "Default GCP deployment region."
+  type        = string
+  default     = "us-central1"
+}
+
 # ─── Artifact Registry ───────────────────────────────────────────────
 
 variable "ar_repo" {

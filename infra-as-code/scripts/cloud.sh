@@ -46,16 +46,18 @@ _build_substitutions() {
   local runtime_sa="$4"
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-  local cfg_bucket="" cfg_prefix=""
+  local cfg_bucket="" cfg_prefix="" cfg_repo="" cfg_region=""
   if [[ -f "${target_sa}" ]]; then
     cfg_bucket="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('tf_state_bucket', ''))" 2>/dev/null || true)"
     cfg_prefix="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('tf_state_prefix', ''))" 2>/dev/null || true)"
+    cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', ''))" 2>/dev/null || true)"
+    cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', ''))" 2>/dev/null || true)"
   fi
 
   local bucket="${TF_STATE_BUCKET:-${cfg_bucket:-${build_project}-tfstate}}"
   local prefix="${TF_STATE_PREFIX:-${cfg_prefix:-lighter-prover-iac}}"
-  local region="${GCP_REGION:-us-central1}"
-  local ar_repo="${AR_REPO:-lighter-prover-iac}"
+  local region="${GCP_REGION:-${cfg_region:-us-central1}}"
+  local ar_repo="${AR_REPO:-${cfg_repo:-lighter-prover-iac}}"
   local orch_project="${ORCH_PROJECT:-${build_project}}"
   local runtime_project="${RUNTIME_PROJECT:-${build_project}}"
 
@@ -335,12 +337,14 @@ cloud_zkp_build() {
   _verify_service_accounts_and_auth "${build_project}"
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-  local builder_sa build_machine ar_repo region
+  local builder_sa build_machine cfg_repo="" cfg_region=""
   builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
   build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'UNSPECIFIED'))" 2>/dev/null || true)"
+  cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', ''))" 2>/dev/null || true)"
+  cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', ''))" 2>/dev/null || true)"
 
-  region="${GCP_REGION:-us-central1}"
-  ar_repo="${AR_REPO:-lighter-prover-iac}"
+  local region="${GCP_REGION:-${cfg_region:-us-central1}}"
+  local ar_repo="${AR_REPO:-${cfg_repo:-lighter-prover-iac}}"
   local image_uri="${region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:latest"
 
   _log_info "Submitting isolated ZKP container image build to Cloud Build..."
