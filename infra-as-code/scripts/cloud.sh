@@ -402,7 +402,7 @@ cloud_bench_run() {
     local vm_list=()
     while IFS= read -r v; do
       [[ -n "$v" ]] && vm_list+=("$v")
-    done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).keys()))" 2>/dev/null || true)
+    done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).get('vms', {}).keys()))" 2>/dev/null || true)
 
     for vm in "${vm_list[@]}"; do
       cloud_bench_run "${vm}"
@@ -411,7 +411,7 @@ cloud_bench_run() {
   fi
 
   local zone cfg_repo="" cfg_region="" cfg_ar_region="" bench_bucket="" bench_template=""
-  zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('${target_vm}', {}).get('zone', 'us-central1-a'))" 2>/dev/null || true)"
+  zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('zone', 'us-central1-a'))" 2>/dev/null || true)"
   cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', 'lighter-prover-iac'))" 2>/dev/null || true)"
   cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', 'us-central1'))" 2>/dev/null || true)"
   cfg_ar_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_region', 'us'))" 2>/dev/null || true)"
@@ -453,6 +453,66 @@ cloud_bench_run() {
   _log_ok "Remote benchmark completed successfully on '${target_vm}'."
 }
 
+cloud_vm_start() {
+  local target_vm="${1:-all}"
+  local build_project
+  build_project="$(_resolve_build_project)"
+
+  _generate_tfvars
+
+  local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
+
+  if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
+    _log_info "Starting ALL provisioned VM instances defined in config.toml..."
+    local vm_list=()
+    while IFS= read -r v; do
+      [[ -n "$v" ]] && vm_list+=("$v")
+    done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).get('vms', {}).keys()))" 2>/dev/null || true)
+
+    for vm in "${vm_list[@]}"; do
+      cloud_vm_start "${vm}"
+    done
+    return
+  fi
+
+  local zone
+  zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('zone', 'us-central1-a'))" 2>/dev/null || true)"
+
+  _log_info "Starting GCE VM instance '${target_vm}' (${zone})..."
+  gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
+  _log_ok "Instance '${target_vm}' start signal issued."
+}
+
+cloud_vm_stop() {
+  local target_vm="${1:-all}"
+  local build_project
+  build_project="$(_resolve_build_project)"
+
+  _generate_tfvars
+
+  local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
+
+  if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
+    _log_info "Stopping ALL provisioned VM instances defined in config.toml..."
+    local vm_list=()
+    while IFS= read -r v; do
+      [[ -n "$v" ]] && vm_list+=("$v")
+    done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).get('vms', {}).keys()))" 2>/dev/null || true)
+
+    for vm in "${vm_list[@]}"; do
+      cloud_vm_stop "${vm}"
+    done
+    return
+  fi
+
+  local zone
+  zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('zone', 'us-central1-a'))" 2>/dev/null || true)"
+
+  _log_info "Stopping GCE VM instance '${target_vm}' (${zone})..."
+  gcloud compute instances stop "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
+  _log_ok "Instance '${target_vm}' stop signal issued."
+}
+
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -462,6 +522,8 @@ case "${1:-}" in
   cloud-deploy)     cloud_deploy ;;
   cloud-plan)       cloud_plan ;;
   cloud-destroy)    cloud_destroy ;;
+  cloud-vm-start)   shift; cloud_vm_start "${1:-all}" ;;
+  cloud-vm-stop)    shift; cloud_vm_stop "${1:-all}" ;;
   cloud-zkp-build)  shift; cloud_zkp_build "${1:-arm64}" ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run [vm|all]|cloud-deploy|cloud-plan|cloud-destroy|cloud-zkp-build [arm64|amd64|all]}" ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run [vm|all]|cloud-deploy|cloud-plan|cloud-destroy|cloud-vm-start [vm|all]|cloud-vm-stop [vm|all]|cloud-zkp-build [arm64|amd64|all]}" ;;
 esac
