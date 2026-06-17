@@ -405,8 +405,9 @@ cloud_bench_run() {
     done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).get('vms', {}).keys()))" 2>/dev/null || true)
 
     for vm in "${vm_list[@]}"; do
-      cloud_bench_run "${vm}"
+      cloud_bench_run "${vm}" &
     done
+    wait
     return
   fi
 
