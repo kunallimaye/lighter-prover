@@ -1,0 +1,8 @@
+.git/
+target/
+.terraform/
+reports/
+traces/
+__pycache__/
+*.pyc
+.env*
