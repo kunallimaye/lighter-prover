@@ -59,6 +59,8 @@ disk_size_gb    = 100
 disk_type       = "pd-ssd"
 # Default OS boot image (e.g. debian-cloud/debian-12, ubuntu-os-cloud/ubuntu-2204-lts)
 image           = "debian-cloud/debian-12"
+# Optional CPU Turbo Mode (e.g. ALL_CORE_MAX or empty). Keeps cores boosted during ZKP generation.
+turbo_mode      = "ALL_CORE_MAX"
 service_account = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
 
 [vms.prover-vm-1]

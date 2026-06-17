@@ -95,6 +95,13 @@ resource "google_compute_instance" "prover_vms" {
     }
   }
 
+  dynamic "advanced_machine_features" {
+    for_each = each.value.turbo_mode != "" ? [1] : []
+    content {
+      turbo_mode = each.value.turbo_mode
+    }
+  }
+
   network_interface {
     network = "default"
     access_config {

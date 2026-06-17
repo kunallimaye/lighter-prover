@@ -101,6 +101,7 @@ variable "vms" {
     disk_size_gb    = optional(number, 100)
     disk_type       = optional(string, "pd-ssd")
     image           = optional(string, "debian-cloud/debian-12")
+    turbo_mode      = optional(string, "")
     service_account = optional(string, "")
   }))
   default = {}

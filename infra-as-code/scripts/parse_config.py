@@ -38,6 +38,7 @@ def main():
     def_disk_size = int(defaults.get('disk_size_gb', 100))
     def_disk_type = str(defaults.get('disk_type', 'pd-ssd'))
     def_image = str(defaults.get('image', 'debian-cloud/debian-12'))
+    def_turbo = str(defaults.get('turbo_mode', ''))
     def_sa = str(defaults.get('service_account', defaults.get('runtime_sa', '')))
 
     cleaned = {}
@@ -51,6 +52,7 @@ def main():
             'disk_size_gb': int(v.get('disk_size_gb', def_disk_size)),
             'disk_type': str(v.get('disk_type', def_disk_type)),
             'image': str(v.get('image', def_image)),
+            'turbo_mode': str(v.get('turbo_mode', def_turbo)),
             'service_account': str(v.get('service_account', v.get('runtime_sa', def_sa))),
         }
     print(json.dumps(cleaned))
