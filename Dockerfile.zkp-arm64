@@ -32,11 +32,6 @@ RUN cargo build --release --target aarch64-unknown-linux-gnu --bin bench
 # ─── Stage 2: Native ARM64 Runtime Packaging ──────────────────────────
 FROM --platform=linux/arm64 debian:bookworm-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libgcc-s1 \
-    && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /data
 
 # Copy cross-compiled ARM64 binary and default benchmark fixture
