@@ -74,7 +74,7 @@ zone            = "us-east4-b"
 disk_size_gb    = 100
 disk_type       = "hyperdisk-balanced"
 # Default OS boot image (e.g. debian-cloud/debian-12, ubuntu-os-cloud/ubuntu-2204-lts)
-image           = "debian-cloud/debian-12"
+image           = "debian-cloud/debian-12-arm64"
 # Optional CPU Turbo Mode (e.g. ALL_CORE_MAX or empty). Keeps cores boosted during ZKP generation.
 turbo_mode      = ""
 service_account = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
