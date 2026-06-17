@@ -87,4 +87,14 @@ service_account = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
 machine_type = "c4a-highcpu-32"
 zone         = "us-east4-b"
 disk_size_gb = 200
-# Inherits disk_type and service_account from [vms.default]
+
+[vms.prover-vm-3]
+machine_type = "c4a-highcpu-8"
+
+[vms.prover-vm-4]
+machine_type = "c4a-highcpu-64"
+disk_size_gb = 200
+
+[vms.prover-vm-5]
+machine_type = "c4a-highcpu-72"
+disk_size_gb = 200
