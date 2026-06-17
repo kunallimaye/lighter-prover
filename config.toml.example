@@ -61,7 +61,8 @@ email = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
 roles = [
   "roles/artifactregistry.reader",
   "roles/logging.logWriter",
-  "roles/monitoring.metricWriter"
+  "roles/monitoring.metricWriter",
+  "roles/storage.objectAdmin"
 ]
 
 # ─── Virtual Machines List & Default Inheritance ───────────────────────
