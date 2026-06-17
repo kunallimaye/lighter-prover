@@ -55,7 +55,7 @@ def main():
             'turbo_mode': str(v.get('turbo_mode', def_turbo)),
             'service_account': str(v.get('service_account', v.get('runtime_sa', def_sa))),
         }
-    print(json.dumps(cleaned))
+    print(json.dumps({"vms": cleaned}))
 
   elif out_mode == 'target':
     gcp = data.get('gcp', {})
