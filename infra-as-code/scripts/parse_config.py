@@ -70,6 +70,7 @@ def main():
 
     registry = gcp.get('registry', {}) if isinstance(gcp, dict) else {}
     ar_repo = str(registry.get('repository', defaults.get('ar_repo', 'lighter-prover-iac')))
+    ar_region = str(registry.get('region', registry.get('location', region)))
 
     target = gcp.get('target', {}) if isinstance(gcp, dict) else {}
     if not target and 'target' in data:
@@ -106,7 +107,8 @@ def main():
         'runtime_project_id': project,
         'orchestration_project_id': project,
         'region': region,
-        'build_region': region,
+        'build_region': ar_region,
+        'ar_region': ar_region,
         'runtime_region': region,
         'orchestration_region': region,
         'ar_repo': ar_repo,

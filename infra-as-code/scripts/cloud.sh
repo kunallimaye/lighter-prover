@@ -337,15 +337,17 @@ cloud_zkp_build() {
   _verify_service_accounts_and_auth "${build_project}"
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-  local builder_sa build_machine cfg_repo="" cfg_region=""
+  local builder_sa build_machine cfg_repo="" cfg_region="" cfg_ar_region=""
   builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
   build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'UNSPECIFIED'))" 2>/dev/null || true)"
   cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', ''))" 2>/dev/null || true)"
   cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', ''))" 2>/dev/null || true)"
+  cfg_ar_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_region', ''))" 2>/dev/null || true)"
 
   local region="${GCP_REGION:-${cfg_region:-us-central1}}"
+  local ar_region="${cfg_ar_region:-${region}}"
   local ar_repo="${AR_REPO:-${cfg_repo:-lighter-prover-iac}}"
-  local image_uri="${region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:latest"
+  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:latest"
 
   _log_info "Submitting isolated ZKP container image build to Cloud Build..."
   _log_info "  Build Project: ${build_project}"

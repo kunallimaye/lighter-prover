@@ -29,7 +29,7 @@
 resource "google_artifact_registry_repository" "bench" {
   provider      = google.build
   project       = var.build_project_id
-  location      = var.build_region
+  location      = var.ar_region != "" ? var.ar_region : var.build_region
   repository_id = var.ar_repo
   description   = "Lighter prover bench images (Phase 1)"
   format        = "DOCKER"

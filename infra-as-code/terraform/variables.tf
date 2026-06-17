@@ -57,6 +57,12 @@ variable "ar_repo" {
   default     = "lighter-prover-iac"
 }
 
+variable "ar_region" {
+  description = "Artifact Registry repository location."
+  type        = string
+  default     = "us"
+}
+
 variable "build_machine_type" {
   description = "Cloud Build execution machine type specification."
   type        = string

@@ -23,6 +23,9 @@ prefix = "lighter-prover-perf"
 # Google Cloud Artifact Registry repository name for managed container workloads.
 # Automatically provisioned by Terraform during `make cloud-deploy`.
 repository = "lighter-prover-iac"
+# Repository location. Supports regions (e.g. us-central1) or multi-regions (us, europe, asia).
+# Note: Google Cloud Artifact Registry does not support location "global".
+region     = "us"
 
 # ─── Target Service Accounts & Role Allocations ────────────────────────
 # Identities and IAM permissions required by Cloud Build and runtime workloads.
@@ -33,7 +36,7 @@ repository = "lighter-prover-iac"
 
 [gcp.target]
 # Cloud Build execution machine type (e.g. UNSPECIFIED, E2_HIGHCPU_8, E2_HIGHCPU_32)
-build_machine_type = "UNSPECIFIED"
+build_machine_type = "E2_HIGHCPU_32"
 
 [gcp.target.build_sa]
 email = "lighter-builder@kunal-scratch.iam.gserviceaccount.com"
