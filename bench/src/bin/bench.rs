@@ -6,8 +6,10 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use circuit::block::{Block, BlockWitness};
 use circuit::block_constraints::{BlockCircuit, Circuit as _};
 use circuit::block_pre_execution::{BlockPreExec, BlockPreExecWitness};
@@ -33,7 +35,18 @@ use rayon::vec;
 const TX_PER_PROOF: usize = 4;
 const CHAIN_ID: u32 = 304;
 
+static UNSTRUCTURED_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static STAGE_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Lighter STARK Proving Observatory")]
+struct Cli {
+    #[arg(long, default_value = "reports")]
+    reports_dir: String,
+}
+
 fn main() {
+    let args = Cli::parse();
     init_logger_no_warn();
 
     let block = get_test_block_json_file("bench_test.json");
@@ -209,6 +222,87 @@ fn main() {
         "AVERAGE BlockTxChainCircuit::prove time: {:?}",
         chain_prove_total / chunks_count as u32
     );
+
+    // ─── Telemetry Summary Export ─────────────────────────────────────
+    let (rss_kb, peak_kb) = get_memory_stats_kb();
+    let cpu_sec = get_cpu_seconds();
+    let total_wall_sec = pre_execution_total.as_secs_f64()
+        + tx_prove_total.as_secs_f64()
+        + chain_prove_total.as_secs_f64();
+    let total_txs = block.txs.len();
+    let tps = if total_wall_sec > 0.0 {
+        total_txs as f64 / total_wall_sec
+    } else {
+        0.0
+    };
+
+    let summary = serde_json::json!({
+        "block_number": block.block_number,
+        "created_at_timestamp": created_at,
+        "batch_size_k": TX_PER_PROOF,
+        "total_transactions": total_txs,
+        "chunks_count": chunks_count,
+        "circuit_metrics": {
+            "num_public_inputs_tx": data.common.num_public_inputs,
+            "num_gate_constraints_tx": data.common.num_gate_constraints,
+            "num_public_inputs_chain": chain_circuit_data.common.num_public_inputs
+        },
+        "system_telemetry": {
+            "peak_rss_mb": peak_kb as f64 / 1024.0,
+            "final_rss_mb": rss_kb as f64 / 1024.0,
+            "total_cpu_seconds": cpu_sec,
+            "effective_tps": tps,
+            "avg_prove_latency_per_tx_ms": (tx_prove_total.as_secs_f64() * 1000.0) / total_txs as f64
+        },
+        "phase_durations_ms": {
+            "pre_execution_prove": pre_execution_total.as_millis(),
+            "tx_circuit_prove_total": tx_prove_total.as_millis(),
+            "chain_circuit_prove_total": chain_prove_total.as_millis()
+        },
+        "scraped_plonky2_stage_tree": *STAGE_LOGS.lock().unwrap()
+    });
+
+    if let Err(err) = fs::create_dir_all(&args.reports_dir) {
+        eprintln!("Warning: unable to create reports dir: {:?}", err);
+    } else {
+        let sum_path = Path::new(&args.reports_dir).join("bench_summary.json");
+        let _ = fs::write(&sum_path, serde_json::to_string_pretty(&summary).unwrap_or_default());
+
+        let txt_path = Path::new(&args.reports_dir).join("bench_unstructured.txt");
+        let txt_content = UNSTRUCTURED_LOGS.lock().unwrap().join("\n");
+        let _ = fs::write(&txt_path, txt_content);
+
+        info!("Observability observatory reports exported to {}", args.reports_dir);
+    }
+}
+
+fn get_memory_stats_kb() -> (u64, u64) {
+    let mut rss = 0;
+    let mut peak = 0;
+    if let Ok(content) = fs::read_to_string("/proc/self/status") {
+        for line in content.lines() {
+            if line.starts_with("VmRSS:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 { rss = parts[1].parse().unwrap_or(0); }
+            } else if line.starts_with("VmPeak:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 { peak = parts[1].parse().unwrap_or(0); }
+            }
+        }
+    }
+    (rss, peak)
+}
+
+fn get_cpu_seconds() -> f64 {
+    if let Ok(content) = fs::read_to_string("/proc/self/stat") {
+        let parts: Vec<&str> = content.split_whitespace().collect();
+        if parts.len() > 14 {
+            let utime: f64 = parts[13].parse().unwrap_or(0.0);
+            let stime: f64 = parts[14].parse().unwrap_or(0.0);
+            return (utime + stime) / 100.0;
+        }
+    }
+    0.0
 }
 
 pub fn get_test_block_json_file(file_name: &str) -> Block<F> {
@@ -228,6 +322,16 @@ impl Log for NoWarnLogger {
     fn log(&self, record: &Record) {
         if record.level() == Level::Warn {
             return;
+        }
+        let msg = format!("[{}] {}", record.level(), record.args());
+        if let Ok(mut logs) = UNSTRUCTURED_LOGS.lock() {
+            logs.push(msg.clone());
+        }
+        let target = record.target();
+        if target.contains("plonky2") || target.contains("prove") || target.contains("timing") || target.contains("Circuit") {
+            if let Ok(mut s) = STAGE_LOGS.lock() {
+                s.push(msg);
+            }
         }
         self.0.log(record)
     }

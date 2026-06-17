@@ -27,6 +27,12 @@ repository = "lighter-prover-iac"
 # Note: Google Cloud Artifact Registry does not support location "global".
 region     = "us"
 
+[gcp.bench]
+# GCS destination bucket for remote benchmark telemetry uploads (defaults to state bucket if omitted).
+bucket = "kunal-scratch-tfstate"
+# GCS path template. Supports variables: {machine_type}, {instance_id}, {timestamp}, {build_id}.
+path_template = "benchmark-reports/{machine_type}/{instance_id}/{timestamp}"
+
 # ─── Target Service Accounts & Role Allocations ────────────────────────
 # Identities and IAM permissions required by Cloud Build and runtime workloads.
 # Note: You may add ANY arbitrary Service Account entries below (e.g. [gcp.target.monitor_sa]).

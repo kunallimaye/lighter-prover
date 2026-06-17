@@ -40,8 +40,12 @@ container_run() {
   _log_info "  Container Image: ${LOCAL_ZKP_IMAGE}"
   _log_info "  Input Fixture:   ${abs_block} -> /data/bench_test.json"
 
+  mkdir -p "${ROOT_DIR}/reports"
+  _log_info "  Reports Mount:   ${ROOT_DIR}/reports -> /data/reports"
+
   "${ENGINE}" run --rm \
     -v "${abs_block}:/data/bench_test.json:ro" \
+    -v "${ROOT_DIR}/reports:/data/reports:rw" \
     "${LOCAL_ZKP_IMAGE}"
 
   _log_ok "Performance benchmark testing completed successfully!"

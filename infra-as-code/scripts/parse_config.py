@@ -72,6 +72,10 @@ def main():
     ar_repo = str(registry.get('repository', defaults.get('ar_repo', 'lighter-prover-iac')))
     ar_region = str(registry.get('region', registry.get('location', region)))
 
+    bench = gcp.get('bench', {}) if isinstance(gcp, dict) else {}
+    bench_bucket = str(bench.get('bucket', state_bucket))
+    bench_path_template = str(bench.get('path_template', 'benchmark-reports/{machine_type}/{instance_id}/{timestamp}'))
+
     target = gcp.get('target', {}) if isinstance(gcp, dict) else {}
     if not target and 'target' in data:
       target = data.get('target', {})
@@ -114,6 +118,8 @@ def main():
         'ar_repo': ar_repo,
         'tf_state_bucket': state_bucket,
         'tf_state_prefix': state_prefix,
+        'bench_bucket': bench_bucket,
+        'bench_path_template': bench_path_template,
         'target_sas': target_sas,
         'builder_sa_email': build_email,
         'runtime_sa_email': runtime_email,

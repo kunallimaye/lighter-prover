@@ -81,6 +81,18 @@ variable "tf_state_prefix" {
   default     = "lighter-prover-iac"
 }
 
+variable "bench_bucket" {
+  description = "GCS bucket for benchmark reports."
+  type        = string
+  default     = ""
+}
+
+variable "bench_path_template" {
+  description = "GCS path template for benchmark reports."
+  type        = string
+  default     = "benchmark-reports/{machine_type}/{instance_id}/{timestamp}"
+}
+
 # ─── Service account identities ──────────────────────────────────────
 
 variable "builder_sa_email" {
