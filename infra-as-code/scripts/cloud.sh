@@ -384,7 +384,70 @@ cloud_zkp_build() {
     --substitutions="_IMAGE_URI=${image_uri},_DOCKERFILE=${dockerfile}" \
     --quiet
 
-  _log_ok "ZKP container image built and pushed successfully to ${image_uri}."
+cloud_bench_run() {
+  local target_vm="${1:-all}"
+  local build_project
+  build_project="$(_resolve_build_project)"
+
+  _generate_tfvars
+
+  local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+
+  if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
+    _log_info "Executing benchmark proving container across ALL provisioned instances..."
+    local vm_list=()
+    while IFS= read -r v; do
+      [[ -n "$v" ]] && vm_list+=("$v")
+    done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).keys()))" 2>/dev/null || true)
+
+    for vm in "${vm_list[@]}"; do
+      cloud_bench_run "${vm}"
+    done
+    return
+  fi
+
+  local zone cfg_repo="" cfg_region="" cfg_ar_region="" bench_bucket="" bench_template=""
+  zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('${target_vm}', {}).get('zone', 'us-central1-a'))" 2>/dev/null || true)"
+  cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', 'lighter-prover-iac'))" 2>/dev/null || true)"
+  cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', 'us-central1'))" 2>/dev/null || true)"
+  cfg_ar_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_region', 'us'))" 2>/dev/null || true)"
+  bench_bucket="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('bench_bucket', ''))" 2>/dev/null || true)"
+  bench_template="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('bench_path_template', 'benchmark-reports/{machine_type}/{instance_id}/{timestamp}'))" 2>/dev/null || true)"
+
+  local ar_region="${cfg_ar_region:-${cfg_region}}"
+  local ar_repo="${AR_REPO:-${cfg_repo}}"
+  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:arm64"
+
+  _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone})..."
+  _log_info "  Target VM:      ${target_vm} (${zone})"
+  _log_info "  Container:      ${image_uri}"
+  _log_info "  Prioritization: nice -n -20, --pids-limit=-1"
+
+  gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
+    set -euo pipefail
+    if ! command -v docker >/dev/null 2>&1; then
+      sudo apt-get update && sudo apt-get install -y docker.io
+    fi
+    sudo gcloud auth configure-docker ${ar_region}-docker.pkg.dev --quiet
+    sudo rm -rf /tmp/reports && mkdir -p /tmp/reports
+
+    sudo nice -n -20 docker run --rm \
+      --pids-limit=-1 \
+      --ulimit nofile=1048576:1048576 \
+      -v /tmp/reports:/data/reports:rw \
+      ${image_uri}
+
+    if [[ -n '${bench_bucket}' ]]; then
+      machine_type=\$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/machine-type | awk -F/ '{print \$NF}')
+      instance_id=\$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id)
+      ts=\$(date +%Y%m%d-%H%M%S)
+      dest=\$(echo '${bench_template}' | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
+      gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
+    fi
+  "
+
+  _log_ok "Remote benchmark completed successfully on '${target_vm}'."
 }
 
 # ─── Main Dispatch ────────────────────────────────────────────────────
@@ -392,9 +455,10 @@ cloud_zkp_build() {
 case "${1:-}" in
   cloud-admin-init) cloud_admin_init ;;
   cloud-admin-undo) cloud_admin_undo ;;
+  cloud-bench-run)  shift; cloud_bench_run "${1:-all}" ;;
   cloud-deploy)     cloud_deploy ;;
   cloud-plan)       cloud_plan ;;
   cloud-destroy)    cloud_destroy ;;
   cloud-zkp-build)  shift; cloud_zkp_build "${1:-arm64}" ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-deploy|cloud-plan|cloud-destroy|cloud-zkp-build [arm64|amd64|all]}" ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run [vm|all]|cloud-deploy|cloud-plan|cloud-destroy|cloud-zkp-build [arm64|amd64|all]}" ;;
 esac

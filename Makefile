@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-deploy cloud-plan cloud-destroy cloud-zkp-build zkp-image
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-deploy cloud-plan cloud-destroy cloud-zkp-build zkp-image
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -14,6 +14,9 @@ zkp-image: container-build ## Alias for container-build
 
 cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via Cloud Build (infra-as-code/cloudbuild-zkp.yaml)
 	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build $(ARCH)
+
+cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
+	@bash infra-as-code/scripts/cloud.sh cloud-bench-run $(VM)
 
 cloud-admin-init: ## Bootstrap target GCP Service Accounts & IAM roles (Owner-tier)
 	@bash infra-as-code/scripts/cloud.sh cloud-admin-init
