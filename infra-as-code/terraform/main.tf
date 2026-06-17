@@ -81,7 +81,7 @@ resource "google_artifact_registry_repository_iam_member" "runtime_reader" {
 
 resource "google_compute_instance" "prover_vms" {
   for_each     = var.vms
-  provider     = google.runtime
+  provider     = google-beta.runtime_beta
   name         = each.key
   machine_type = each.value.machine_type
   zone         = each.value.zone
