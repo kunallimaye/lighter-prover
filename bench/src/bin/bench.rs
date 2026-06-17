@@ -316,7 +316,7 @@ struct NoWarnLogger(env_logger::Logger);
 
 impl Log for NoWarnLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() != Level::Warn && self.0.enabled(metadata)
+        metadata.level() != Level::Warn
     }
 
     fn log(&self, record: &Record) {
@@ -327,13 +327,14 @@ impl Log for NoWarnLogger {
         if let Ok(mut logs) = UNSTRUCTURED_LOGS.lock() {
             logs.push(msg.clone());
         }
-        let target = record.target();
-        if target.contains("plonky2") || target.contains("prove") || target.contains("timing") || target.contains("Circuit") {
+        if record.level() == Level::Debug || record.target().contains("plonky2") || record.target().contains("timing") || record.target().contains("circuit") {
             if let Ok(mut s) = STAGE_LOGS.lock() {
                 s.push(msg);
             }
         }
-        self.0.log(record)
+        if record.level() <= Level::Info {
+            self.0.log(record)
+        }
     }
 
     fn flush(&self) {
@@ -342,11 +343,11 @@ impl Log for NoWarnLogger {
 }
 
 fn init_logger_no_warn() {
-    let env = Env::default().filter_or(DEFAULT_FILTER_ENV, "info");
+    let env = Env::default().filter_or(DEFAULT_FILTER_ENV, "debug");
     let mut b = Builder::from_env(env);
-    b.filter_level(LevelFilter::Info);
+    b.filter_level(LevelFilter::Debug);
     let inner = b.build();
 
     let _ = log::set_boxed_logger(Box::new(NoWarnLogger(inner)));
-    log::set_max_level(LevelFilter::Info);
+    log::set_max_level(LevelFilter::Debug);
 }
