@@ -50,7 +50,9 @@ email = "lighter-builder@kunal-scratch.iam.gserviceaccount.com"
 roles = [
   "roles/cloudbuild.builds.builder",
   "roles/storage.objectAdmin",
-  "roles/artifactregistry.admin"
+  "roles/artifactregistry.admin",
+  "roles/compute.admin",
+  "roles/iam.serviceAccountUser"
 ]
 
 [gcp.target.runtime_sa]
