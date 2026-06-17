@@ -429,7 +429,14 @@ cloud_bench_run() {
 
   local ar_region="${cfg_ar_region:-${cfg_region}}"
   local ar_repo="${AR_REPO:-${cfg_repo}}"
-  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:arm64"
+
+  local vm_image vm_mtype image_tag="amd64"
+  vm_image="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('image', ''))" 2>/dev/null || true)"
+  vm_mtype="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('machine_type', ''))" 2>/dev/null || true)"
+  if [[ "${vm_image}" == *"arm64"* || "${vm_mtype}" == *"a-"* || "${vm_mtype}" == *"t2a"* ]]; then
+    image_tag="arm64"
+  fi
+  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
 
   _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone}, jobs=${jobs})..."
   _log_info "  Target VM:      ${target_vm} (${zone})"
