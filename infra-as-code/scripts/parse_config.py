@@ -37,6 +37,7 @@ def main():
     def_zone = str(defaults.get('zone', 'us-central1-a'))
     def_disk_size = int(defaults.get('disk_size_gb', 100))
     def_disk_type = str(defaults.get('disk_type', 'pd-ssd'))
+    def_image = str(defaults.get('image', 'debian-cloud/debian-12'))
     def_sa = str(defaults.get('service_account', defaults.get('runtime_sa', '')))
 
     cleaned = {}
@@ -49,6 +50,7 @@ def main():
             'zone': str(v.get('zone', def_zone)),
             'disk_size_gb': int(v.get('disk_size_gb', def_disk_size)),
             'disk_type': str(v.get('disk_type', def_disk_type)),
+            'image': str(v.get('image', def_image)),
             'service_account': str(v.get('service_account', v.get('runtime_sa', def_sa))),
         }
     print(json.dumps(cleaned))

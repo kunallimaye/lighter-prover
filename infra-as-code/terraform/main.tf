@@ -89,7 +89,7 @@ resource "google_compute_instance" "prover_vms" {
 
   boot_disk {
     initialize_params {
-      image = "debian-cloud/debian-12"
+      image = each.value.image
       size  = each.value.disk_size_gb
       type  = each.value.disk_type
     }

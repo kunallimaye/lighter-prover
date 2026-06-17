@@ -100,6 +100,7 @@ variable "vms" {
     zone            = string
     disk_size_gb    = optional(number, 100)
     disk_type       = optional(string, "pd-ssd")
+    image           = optional(string, "debian-cloud/debian-12")
     service_account = optional(string, "")
   }))
   default = {}
