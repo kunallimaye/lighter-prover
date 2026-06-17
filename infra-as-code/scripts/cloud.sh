@@ -384,6 +384,9 @@ cloud_zkp_build() {
     --substitutions="_IMAGE_URI=${image_uri},_DOCKERFILE=${dockerfile}" \
     --quiet
 
+  _log_ok "ZKP container image built and pushed successfully to ${image_uri}."
+}
+
 cloud_bench_run() {
   local target_vm="${1:-all}"
   local build_project
