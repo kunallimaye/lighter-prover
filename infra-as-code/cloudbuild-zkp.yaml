@@ -5,7 +5,7 @@ steps:
     args:
       - 'build'
       - '-f'
-      - 'Dockerfile.zkp'
+      - '${_DOCKERFILE}'
       - '-t'
       - '${_IMAGE_URI}'
       - '.'

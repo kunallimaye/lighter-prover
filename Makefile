@@ -5,7 +5,7 @@ help: ## Show this help
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
 container-build: ## Build local ZKP STARK container image using podman/docker (infra-as-code/scripts/container.sh)
-	@bash infra-as-code/scripts/container.sh container-build
+	@bash infra-as-code/scripts/container.sh container-build $(ARCH)
 
 container-run: ## Run local STARK performance benchmark container against test fixture (infra-as-code/scripts/container.sh)
 	@bash infra-as-code/scripts/container.sh container-run $(BLOCK)
@@ -13,7 +13,7 @@ container-run: ## Run local STARK performance benchmark container against test f
 zkp-image: container-build ## Alias for container-build
 
 cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via Cloud Build (infra-as-code/cloudbuild-zkp.yaml)
-	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build
+	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build $(ARCH)
 
 cloud-admin-init: ## Bootstrap target GCP Service Accounts & IAM roles (Owner-tier)
 	@bash infra-as-code/scripts/cloud.sh cloud-admin-init

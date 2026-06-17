@@ -15,14 +15,30 @@ if ! command -v "${ENGINE}" &>/dev/null; then
 fi
 
 container_build() {
+  local arch="${1:-arm64}"
   cd "${ROOT_DIR}"
-  _require_file "${ZKP_DOCKERFILE}"
-  _log_info "Building local ZKP proving container image using ${ENGINE}..."
-  _log_info "  Dockerfile: ${ZKP_DOCKERFILE}"
-  _log_info "  Image Tag:  ${LOCAL_ZKP_IMAGE}"
 
-  "${ENGINE}" build -f "${ZKP_DOCKERFILE}" -t "${LOCAL_ZKP_IMAGE}" .
-  _log_ok "Successfully compiled container image '${LOCAL_ZKP_IMAGE}'."
+  if [[ "${arch}" == "all" ]]; then
+    _log_info "Building both ARM64 and AMD64 container images..."
+    container_build arm64
+    container_build amd64
+    return
+  fi
+
+  local dockerfile="Dockerfile.zkp-arm64"
+  local tag="lighter-zkp-prover:arm64"
+  if [[ "${arch}" == "amd64" ]]; then
+    dockerfile="Dockerfile.zkp"
+    tag="lighter-zkp-prover:amd64"
+  fi
+
+  _require_file "${dockerfile}"
+  _log_info "Building local ZKP proving container (${arch}) using ${ENGINE}..."
+  _log_info "  Dockerfile: ${dockerfile}"
+  _log_info "  Image Tag:  ${tag}"
+
+  "${ENGINE}" build -f "${dockerfile}" -t "${tag}" -t "lighter-zkp-prover:latest" .
+  _log_ok "Successfully compiled container image '${tag}'."
 }
 
 container_run() {
@@ -54,7 +70,7 @@ container_run() {
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
-  container-build) container_build ;;
+  container-build) shift; container_build "${1:-arm64}" ;;
   container-run)   shift; container_run "$@" ;;
-  *) _die "Usage: $0 {container-build|container-run [block.json] [proof.json]}" ;;
+  *) _die "Usage: $0 {container-build [arm64|amd64|all]|container-run [block.json]}" ;;
 esac

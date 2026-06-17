@@ -326,6 +326,15 @@ cloud_destroy() {
 }
 
 cloud_zkp_build() {
+  local arch="${1:-arm64}"
+
+  if [[ "${arch}" == "all" ]]; then
+    _log_info "Submitting Cloud Build pipelines for both ARM64 and AMD64 images..."
+    cloud_zkp_build arm64
+    cloud_zkp_build amd64
+    return
+  fi
+
   local build_project
   build_project="$(_resolve_build_project)"
 
@@ -336,19 +345,28 @@ cloud_zkp_build() {
   local builder_sa build_machine cfg_repo="" cfg_region="" cfg_ar_region=""
   builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
   build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'UNSPECIFIED'))" 2>/dev/null || true)"
-  cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', ''))" 2>/dev/null || true)"
-  cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', ''))" 2>/dev/null || true)"
-  cfg_ar_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_region', ''))" 2>/dev/null || true)"
+  cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}', encoding='utf-8'))).get('ar_repo', ''))" 2>/dev/null || true)"
+  cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}', encoding='utf-8'))).get('region', ''))" 2>/dev/null || true)"
+  cfg_ar_region="$(python3 -c "import json; print(json.load(open('${target_sa}', encoding='utf-8'))).get('ar_region', ''))" 2>/dev/null || true)"
 
   local region="${GCP_REGION:-${cfg_region:-us-central1}}"
   local ar_region="${cfg_ar_region:-${region}}"
   local ar_repo="${AR_REPO:-${cfg_repo:-lighter-prover-iac}}"
-  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:latest"
 
-  _log_info "Submitting isolated ZKP container image build to Cloud Build..."
+  local dockerfile="Dockerfile.zkp-arm64"
+  local image_tag="arm64"
+  if [[ "${arch}" == "amd64" ]]; then
+    dockerfile="Dockerfile.zkp"
+    image_tag="amd64"
+  fi
+
+  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
+
+  _log_info "Submitting isolated ZKP container image build (${arch}) to Cloud Build..."
   _log_info "  Build Project: ${build_project}"
   _log_info "  Builder SA:    ${builder_sa}"
   _log_info "  Target Image:  ${image_uri}"
+  _log_info "  Dockerfile:    ${dockerfile}"
   _log_info "  Machine Type:  ${build_machine}"
 
   local cb_args=()
@@ -363,7 +381,7 @@ cloud_zkp_build() {
     --project="${build_project}" \
     "${cb_args[@]}" \
     --config="infra-as-code/cloudbuild-zkp.yaml" \
-    --substitutions="_IMAGE_URI=${image_uri}" \
+    --substitutions="_IMAGE_URI=${image_uri},_DOCKERFILE=${dockerfile}" \
     --quiet
 
   _log_ok "ZKP container image built and pushed successfully to ${image_uri}."
@@ -377,6 +395,6 @@ case "${1:-}" in
   cloud-deploy)     cloud_deploy ;;
   cloud-plan)       cloud_plan ;;
   cloud-destroy)    cloud_destroy ;;
-  cloud-zkp-build)  cloud_zkp_build ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-deploy|cloud-plan|cloud-destroy|cloud-zkp-build}" ;;
+  cloud-zkp-build)  shift; cloud_zkp_build "${1:-arm64}" ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-deploy|cloud-plan|cloud-destroy|cloud-zkp-build [arm64|amd64|all]}" ;;
 esac
