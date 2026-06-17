@@ -398,12 +398,19 @@ cloud_bench_run() {
   local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
 
-  if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
-    _log_info "Executing benchmark proving container across ALL provisioned instances (jobs=${jobs})..."
+  if [[ "${target_vm}" == "all" || -z "${target_vm}" || "${target_vm}" == *" "* ]]; then
     local vm_list=()
-    while IFS= read -r v; do
-      [[ -n "$v" ]] && vm_list+=("$v")
-    done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).get('vms', {}).keys()))" 2>/dev/null || true)
+    if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
+      _log_info "Executing benchmark proving container across ALL provisioned instances (jobs=${jobs})..."
+      while IFS= read -r v; do
+        [[ -n "$v" ]] && vm_list+=("$v")
+      done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).get('vms', {}).keys()))" 2>/dev/null || true)
+    else
+      _log_info "Executing benchmark proving container across specified instances (${target_vm}, jobs=${jobs})..."
+      for v in ${target_vm}; do
+        vm_list+=("$v")
+      done
+    fi
 
     for vm in "${vm_list[@]}"; do
       cloud_bench_run "${vm}" "${jobs}" &
@@ -536,7 +543,7 @@ cloud_vm_stop() {
 case "${1:-}" in
   cloud-admin-init) cloud_admin_init ;;
   cloud-admin-undo) cloud_admin_undo ;;
-  cloud-bench-run)  shift; cloud_bench_run "${1:-all}" ;;
+  cloud-bench-run)  shift; cloud_bench_run "${1:-all}" "${2:-1}" ;;
   cloud-deploy)     cloud_deploy ;;
   cloud-plan)       cloud_plan ;;
   cloud-destroy)    cloud_destroy ;;
