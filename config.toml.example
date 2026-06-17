@@ -98,3 +98,7 @@ disk_size_gb = 200
 [vms.prover-vm-5]
 machine_type = "c4a-highcpu-72"
 disk_size_gb = 200
+
+[vms.prover-vm-6]
+machine_type = "c4a-highcpu-48"
+disk_size_gb = 200
