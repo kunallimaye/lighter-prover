@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ─── Logging Helpers ──────────────────────────────────────────────────
-
-_log_info()  { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
-_log_ok()    { printf '\033[1;32m[OK]\033[0m %s\n' "$*"; }
-_log_error() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; }
-_die()       { _log_error "$@"; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/common.sh"
 
 # ─── Configuration Resolvers ──────────────────────────────────────────
 

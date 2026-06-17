@@ -1,11 +1,16 @@
-.PHONY: help cloud-admin-init cloud-admin-undo cloud-deploy cloud-plan cloud-destroy cloud-zkp-build zkp-image
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-deploy cloud-plan cloud-destroy cloud-zkp-build zkp-image
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
 
-zkp-image: ## Build isolated ZKP STARK generation container image locally (Dockerfile.zkp)
-	docker build -f Dockerfile.zkp -t lighter-zkp-prover:latest .
+container-build: ## Build local ZKP STARK container image using podman/docker (infra-as-code/scripts/container.sh)
+	@bash infra-as-code/scripts/container.sh container-build
+
+container-run: ## Run local STARK proof generation container against single-block fixture (infra-as-code/scripts/container.sh)
+	@bash infra-as-code/scripts/container.sh container-run $(BLOCK) $(PROOF)
+
+zkp-image: container-build ## Alias for container-build
 
 cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via Cloud Build (infra-as-code/cloudbuild-zkp.yaml)
 	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build
