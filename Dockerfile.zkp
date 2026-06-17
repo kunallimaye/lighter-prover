@@ -1,4 +1,4 @@
-# ─── Stage 1: Build Plonky2 STARK Proving Engine ─────────────────────
+# ─── Stage 1: Build Plonky2 STARK Proving Engine & Bench Harness ────
 FROM rust:1.82-bookworm AS builder
 
 WORKDIR /app
@@ -16,8 +16,8 @@ COPY bench/Cargo.toml bench/Cargo.toml
 COPY circuit/ circuit/
 COPY bench/ bench/
 
-# Compile production ZKP prover binary
-RUN cargo build --release --bin zkp_prover
+# Compile benchmark STARK proving entrypoint
+RUN cargo build --release --bin bench
 
 # ─── Stage 2: Minimal High-Throughput Compute Runtime ────────────────
 FROM debian:bookworm-slim AS runtime
@@ -29,9 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /data
 
-# Copy compiled prover from builder stage
-COPY --from=builder /app/target/release/zkp_prover /usr/local/bin/zkp-prover
+# Copy compiled bench harness and default test fixture
+COPY --from=builder /app/target/release/bench /usr/local/bin/bench
+COPY bench/bench_test.json /data/bench_test.json
 
 ENV RUST_LOG=info
 
-ENTRYPOINT ["zkp-prover"]
+ENTRYPOINT ["bench"]

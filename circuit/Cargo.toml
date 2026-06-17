@@ -18,10 +18,6 @@ path = "src/bin/build_recursion_circuit.rs"
 name = "build_wrapper_circuit"
 path = "src/bin/build_wrapper_circuit.rs"
 
-[[bin]]
-name = "zkp_prover"
-path = "src/bin/zkp_prover.rs"
-
 [features]
 default = ["parallel", "std"]
 parallel = ["plonky2/parallel"]

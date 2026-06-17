@@ -7,8 +7,8 @@ help: ## Show this help
 container-build: ## Build local ZKP STARK container image using podman/docker (infra-as-code/scripts/container.sh)
 	@bash infra-as-code/scripts/container.sh container-build
 
-container-run: ## Run local STARK proof generation container against single-block fixture (infra-as-code/scripts/container.sh)
-	@bash infra-as-code/scripts/container.sh container-run $(BLOCK) $(PROOF)
+container-run: ## Run local STARK performance benchmark container against test fixture (infra-as-code/scripts/container.sh)
+	@bash infra-as-code/scripts/container.sh container-run $(BLOCK)
 
 zkp-image: container-build ## Alias for container-build
 
