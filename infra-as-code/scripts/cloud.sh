@@ -45,8 +45,15 @@ _build_substitutions() {
   local builder_sa="$3"
   local runtime_sa="$4"
 
-  local bucket="${TF_STATE_BUCKET:-${build_project}-tfstate}"
-  local prefix="${TF_STATE_PREFIX:-lighter-prover}"
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local cfg_bucket="" cfg_prefix=""
+  if [[ -f "${target_sa}" ]]; then
+    cfg_bucket="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('tf_state_bucket', ''))" 2>/dev/null || true)"
+    cfg_prefix="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('tf_state_prefix', ''))" 2>/dev/null || true)"
+  fi
+
+  local bucket="${TF_STATE_BUCKET:-${cfg_bucket:-${build_project}-tfstate}}"
+  local prefix="${TF_STATE_PREFIX:-${cfg_prefix:-lighter-prover-iac}}"
   local region="${GCP_REGION:-us-central1}"
   local ar_repo="${AR_REPO:-lighter-prover-iac}"
   local orch_project="${ORCH_PROJECT:-${build_project}}"
@@ -239,6 +246,25 @@ cloud_admin_init() {
   _log_info "  Target Project: ${build_project}"
 
   local target_json="infra-as-code/terraform/target.auto.tfvars.json"
+
+  local state_bucket region
+  state_bucket="$(python3 -c "import json; print(json.load(open('${target_json}')).get('tf_state_bucket', '${build_project}-tfstate'))" 2>/dev/null || true)"
+  region="${GCP_REGION:-us-central1}"
+
+  if [[ -n "${state_bucket}" ]]; then
+    _log_info "Verifying GCS Terraform state bucket: gs://${state_bucket}..."
+    if ! gcloud storage buckets describe "gs://${state_bucket}" &>/dev/null; then
+      _log_info "  Bucket gs://${state_bucket} not found, creating in ${region}..."
+      gcloud storage buckets create "gs://${state_bucket}" \
+        --project="${build_project}" \
+        --location="${region}" \
+        --uniform-bucket-level-access \
+        --quiet
+      _log_ok "  Created gs://${state_bucket}"
+    else
+      _log_ok "  GCS state bucket gs://${state_bucket} already exists."
+    fi
+  fi
 
   local sa_key sa_email
   while IFS= read -r sa_key; do

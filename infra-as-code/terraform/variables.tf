@@ -57,6 +57,18 @@ variable "build_machine_type" {
   default     = "UNSPECIFIED"
 }
 
+variable "tf_state_bucket" {
+  description = "GCS bucket used as remote backend for Terraform state files."
+  type        = string
+  default     = ""
+}
+
+variable "tf_state_prefix" {
+  description = "State file prefix inside the GCS state bucket."
+  type        = string
+  default     = "lighter-prover-iac"
+}
+
 # ─── Service account identities ──────────────────────────────────────
 
 variable "builder_sa_email" {

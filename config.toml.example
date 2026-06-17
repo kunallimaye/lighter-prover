@@ -13,6 +13,12 @@ name = "lighter-prover"
 project = "kunal-scratch"
 region  = "us-central1"
 
+[gcp.state]
+# Google Cloud Storage bucket used as remote backend for Terraform state files.
+# Automatically verified and created by `make cloud-admin-init`.
+bucket = "kunal-scratch-tfstate"
+prefix = "lighter-prover-iac"
+
 # ─── Target Service Accounts & Role Allocations ────────────────────────
 # Identities and IAM permissions required by Cloud Build and runtime workloads.
 # Note: You may add ANY arbitrary Service Account entries below (e.g. [gcp.target.monitor_sa]).

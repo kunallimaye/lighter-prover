@@ -58,6 +58,11 @@ def main():
     defaults = gcp.get('defaults', {}) if isinstance(gcp, dict) else {}
     project = str(defaults.get('project', '') if isinstance(defaults, dict) else '')
 
+    state = gcp.get('state', {}) if isinstance(gcp, dict) else {}
+    def_bucket = f"{project}-tfstate" if project else "tfstate"
+    state_bucket = str(state.get('bucket', defaults.get('state_bucket', def_bucket)))
+    state_prefix = str(state.get('prefix', defaults.get('state_prefix', 'lighter-prover-iac')))
+
     target = gcp.get('target', {}) if isinstance(gcp, dict) else {}
     if not target and 'target' in data:
       target = data.get('target', {})
@@ -91,6 +96,8 @@ def main():
     cleaned = {
         'build_project_id': project,
         'runtime_project_id': project,
+        'tf_state_bucket': state_bucket,
+        'tf_state_prefix': state_prefix,
         'target_sas': target_sas,
         'builder_sa_email': build_email,
         'runtime_sa_email': runtime_email,
