@@ -41,10 +41,12 @@ cloud-destroy: ## Run Cloud Build to tear down infrastructure (Terraform destroy
 	@bash infra-as-code/scripts/cloud.sh cloud-destroy
 
 local-build: ## Build local ZKP benchmark binary using native host CPU instructions (bench/Makefile)
+	@rm -f bench/bench
 	@$(MAKE) -C bench build
 
 local-run: ## Run local ZKP benchmark binary against test block (bench/Makefile)
 	@$(MAKE) -C bench run
 
 local-build-and-run: ## Build and run local ZKP benchmark binary (bench/Makefile)
+	@rm -f bench/bench
 	@$(MAKE) -C bench build-and-run
