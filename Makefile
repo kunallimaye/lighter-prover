@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -39,3 +39,12 @@ cloud-plan: ## Run Cloud Build to preview infrastructure changes (Terraform plan
 
 cloud-destroy: ## Run Cloud Build to tear down infrastructure (Terraform destroy)
 	@bash infra-as-code/scripts/cloud.sh cloud-destroy
+
+local-build: ## Build local ZKP benchmark binary using native host CPU instructions (bench/Makefile)
+	@$(MAKE) -C bench build
+
+local-run: ## Run local ZKP benchmark binary against test block (bench/Makefile)
+	@$(MAKE) -C bench run
+
+local-build-and-run: ## Build and run local ZKP benchmark binary (bench/Makefile)
+	@$(MAKE) -C bench build-and-run
