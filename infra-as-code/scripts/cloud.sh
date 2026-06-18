@@ -494,6 +494,15 @@ cloud_vm_start() {
 
   local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
 
+  if [[ "${target_vm}" == *" "* ]]; then
+    local -a vm_list=(${target_vm})
+    _log_info "Starting specified VM instances (${target_vm})..."
+    for vm in "${vm_list[@]}"; do
+      cloud_vm_start "${vm}"
+    done
+    return
+  fi
+
   if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
     _log_info "Starting ALL provisioned VM instances defined in config.toml..."
     local vm_list=()
@@ -523,6 +532,15 @@ cloud_vm_stop() {
   _generate_tfvars
 
   local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
+
+  if [[ "${target_vm}" == *" "* ]]; then
+    local -a vm_list=(${target_vm})
+    _log_info "Stopping specified VM instances (${target_vm})..."
+    for vm in "${vm_list[@]}"; do
+      cloud_vm_stop "${vm}"
+    done
+    return
+  fi
 
   if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
     _log_info "Stopping ALL provisioned VM instances defined in config.toml..."
