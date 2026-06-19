@@ -75,8 +75,9 @@ To rigorously prove or disprove this distributed layer-splitting hypothesis **wi
 We will report back empirical telemetry findings (cache thrashing reduction, IPC serialization latency, and effective TPS) to refine our master architectural proposal.
 
 ### Experiment A: Isolated NUMA/IPC Shared-Memory Study
-*   **Concept**: Spawn isolated `prover_producer` and `prover_consumer` processes on `c4a-highcpu-72`.
-*   **Mechanism**: Transmit `ProofWithPublicInputs` over POSIX shared memory (`shm_open`) or UNIX sockets. Lock processes to **isolated hardware NUMA sockets** (`numactl --cpunodebind=0` vs `1`).
+*   **Concept**: Spawn isolated `prover_producer` and `prover_consumer` OS processes on `c4a-highcpu-72`.
+*   **Mechanism**: Transmit `ProofWithPublicInputs` over POSIX shared memory (`shm_open`) or UNIX domain sockets. Lock processes to **isolated virtual hardware NUMA sockets** (`numactl --cpunodebind=0` vs `1`).
+*   **Architectural Note (No GPU Required)**: NUMA (Non-Uniform Memory Access) is strictly a multi-socket / multi-die CPU memory architecture. Locking Producer to NUMA node 0 and Consumer to NUMA node 1 guarantees that their L3 cache lines and DDR5 memory controllers are 100% physically separated on silicon, requiring zero GPUs!
 *   **Validation**: Proves whether physical NUMA socket separation eliminates the ~10% Rayon core thrashing penalty.
 
 ### Experiment B: Lightweight Local Docker Network Backplane Prototype
@@ -100,9 +101,10 @@ We will report back empirical telemetry findings (cache thrashing reduction, IPC
 
 ## Verification Plan
 
-### Automated Tests
-1. Compile distributed proof crates: `cargo check --workspace --benches`
-2. Run local NUMA IPC benchmark validation: `make local-bench-numa-ipc` *(To be implemented)*
+### Automated Cloud Validation Matrix (Clean Uncontended Readings)
+To eliminate developer workstation OS jitter and background tool noise, all benchmark sweeps will execute directly on dedicated remote GCE cloud hardware (**`prover-vm-5`**, `c4a-highcpu-72` in `us-east4-b`):
+1. Spawn isolated branched worktree: `git worktree add /tmp/lighter-prover-distributed-exp -b distributed-exp`
+2. Compile and execute remote cloud NUMA benchmark matrix: `make cloud-bench-run VM="prover-vm-5" JOBS=10`
 
-### Manual Verification
-Review byte-serialization benchmarking ratios across `PartialWitness` and `ProofWithPublicInputs` payloads.
+### Automated Byte Serialization Verification (Zero Manual Checks)
+We will completely automate byte serialization ratio benchmarking (`bincode::serialize` vs `serde_json::to_vec` for `PartialWitness` ~4 KB vs `ProofWithPublicInputs` ~150 KB) inside our benchmark reporting binary, exporting exact byte metrics directly in our telemetry findings! Zero manual human checks required!
