@@ -79,4 +79,4 @@ graph TD
 
 ## 3. Formal Review Gate & Authorization 🛑
 
-**Zero Phase 3 code refactoring has commenced**. Please review this experimental hypothesis and blueprint. Upon clicking **Proceed**, we will implement `--tx-per-proof` CLI exposure and initiate the automated dynamic chunking cloud sweep!
+**Zero Phase 3 code refactoring has commenced**. Please review this experimental hypothesis and blueprint. Upon clicking **Proceed**, we will implement `--tx-per-proof` CLI exposure, execute the automated dynamic chunking cloud matrix sweep across $N \in \{2, 4, 8, 16\}$, compile the comparative CSV report, **and present back the empirical findings for your review!**
