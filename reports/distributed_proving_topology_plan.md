@@ -12,7 +12,7 @@ This document presents deep architectural research, formal trade-off analysis (P
 
 ---
 
-## 1. Architectural Blueprint: The 3-Tier Distributed Topology
+## 1. Architectural Blueprint: Distributed Layer-Split Topology
 
 ```mermaid
 graph TD
@@ -21,11 +21,11 @@ graph TD
     classDef t3 fill:#0f172a,stroke:#facc15,stroke-width:2px,color:#fff;
     classDef bus fill:#1e293b,stroke:#94a3b8,stroke-width:2px,color:#fff;
 
-    A[Ingest Rollup Block: 500 Txs] --> T1["Tier 1: Upfront Scalar State Sequencer Pod<br>(c4-highcpu-2 @ 3.8 GHz x86_64)<br>Executes BlockPreExec & Witness Batching"]:::t1
+    A[Ingest Block: 500 Txs] --> L12["Layer 1 & 2 Pod: Scalar State Sequencer<br>(c4-highcpu-2 @ 3.8 GHz x86_64)<br>Executes BlockPreExec & Witness Batching"]:::t1
 
-    T1 -->|125 x 4.1 KB PartialWitness Jobs| BROKER[("High-Speed Backplane Fabric<br>Redis Stream / gRPC / PubSub / NATS")]:::bus
+    L12 -->|125 x 4.1 KB PartialWitness Jobs| BROKER[("High-Speed Backplane Fabric<br>Redis Stream / gRPC / PubSub / NATS")]:::bus
 
-    subgraph Elastic Stateless Leaf Fleet (Tier 2 Workers)
+    subgraph Elastic Stateless Leaf Fleet (Layer 3 Workers)
     BROKER --> W1["Leaf Worker 1 (c4a-72 Spot / GPU)"]:::t2
     BROKER --> W2["Leaf Worker 2 (c4a-72 Spot / GPU)"]:::t2
     BROKER --> WN["Leaf Worker N (c4a-72 Spot / GPU)"]:::t2
@@ -33,19 +33,19 @@ graph TD
 
     W1 & W2 & WN -->|125 x 150 KB STARK Proofs| STORE[("Proof Artifact Store<br>Redis / GCS / Memcached")]:::bus
 
-    subgraph Dedicated Aggregation Tree (Tier 3 Consumer)
-    STORE --> AG["Tier 3: Recursive Chain Aggregator Pod<br>(m4-highmem Dedicated NUMA Node)"]:::t3
+    subgraph Dedicated Aggregation Tree (Layer 4 Consumer)
+    STORE --> AG["Layer 4 Pod: Recursive Chain Aggregator<br>(m4-highmem Dedicated NUMA Node)"]:::t3
     AG --> FINAL["Verifiable Block Rollup Proof"]
     end
 ```
 
 ### Byte-Precision Network Bandwidth Physics 📡
 
-1.  **Tier 1 $\rightarrow$ Tier 2 (`PartialWitness` Ingest)**:
+1.  **Layer 1 & 2 $\rightarrow$ Layer 3 (`PartialWitness` Ingest)**:
     *   In Plonky2, `PartialWitness` stores wire assignments for public input targets (`num_public_inputs_tx = 520`).
     *   $520 \text{ GoldilocksField elements} \times 8 \text{ bytes} = \mathbf{4,160 \text{ bytes}}$ ($\sim 4.1 \text{ KB}$) per leaf chunk.
     *   Transmitting all 125 chunks for a 500-tx block equals **$512 \text{ KB total payload}$**. Over a 100 Gbps GCP VPC network, transmission takes **$0.04 \text{ milliseconds}$** (zero network drag).
-2.  **Tier 2 $\rightarrow$ Tier 3 (`ProofWithPublicInputs` Output)**:
+2.  **Layer 3 $\rightarrow$ Layer 4 (`ProofWithPublicInputs` Output)**:
     *   A Goldilocks STARK proof at FRI blowup factor 8 consumes $\sim \mathbf{150 \text{ KB}}$.
     *   Transmitting 125 completed leaf proofs equals **$18.75 \text{ MB total payload}$** ($\sim 1.5 \text{ ms}$ over VPC).
 
@@ -64,7 +64,7 @@ graph TD
 ### 🔴 Challenges & Architectural Complexity
 1.  **Distributed Straggler Management**: In monolithic proving, if chunk #42 hangs, the daemon panics. In distributed proving, network packet drop or a single straggler worker on a degraded GCE host stalls final aggregation. Requires strict dead-letter queues and speculative execution duplication.
 2.  **DevOps Infrastructure Overhead**: Provisioning, monitoring, and securing distributed message brokers (Redis/NATS/PubSub) increases operational cloud infrastructure complexity.
-3.  **Sequential Chain Tail Stalls**: If Tier 3 aggregates chain proofs linearly ($P_i = \text{Agg}(P_{i-1}, L_i)$), Tier 3 still processes step-by-step. To unlock sub-second aggregation, Tier 3 must transition to **Log-Depth Binary Tree Reduction** ($P_{0..3} = \text{Agg}(\text{Agg}(L_0, L_1), \text{Agg}(L_2, L_3))$).
+3.  **Sequential Chain Tail Stalls**: If Layer 4 aggregates chain proofs linearly ($P_i = \text{Agg}(P_{i-1}, L_i)$), Layer 4 still processes step-by-step. To unlock sub-second aggregation, Layer 4 must transition to **Log-Depth Binary Tree Reduction** ($P_{0..3} = \text{Agg}(\text{Agg}(L_0, L_1), \text{Agg}(L_2, L_3))$).
 
 ---
 
