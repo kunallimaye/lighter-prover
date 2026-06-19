@@ -101,10 +101,12 @@ We will report back empirical telemetry findings (cache thrashing reduction, IPC
 
 ## Verification Plan
 
-### Automated Cloud Validation Matrix (Clean Uncontended Readings)
-To eliminate developer workstation OS jitter and background tool noise, all benchmark sweeps will execute directly on dedicated remote GCE cloud hardware (**`prover-vm-5`**, `c4a-highcpu-72` in `us-east4-b`):
+### Automated Cloud Validation Matrix (Dedicated Temporary Instance)
+To eliminate workstation OS noise and prevent benchmark collision with active Phase 3 sweeps on `prover-vm-5`, all validation sweeps will execute on a dedicated temporary GCE VM (**`prover-vm-temp`** or **`prover-vm-4`**, `c4a-highcpu-64/72` in `us-east4-b`):
 1. Spawn isolated branched worktree: `git worktree add /tmp/lighter-prover-distributed-exp -b distributed-exp`
-2. Compile and execute remote cloud NUMA benchmark matrix: `make cloud-bench-run VM="prover-vm-5" JOBS=10`
+2. Start temporary VM: `make cloud-vm-start VM="prover-vm-4"` (or `gcloud compute instances create prover-vm-temp ...`)
+3. Compile and execute remote cloud NUMA benchmark matrix: `make cloud-bench-run VM="prover-vm-4" JOBS=10`
+4. **Mandatory Auto-Teardown**: Power off and destroy temporary VM immediately upon benchmark conclusion: `make cloud-vm-stop VM="prover-vm-4"`
 
 ### Automated Byte Serialization Verification (Zero Manual Checks)
 We will completely automate byte serialization ratio benchmarking (`bincode::serialize` vs `serde_json::to_vec` for `PartialWitness` ~4 KB vs `ProofWithPublicInputs` ~150 KB) inside our benchmark reporting binary, exporting exact byte metrics directly in our telemetry findings! Zero manual human checks required!
