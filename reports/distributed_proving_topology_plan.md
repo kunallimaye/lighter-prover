@@ -68,21 +68,23 @@ graph TD
 
 ---
 
-## 3. Hypothesis Testing: Proposed Experiments 🛠️🧪
+## 3. Hypothesis Testing: Isolated Validation Experiments 🛠️🧪
 
-To rigorously prove or disprove this distributed concept without premature infrastructure over-engineering, we propose three incremental validation experiments:
+To rigorously prove or disprove this distributed layer-splitting hypothesis **without impacting our primary local working codebase**, we will execute validation experiments inside a 100% isolated branched workspace (`Workspace: "branch"` git worktree clone at `/tmp/lighter-prover-distributed-exp`).
 
-### Experiment A: The IPC Shared-Memory Prototype (Local Machine)
-*   **Concept**: Spawn two distinct OS processes (`prover_producer` vs. `prover_consumer`) on a single bare-metal flagship instance (`c4a-highcpu-72`).
-*   **Mechanism**: Transmit `ProofWithPublicInputs` payloads over POSIX shared memory (`shm_open` / UNIX domain sockets). Use `numactl --cpunodebind=0` vs. `1` to lock Producer and Consumer to **isolated hardware NUMA sockets**.
-*   **Validation**: Proves whether physical NUMA/cache separation eliminates the $\sim 10\%$ Rayon thread thrashing penalty observed in Phase 2.
+We will report back empirical telemetry findings (cache thrashing reduction, IPC serialization latency, and effective TPS) to refine our master architectural proposal.
 
-### Experiment B: Lightweight gRPC / Redis Stream Backplane
-*   **Concept**: Build `distributed_leaf_worker.rs` and `distributed_aggregator.rs` using `tonic` (gRPC) or `redis`.
-*   **Mechanism**: Orchestrate 2 separate Docker containers communicating across a local docker network bridge. Measure serialization (`bincode` / `serde`) overhead.
+### Experiment A: Isolated NUMA/IPC Shared-Memory Study
+*   **Concept**: Spawn isolated `prover_producer` and `prover_consumer` processes on `c4a-highcpu-72`.
+*   **Mechanism**: Transmit `ProofWithPublicInputs` over POSIX shared memory (`shm_open`) or UNIX sockets. Lock processes to **isolated hardware NUMA sockets** (`numactl --cpunodebind=0` vs `1`).
+*   **Validation**: Proves whether physical NUMA socket separation eliminates the ~10% Rayon core thrashing penalty.
+
+### Experiment B: Lightweight Local Docker Network Backplane Prototype
+*   **Concept**: Build prototype leaf worker and aggregator daemons using `tonic` (gRPC).
+*   **Mechanism**: Execute inside isolated local Docker container bridge network. Benchmark byte serialization (`bincode`) throughput.
 
 ### Experiment C: Binary Reduction Tree Aggregation Study
-*   **Concept**: Author a feasibility report refactoring `BlockTxChainCircuit` from sequential linear recursion to a log-depth binary reduction tree.
+*   **Concept**: Author mathematical feasibility report transitioning `BlockTxChainCircuit` from linear chaining to log-depth binary reduction trees.
 
 ---
 
