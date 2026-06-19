@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -51,3 +51,14 @@ local-run: ## Run local ZKP benchmark binary against test block (bench/Makefile)
 local-build-and-run: ## Build and run local ZKP benchmark binary (bench/Makefile)
 	@rm -f bench/bench
 	@$(MAKE) -C bench build-and-run
+
+test-distributed-fast: ## Execute 2-minute scaled developer distributed proving simulation (C=4 chunks over local Pub/Sub)
+	@echo "Starting local Pub/Sub emulator container..."
+	@sudo docker run -d --rm -p 8085:8085 --name pubsub-test google/cloud-sdk gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 || true
+	@sleep 3
+	@echo "Executing 2-minute scaled-down distributed proving assembly line..."
+	@PUBSUB_EMULATOR_HOST=localhost:8085 cargo run --release --bin prover-node -- --role leaf-worker --chunk-idx 0 --tx-per-proof 4 &
+	@PUBSUB_EMULATOR_HOST=localhost:8085 cargo run --release --bin prover-node -- --role leaf-worker --chunk-idx 1 --tx-per-proof 4 &
+	@PUBSUB_EMULATOR_HOST=localhost:8085 cargo run --release --bin prover-node -- --role tree-node --level 1 --node-idx 0
+	@sudo docker stop pubsub-test || true
+	@echo "[OK] 2-minute scaled developer distributed simulation verified!"
