@@ -64,14 +64,14 @@ graph TD
     JSON --> WIN["Pinpoint Absolute Minimum Silicon Proving Valley"]:::win
 ```
 
-### Stage 1: CLI Parameterization (`bench.rs`)
+### Step 1: CLI Parameterization (`bench.rs`)
 *   Expose `--tx-per-proof <N>` in `Cli` struct using `clap`.
 *   Dynamically construct `BlockTxCircuit` and `BlockTxChainCircuit` with target batch size $N$.
 
-### Stage 2: Telemetry JSON Enrichment
+### Step 2: Telemetry JSON Enrichment
 *   Export `data.common.degree_bits()` and `data.common.num_gate_constraints` explicitly in `bench_summary.json`.
 
-### Stage 3: Automated Flagship Matrix Execution (`cloud.sh`)
+### Step 3: Automated Flagship Matrix Execution (`cloud.sh`)
 *   Execute 4 successive 500-tx validation sweeps on `prover-vm-5` across $N \in \{2, 4, 8, 16\}$ at `JOBS=10`.
 *   Compile comparative master CSV dataset `reports/axion_dynamic_chunk_matrix.csv`.
 
