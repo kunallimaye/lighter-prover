@@ -123,10 +123,12 @@ impl BlockTxChainCircuit {
 
         let self_verifier_data = builder.add_verifier_data_public_inputs();
 
-        let mut log_gates = 13;
-        if tx_per_proof > 6 {
-            log_gates = 14;
-        }
+        let log_gates = match tx_per_proof {
+            1..=6 => 13,
+            7..=12 => 14,
+            13..=24 => 15,
+            _ => 16,
+        };
 
         // IMPORTANT: DO NOT ADD PUBLIC INPUTS AFTER THIS POINT.
         // Building common data for current circuit
