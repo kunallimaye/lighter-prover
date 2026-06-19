@@ -89,15 +89,17 @@ We executed isolated feasibility validation studies inside a branched git worktr
 | **Layer 1 & 2 $\rightarrow$ Layer 3 (`PartialWitness` Ingest)** | **$4,168\text{ bytes}$** ($\sim 4.1\text{ KB}$) | **$10.23\,\mu\text{s}$** | $1,971\text{ bytes}$ | $16.15\,\mu\text{s}$ | **$0.33\text{ microseconds}$** *(Essentially Zero Drag)* ⚡ |
 | **Layer 3 $\rightarrow$ Layer 4 (`ProofWithPublicInputs` Output)** | **$163,240\text{ bytes}$** ($\sim 163.2\text{ KB}$) | **$161.38\,\mu\text{s}$** | $417,354\text{ bytes}$ | $853.37\,\mu\text{s}$ | **$13.06\text{ microseconds}$** *(Sub-millisecond Backplane)* |
 
-### Proposed Validation Experiments to Prove/Disprove Expected Layer 3 & 4 Gains 🛠️
+### Proposed Validation Experiments (Reduced-Scale Proofs of Concept) 🛠️
 
-#### Experiment 3A: Layer 3 Stateless Spot Fleet Horizontal Scaling Study
-*   **Hypothesis to Prove/Disprove**: In monolithic proving (`JOBS=10`), each daemon gets 7 CPU cores; `Layer 3` takes $5,231\text{ ms}$ per leaf ($653.9\text{s total}$). If we distribute 125 leaf chunks across 125 standalone Spot containers (each getting 7 dedicated unshared cores or full 72 cores), proving time per leaf drops to **$1,256\text{ ms}$**, AND all 125 leaf proofs finish in parallel in **literally $1.25\text{ seconds}$ total wall time**!
-*   **Experimental Design**: Inside an isolated worktree (`/tmp/lighter-prover-distributed-exp`), author `layer3_spot_sim.rs`. Simulate a distributed fleet of $M \in \{1, 5, 10, 25, 50, 100\}$ concurrent spot provers. Verify whether pure leaf execution latency stays locked at $1.25\text{s}$ when isolated from recursive circuits, and measure if total block leaf wall time scales inversely as $O(125 / M)$.
+To rigorously prove or disprove expected silicon gains without spinning up massive commercial Spot fleets, we focus on **Reduced-Scale Proof-of-Concept Benchmarking**:
 
-#### Experiment 3B: Layer 4 Log-Depth Binary Reduction Tree Aggregation Study
-*   **Hypothesis to Prove/Disprove**: Monolithic `BlockTxChainCircuit` chains proofs sequentially ($P_i = \text{Agg}(P_{i-1}, L_i)$). For 125 chunks, aggregation executes 125 sequential steps ($123.8\text{s baseline}$). If we refactor `BlockTxChainCircuit` into a **Binary Reduction Tree** ($P_{0..3} = \text{Agg}(\text{Agg}(L_0, L_1), \text{Agg}(L_2, L_3))$), tree depth is $\lceil \log_2(125) \rceil = \mathbf{7\text{ sequential steps}}$. Total aggregation wall time drops from $123.8\text{s}$ down to $7 \times 0.99\text{s} \approx \mathbf{6.93\text{ seconds}}$!
-*   **Experimental Design**: Author `layer4_tree_sim.rs`. Implement a prototype binary reduction recursive circuit `BinaryTreeChainCircuit` aggregating two leaf proofs or two intermediate tree proofs. Measure gate count and degree bits of 2-child vs 1-child recursion, and verify whether binary tree recursion compiles and executes in $\sim 7\text{ steps}$ total wall time.
+#### Experiment 3A: Reduced-Scale Layer 3 Worker Isolation Study (2 Instances)
+*   **Pareto Hypothesis**: If we isolate 2 concurrent leaf workers on dedicated unshared core sets (pinning Worker 1 to cores 0..6 and Worker 2 to cores 7..13), individual leaf proving time drops from $5.75\text{s}$ (contended baseline) down to $\mathbf{1.25\text{s}}$ (pure unshared speed). Furthermore, 2 workers complete 2 leaf proofs in parallel in **$1.25\text{s}$ total elapsed clock time** (a **$4.6\times$ physical speedup** over sequential execution!).
+*   **Experimental Design**: Inside an isolated worktree (`/tmp/lighter-prover-distributed-exp`), author `layer3_poc.rs`. Spin up exactly 2 worker threads/processes on `c4a-highcpu-72`. Verify whether pure leaf execution latency stays locked at $1.25\text{s}$ and measure parallel scaling efficiency without commercial spot infrastructure overhead.
+
+#### Experiment 3B: Reduced-Scale Layer 4 Binary Reduction Tree Study (4 Chunks)
+*   **Pareto Hypothesis**: For a reduced-scale 4-chunk block ($C=4$), linear chaining executes 4 sequential aggregation steps ($4 \times 0.99\text{s} = \mathbf{3.96\text{s}}$). Transitioning to a **Log-Depth Binary Reduction Tree** slashes recursion depth to $\log_2(4) = \mathbf{2\text{ steps}}$ ($2 \times 0.99\text{s} = \mathbf{1.98\text{s}}$, a **$2\times$ aggregation latency reduction**!).
+*   **Experimental Design**: Author `layer4_tree_poc.rs`. Implement a prototype binary reduction recursive circuit `BinaryTreeChainCircuit` aggregating 2 child STARK proofs $(L_0, L_1) \rightarrow T_{01}$ and $(L_2, L_3) \rightarrow T_{23}$ in parallel at Step 1, and root $(T_{01}, T_{23}) \rightarrow \text{Rollup Proof}$ at Step 2. Verify circuit constraint satisfaction and clock elapsed reduction.
 
 ---
 
