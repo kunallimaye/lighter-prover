@@ -390,6 +390,7 @@ cloud_zkp_build() {
 cloud_bench_run() {
   local target_vm="${1:-all}"
   local jobs="${2:-1}"
+  local tx_per_proof="${3:-4}"
   local build_project
   build_project="$(_resolve_build_project)"
 
@@ -401,19 +402,19 @@ cloud_bench_run() {
   if [[ "${target_vm}" == "all" || -z "${target_vm}" || "${target_vm}" == *" "* ]]; then
     local vm_list=()
     if [[ "${target_vm}" == "all" || -z "${target_vm}" ]]; then
-      _log_info "Executing benchmark proving container across ALL provisioned instances (jobs=${jobs})..."
+      _log_info "Executing benchmark proving container across ALL provisioned instances (jobs=${jobs}, tx_per_proof=${tx_per_proof})..."
       while IFS= read -r v; do
         [[ -n "$v" ]] && vm_list+=("$v")
       done < <(python3 -c "import json; print('\n'.join(json.load(open('${target_vms}')).get('vms', {}).keys()))" 2>/dev/null || true)
     else
-      _log_info "Executing benchmark proving container across specified instances (${target_vm}, jobs=${jobs})..."
+      _log_info "Executing benchmark proving container across specified instances (${target_vm}, jobs=${jobs}, tx_per_proof=${tx_per_proof})..."
       for v in ${target_vm}; do
         vm_list+=("$v")
       done
     fi
 
     for vm in "${vm_list[@]}"; do
-      cloud_bench_run "${vm}" "${jobs}" &
+      cloud_bench_run "${vm}" "${jobs}" "${tx_per_proof}" &
     done
     wait
     return
@@ -438,10 +439,11 @@ cloud_bench_run() {
   fi
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
 
-  _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone}, jobs=${jobs})..."
+  _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone}, jobs=${jobs}, tx_per_proof=${tx_per_proof})..."
   _log_info "  Target VM:      ${target_vm} (${zone})"
   _log_info "  Container:      ${image_uri}"
   _log_info "  Concurrency:    ${jobs} simultaneous job(s)"
+  _log_info "  Batch Size:     ${tx_per_proof} txs / proof"
   _log_info "  Prioritization: nice -n -20, --pids-limit=-1"
 
   gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
@@ -454,21 +456,21 @@ cloud_bench_run() {
 
     # Note: CFS vs. hard core pinning via --cpuset-cpus is a critical performance knob/option worth trialing in future benchmarking.
     if [[ ${jobs} -eq 1 ]]; then
-      sudo nice -n -20 docker run --rm \
+      sudo nice -n -20 docker run --rm --pull=always \
         --pids-limit=-1 \
         --ulimit nofile=1048576:1048576 \
         -v /tmp/reports:/data/reports:rw \
-        ${image_uri}
+        ${image_uri} --tx-per-proof ${tx_per_proof}
     else
       threads_per_job=\$(( \$(nproc) / ${jobs} ))
       for j in \$(seq 1 ${jobs}); do
         mkdir -p /tmp/reports/job_\${j}
-        sudo nice -n -20 docker run --rm \
+        sudo nice -n -20 docker run --rm --pull=always \
           --pids-limit=-1 \
           --ulimit nofile=1048576:1048576 \
           -e RAYON_NUM_THREADS=\${threads_per_job} \
           -v /tmp/reports/job_\${j}:/data/reports:rw \
-          ${image_uri} &
+          ${image_uri} --tx-per-proof ${tx_per_proof} &
       done
       wait
     fi
@@ -568,7 +570,7 @@ cloud_vm_stop() {
 case "${1:-}" in
   cloud-admin-init) cloud_admin_init ;;
   cloud-admin-undo) cloud_admin_undo ;;
-  cloud-bench-run)  shift; cloud_bench_run "${1:-all}" "${2:-1}" ;;
+  cloud-bench-run)  shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" ;;
   cloud-deploy)     cloud_deploy ;;
   cloud-plan)       cloud_plan ;;
   cloud-destroy)    cloud_destroy ;;

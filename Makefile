@@ -16,8 +16,9 @@ cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via
 	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build $(ARCH)
 
 JOBS ?= 1
+CHUNK ?= 4
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
-	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)"
+	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)"
 
 cloud-vm-start: ## Start GCE VM instances (defaults to ALL VMs in config.toml unless VM=<id> is specified)
 	@bash infra-as-code/scripts/cloud.sh cloud-vm-start $(VM)
