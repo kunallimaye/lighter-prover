@@ -191,6 +191,17 @@ To guarantee **zero financial spot silicon idling**, the full E2E cloud benchmar
    * Telemetry Harvest & Immediate Teardown: $\sim 15\text{ clock seconds}$.
 3. **Total Billing Window & Financial Burn**: Total live billing window equals **$\sim 90\text{ clock seconds}$** ($1.5\text{ minutes}$). Across 63 Spot VMs of `c4a-highcpu-72` ($\sim \$0.80\text{ / hr / VM} = \$50.40\text{ / hr}$ fleet burn), the entire 125-chunk full block distributed benchmark costs exactly **$\mathbf{\$1.26\text{ total GCP spot billing}}$**!
 
+### Complete Production Infrastructure Inventory (Regional Settlement Cluster) 🏢🖥️
+If Lighter productionizes this $C=125$ chunk ($500\text{ transactions per block}$) distributed proving architecture on Google Cloud Engine (GCE), the complete required regional VM inventory operates as follows:
+
+| Production Microservice Tier / Operational Layer | Google Compute Engine Machine Type | Instance Count | Tenancy & Preemption Model | Allocated Role & Circuit Workload | Continuous Hourly Fleet Rate |
+| :--- | :---: | :---: | :---: | :--- | :---: |
+| **1. High-Speed Fabric Backplane** | `c4-highmem-4` | $2\text{ VMs}$ *(HA Pair)* | Dedicated On-Demand | Redis Stream Cluster / NATS Core VPC messaging backplane. | $\$0.50\text{ / hr}$ |
+| **2. Stateless Leaf Prover Fleet** | `c4a-highcpu-72` | $63\text{ VMs}$ | Preemptible Spot Fleet | Executes `--role leaf-worker` ($2I, 2I+1$) and local Level 1 tree aggregation. | $\$50.40\text{ / hr}$ |
+| **3. Reduction Tree Aggregation Tier** | `c4a-highcpu-48` | $26\text{ VMs}$ | Preemptible Spot Fleet | Handles recursive Plonk reduction tree Levels 2 through 6. | $\$13.78\text{ / hr}$ |
+| **4. Root Rollup & Settlement Pod** | `m4-highmem-16` | $1\text{ VM}$ | Dedicated On-Demand | Handles Level 7 root proof, wrapper circuits, and L1 Ethereum submission. | $\$1.10\text{ / hr}$ |
+| **TOTAL ENTERPRISE FLEET** | **92 Machine Instances** | **92 Total VMs** | **HA Dedicated + Spot Fleet** | **End-to-End Block Settlement $= 12.68\text{ seconds}$** | **$\mathbf{\$65.78\text{ / hour}}$** *(or $\sim \$0.009\text{ / tx}$)* |
+
 ---
 
 ## User Review Required & Open Questions 🛑
