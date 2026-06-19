@@ -8,6 +8,16 @@ description: Deep research, architectural trade-off analysis, and experimental d
 ## Goal Description
 Currently, Lighter Prover executes the entire vertical proving stack (Layers 1 through 4) inside individual monolithic daemons or VM containers (`bench.rs`). While Phase 2 pipelining overlaps leaf generation with recursive aggregation, running both massive circuits on shared CPU cores induces heavy L2/L3 cache eviction thrashing.
 
+### Proving Workload Frontier & Distributed Improvement Tracking Table
+Synthesizing our empirical Phase 1 baseline metrics (`JOBS=10` on `c4a-highcpu-72` across 500 txs), we track the precise execution layers where distributed hardware separation is projected to unlock performance gains:
+
+| Proving Layer / Execution Phase | Monolithic Phase 1 Baseline (`JOBS=10`) | Distributed Worker Allocation | Expected Distributed Architectural Lift & Silicon Impact |
+| :--- | :---: | :--- | :--- |
+| **Layer 1: Block Setup (`BlockPreExec`)** | $1,091.09\text{ ms}$ | Sequencer Pod (`c4-2`) | **Invariant** *(Lightweight setup executed once upfront)* |
+| **Layer 2: Witness Gen (`witness`)** | $2.52\text{ ms / leaf}$ ($0.315\text{s total}$) | Sequencer Pod (`c4-2`) | **Invariant** *(Strictly scalar Rust arith on high frequency CPU)* |
+| **Layer 3: STARK Leaf Proving** | $5,231.27\text{ ms / leaf}$ ($653.9\text{s total}$) | Stateless Spot Fleet | **MAJOR WIN** *(Massive elastic scale across spot GPUs/VMs with 100% unshared L3 cache lines!)* ⚡ |
+| **Layer 4: Recursive Aggregation** | $990.59\text{ ms / step}$ ($123.8\text{s total}$) | Aggregator Tree Pod | **MAJOR WIN** *(Isolated memory bandwidth; log-depth binary reduction trees slash total aggregation latency to $O(\log C)$!)* ⚡ |
+
 This document presents deep architectural research, formal trade-off analysis (Pros vs. Cons), and experimental validation designs for **Splitting Proving Layers across Distributed Workers, Cells, Containers, and VMs** over a high-speed networking fabric.
 
 ---
@@ -92,7 +102,7 @@ We executed isolated feasibility validation studies inside a branched git worktr
 > **Production Backplane Alignment**: Which networking messaging broker does your Google Cloud engineering ecosystem prefer for low-latency internal RPCs? (e.g., Google Cloud PubSub, NATS Core, Redis Stream, or direct gRPC peer-to-peer)?
 
 > [!WARNING]
-> **Smart Contract Verifier Compatibility**: Does transitioning from linear recursive chaining (`BlockTxChainCircuit`) to binary reduction trees impact the verification logic of Lighter's Ethereum / L1 settlement smart contract verifier?
+> **Smart Contract Verifier Frontier (Unknown at this Stage)**: We call out as unknown at this early stage whether transitioning from linear recursive chaining (`BlockTxChainCircuit`) to binary reduction trees impacts the downstream verification logic of Lighter's Ethereum / L1 settlement smart contract verifier. This requires explicit follow-up feasibility auditing.
 
 ---
 
