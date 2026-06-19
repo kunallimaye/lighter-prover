@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: BUSL-1.1
 
 resource "google_compute_instance_template" "leaf_prover_template" {
+  provider     = google.runtime
+  project      = coalesce(var.runtime_project_id, var.build_project_id)
   name_prefix  = "lighter-leaf-prover-"
   machine_type = "c4a-highcpu-72"
 
   scheduling {
-    preemptible       = true
-    automatic_restart = false
+    preemptible        = true
+    automatic_restart  = false
     provisioning_model = "SPOT"
   }
 
@@ -35,8 +37,11 @@ resource "google_compute_instance_template" "leaf_prover_template" {
 }
 
 resource "google_compute_region_instance_group_manager" "leaf_prover_fleet" {
+  provider           = google.runtime
+  project            = coalesce(var.runtime_project_id, var.build_project_id)
   name               = "lighter-leaf-prover-mig"
   base_instance_name = "leaf-worker"
+  region             = var.runtime_region
   target_size        = 63
 
   version {
