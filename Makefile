@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -19,6 +19,9 @@ JOBS ?= 1
 CHUNK ?= 4
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)"
+
+cloud-run-distributed-cluster: ## Run true collaborative 6-VM cloud distributed proving experiment on Block #1042
+	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster
 
 cloud-vm-start: ## Start GCE VM instances (defaults to ALL VMs in config.toml unless VM=<id> is specified)
 	@bash infra-as-code/scripts/cloud.sh cloud-vm-start $(VM)
