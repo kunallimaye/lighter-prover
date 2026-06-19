@@ -53,12 +53,16 @@ local-build-and-run: ## Build and run local ZKP benchmark binary (bench/Makefile
 	@$(MAKE) -C bench build-and-run
 
 test-distributed-fast: ## Execute 2-minute scaled developer distributed proving simulation (C=4 chunks over local Pub/Sub)
+	@echo "Compiling prover-node microservice daemon..."
+	@cargo build --release --bin prover-node
 	@echo "Starting local Pub/Sub emulator container..."
-	@sudo docker run -d --rm -p 8085:8085 --name pubsub-test google/cloud-sdk gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 || true
+	@CONTAINER_ENGINE=$$(command -v docker || command -v podman || echo true); \
+	$$CONTAINER_ENGINE run -d --rm -p 8085:8085 --name pubsub-test google/cloud-sdk gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 2>/dev/null || true
 	@sleep 3
 	@echo "Executing 2-minute scaled-down distributed proving assembly line..."
-	@PUBSUB_EMULATOR_HOST=localhost:8085 cargo run --release --bin prover-node -- --role leaf-worker --chunk-idx 0 --tx-per-proof 4 &
-	@PUBSUB_EMULATOR_HOST=localhost:8085 cargo run --release --bin prover-node -- --role leaf-worker --chunk-idx 1 --tx-per-proof 4 &
-	@PUBSUB_EMULATOR_HOST=localhost:8085 cargo run --release --bin prover-node -- --role tree-node --level 1 --node-idx 0
-	@sudo docker stop pubsub-test || true
+	@PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node leaf-worker --chunk-idx 0 --tx-per-proof 4 &
+	@PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node leaf-worker --chunk-idx 1 --tx-per-proof 4 &
+	@PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node tree-node --level 1 --node-idx 0
+	@CONTAINER_ENGINE=$$(command -v docker || command -v podman || echo true); \
+	$$CONTAINER_ENGINE stop pubsub-test 2>/dev/null || true
 	@echo "[OK] 2-minute scaled developer distributed simulation verified!"
