@@ -178,6 +178,19 @@ graph TD
     $$\text{Leaf Gen } (5.75\text{s}) + \text{Local L1 Tree } (0.99\text{s}) + \text{Levels 2..7 } (6 \times 0.99\text{s} = 5.94\text{s}) = \mathbf{12.68\text{s Total Block Proving Wall Time}}$$
     *(Slashing monolithic single-VM block proving runtime from $129.5\text{s} \rightarrow \mathbf{12.68\text{s}}$, a $10.2\times$ physical speedup across the flagship fleet!)*
 
+#### Just-In-Time (JIT) Infrastructure Standup Protocol & Financial Burn ⏱️💰
+To guarantee **zero financial spot silicon idling**, the full E2E cloud benchmark adheres strictly to a Just-In-Time Standup Lifecycle:
+1. **Prerequisite Offline Readiness**: Infrastructure standup (`gcloud compute instance-groups ...` / `terraform apply`) is **strictly prohibited** until:
+   * The monolithic container image `zkp-prover:arm64` is 100% compiled and published to GCE Artifact Registry.
+   * The benchmark block dataset (`bench_test.json`) is uploaded to GCS.
+   * The Redis Stream VPC backplane cluster is reporting healthy status.
+2. **Active Execution Timeline**:
+   * Fleet VM Boot & Registration: $\sim 45\text{ clock seconds}$.
+   * Container Pull & Instantiation across 63 nodes: $\sim 15\text{ clock seconds}$.
+   * Active Proving Execution: **$12.68\text{ clock seconds}$**!
+   * Telemetry Harvest & Immediate Teardown: $\sim 15\text{ clock seconds}$.
+3. **Total Billing Window & Financial Burn**: Total live billing window equals **$\sim 90\text{ clock seconds}$** ($1.5\text{ minutes}$). Across 63 Spot VMs of `c4a-highcpu-72` ($\sim \$0.80\text{ / hr / VM} = \$50.40\text{ / hr}$ fleet burn), the entire 125-chunk full block distributed benchmark costs exactly **$\mathbf{\$1.26\text{ total GCP spot billing}}$**!
+
 ---
 
 ## User Review Required & Open Questions 🛑
