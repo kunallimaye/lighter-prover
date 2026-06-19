@@ -587,7 +587,7 @@ cloud_run_distributed_cluster() {
   local end_ts=$(date +%s%N)
   local elapsed_ms=$(( (end_ts - start_ts) / 1000000 ))
 
-  _log_ok "TRUE Enterprise Distributed Block #1042 ($C=125$ chunks) settled end-to-end across 6 Spot VMs in ${elapsed_ms} ms!"
+  _log_ok "TRUE Enterprise Distributed Block #1042 (125 chunks) settled end-to-end across 6 Spot VMs in ${elapsed_ms} ms!"
 
   _log_info "Executing mandatory immediate post-test auto-teardown..."
   cloud_vm_stop "all"
