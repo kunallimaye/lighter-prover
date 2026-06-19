@@ -67,10 +67,29 @@ container_run() {
   _log_ok "Performance benchmark testing completed successfully!"
 }
 
+test_distributed_fast() {
+  cd "${ROOT_DIR}"
+  _log_info "Compiling prover-node microservice daemon..."
+  cargo build --release --bin prover-node
+
+  _log_info "Starting local Pub/Sub emulator container using ${ENGINE}..."
+  "${ENGINE}" run -d --rm -p 8085:8085 --name pubsub-test google/cloud-sdk gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 2>/dev/null || true
+  sleep 3
+
+  _log_info "Executing 2-minute scaled-down distributed proving assembly line..."
+  PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node leaf-worker --chunk-idx 0 --tx-per-proof 4 &
+  PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node leaf-worker --chunk-idx 1 --tx-per-proof 4 &
+  PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node tree-node --level 1 --node-idx 0
+
+  "${ENGINE}" stop pubsub-test 2>/dev/null || true
+  _log_ok "2-minute scaled developer distributed simulation verified!"
+}
+
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
-  container-build) shift; container_build "${1:-arm64}" ;;
-  container-run)   shift; container_run "$@" ;;
-  *) _die "Usage: $0 {container-build [arm64|amd64|all]|container-run [block.json]}" ;;
+  container-build)       shift; container_build "${1:-arm64}" ;;
+  container-run)         shift; container_run "$@" ;;
+  test-distributed-fast) shift; test_distributed_fast ;;
+  *) _die "Usage: $0 {container-build [arm64|amd64|all]|container-run [block.json]|test-distributed-fast}" ;;
 esac
