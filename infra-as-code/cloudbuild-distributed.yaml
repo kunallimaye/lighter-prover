@@ -72,6 +72,8 @@ steps:
 
 substitutions:
   _ENGINE: 'gke'
+  _TF_ACTION: 'apply'
+  _BLOCK_CONCURRENCY: '2'
   _TF_STATE_BUCKET: ''
   _TF_STATE_PREFIX: 'lighter-prover-dist'
   _REGION: 'us-central1'

@@ -567,9 +567,12 @@ cloud_vm_stop() {
 
 cloud_run_distributed_cluster() {
   local engine="${ENGINE:-gke}"
+  local blocks="${BLOCKS:-2}"
   for arg in "$@"; do
     case "$arg" in
       --engine=*) engine="${arg#*=}" ;;
+      --blocks=*) blocks="${arg#*=}" ;;
+      [0-9]*)     blocks="$arg" ;;
     esac
   done
 
@@ -584,10 +587,10 @@ cloud_run_distributed_cluster() {
     build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
   fi
 
-  _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine})..."
+  _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine}, blocks=${blocks})..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=${engine}"
+  substitutions="${substitutions},_ENGINE=${engine},_BLOCK_CONCURRENCY=${blocks}"
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
