@@ -24,6 +24,7 @@ Per user review (*“compare use of pubsub vs GCS”*), selecting the wire trans
 > [!IMPORTANT]
 > **GCP Cloud Build Orchestration**: Per user review (*“We don't run Terraform locally? It should be orchestrated via Cloud Build”*), executing `terraform apply` on developer laptops is prohibited. All declarative GKE Autopilot infrastructure standup and distributed proving benchmark trials will be triggered via **GCP Cloud Build (`gcloud builds submit --config=infra-as-code/cloudbuild-distributed.yaml`)**.
 > **Full Instrumentation & Telemetry**: Per user review (*“Ensure proper telemetry and instrumentation”*), `prover_node.rs` will embed Plonky2 `TimingTree` hierarchical profiling, emitting structured JSON logs (`serde_json`) and OpenTelemetry trace spans directly to Google Cloud Trace & Cloud Logging.
+> **Declarative Pub/Sub Parameterization**: Per user inquiry (*“Is pubsub configured via config.toml?”*), hardcoded topic strings are prohibited. We codified declarative `[gcp.pubsub]` topic and subscription parameterization directly in `config.toml`.
 
 ---
 
