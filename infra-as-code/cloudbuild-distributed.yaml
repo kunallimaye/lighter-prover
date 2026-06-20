@@ -20,12 +20,13 @@ steps:
   # 2. Declarative Terraform Apply (Provision GKE / Spot MIGs)
   - id: tf-apply
     name: 'hashicorp/terraform:1.14'
+    entrypoint: 'sh'
     dir: 'infra-as-code/terraform'
     args:
-      - 'apply'
-      - '-auto-approve'
-      - '-no-color'
-      - '-input=false'
+      - '-c'
+      - |
+        echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE})..."
+        terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
@@ -46,7 +47,7 @@ steps:
       - '-c'
       - |
         set -eu
-        echo "[INFO] Dispatched authentic unmocked distributed proving workload over Pub/Sub..."
+        echo "[INFO] Dispatched authentic unmocked distributed proving benchmark (engine=${_ENGINE}, concurrency=${_BLOCK_CONCURRENCY})..."
         cargo run --release --bin prover-node -- root-coordinator --block-number 1042
 
   # 4. Mandatory Post-Test Zero-Billing Teardown
