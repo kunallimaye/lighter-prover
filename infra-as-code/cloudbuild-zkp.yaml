@@ -1,17 +1,25 @@
 steps:
-  # 1. Compile and containerize isolated ZKP STARK generation engine
-  - id: build-zkp-prover
+  # 1. Initialize Docker Buildx multi-architecture builder
+  - id: setup-buildx
+    name: 'gcr.io/cloud-builders/docker'
+    args: ['buildx', 'create', '--use', '--name', 'multiarch-builder']
+
+  # 2. Compile and containerize dual-arch ZKP STARK daemon (amd64 znver3 + arm64 neoverse)
+  - id: build-zkp-prover-multiarch
     name: 'gcr.io/cloud-builders/docker'
     args:
+      - 'buildx'
       - 'build'
+      - '--platform'
+      - 'linux/amd64,linux/arm64'
+      - '--build-arg'
+      - 'RUSTFLAGS=-C target-cpu=znver3'
       - '-f'
       - '${_DOCKERFILE}'
       - '-t'
-      - '${_IMAGE_URI}'
+      - '${_IMAGE_URI}:multiarch'
+      - '--push'
       - '.'
-
-images:
-  - '${_IMAGE_URI}'
 
 options:
   logging: CLOUD_LOGGING_ONLY
