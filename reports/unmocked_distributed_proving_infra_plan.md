@@ -10,6 +10,12 @@ Per user engineering check (*“Confirm this is compatible with GKE Autopilot? I
 *   **Autopilot Incompatibility**: GKE Autopilot strictly prohibits custom `kubelet_config` overrides (`cpuManagerPolicy: static` and `cpu_cfs_quota = false`). Furthermore, real-time scheduling (`chrt -f 99`) requires `SYS_NICE` capabilities rejected by Autopilot security boundaries.
 *   **GKE Standard Adoption**: We transition exclusive distributed proving orchestration to **GKE Standard Cluster Node Pools**, acquiring full root authority over static host core pinning, unthrottled CFS bandwidth quotas, and real-time thread scheduling.
 
+### Hierarchical Proving Pod Unit Scaling Loop on GKE Standard 🔄☸️
+Per user engineering audit (*“Clarify how proving pod scales after switching to standard”*), scaling a Proving Pod unit (requiring 240 ARM Neoverse cores = 4 x `c4a-highcpu-64` Spot VMs) operates via a dual-layer synchronous control loop:
+1.  **Layer 1 - Pod Scaling (KEDA $\to$ K8s Deployment)**: KEDA monitors Stackdriver Pub/Sub metric `num_undelivered_messages`. When 1 block arrives (125 unACKed chunks), KEDA scales the Kubernetes Deployment from 0 to 1 Proving Pod Unit (consisting of 6 container pods requesting 240 cores total).
+2.  **Layer 2 - Node Scaling (Kube-Scheduler $\to$ Cluster Autoscaler)**: Because the spot node pool is initially at `node_count = 0`, the 6 new pods transition immediately to status `Pending (Unschedulable: Insufficient CPU)`. The GKE Cluster Autoscaler detects these pending pods, inspects their `requests.cpu: "64"` and `nodeSelector: c4a`, and issues a Compute Engine API call provisioning **exactly 4 x `c4a-highcpu-64` Spot VMs** (~35s boot). Once booted, Kubelet binds the 6 pods to physical host core IDs (`cpuset.cpus = 0-63`).
+3.  **Zero-Leakage Teardown Symmetrics**: As proofs settle and ACK, KEDA scales pod replicas back down to 0. After the spot nodes remain 100% idle for 10 minutes (`scale-down-unneeded-time`), the Cluster Autoscaler physically terminates the 4 GCP Spot VMs ($0.00 standby burn).
+
 ## Detailed Design: Autonomous KEDA Pub/Sub Event-Driven Autoscaling 📐⚡
 
 Per user architectural review (*“No that is bad design - the proving pod min/max should be via deployment.yaml? And it should scale automatically by checking pubsub metrics? We need detailed design here”*), hardcoding imperative background processes (`&` and `wait`) in CI runners is prohibited.
