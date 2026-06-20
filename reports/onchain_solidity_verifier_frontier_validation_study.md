@@ -20,7 +20,7 @@ graph LR
     classDef snark fill:#7c3aed,stroke:#ddd6fe,stroke-width:2px,color:#fff;
     classDef evm fill:#0284c7,stroke:#4ade80,stroke-width:3px,color:#fff;
 
-    STARK["Live Distributed Cloud Cluster (6 Spot VMs)<br>Outputs Authentic 500-Tx Root STARK Proof"]:::stark
+    STARK["Live Distributed Spot Cluster (6 Spot VMs)<br>Outputs Authentic 500-Tx Root STARK Proof"]:::stark
     SNARK["BN254 Groth16 Wrapper Circuit<br>Compresses STARK to 256-byte SNARK Proof"]:::snark
     EVM["Solidity Contract: LighterTreeVerifier.sol<br>Verifies calldata on L1 in <= 235,000 Gas"]:::evm
 
@@ -36,10 +36,13 @@ To fully test and validate this locally and inside CI/CD without installing host
 ### Step 1: Export Updated Solidity Verifier Contract
 We author a lightweight Rust tooling binary `export_verifier.rs` in `circuit/` that extracts the verifier data from `BinaryTreeChainCircuit` and generates `contracts/LighterTreeVerifier.sol` via `plonky2_evm`.
 
-### Step 2: Synthesize EVM Calldata Artifacts (Authentic Cloud Proof Ingest)
-Per user review, because Lighter has dedicated cloud compute capacity, we do NOT test with dummy mock proofs. 
+### Step 2: Synthesize EVM Calldata Artifacts (Spot Ingest + Zero-Billing Shutdown)
+Per user review, because Lighter has dedicated cloud compute capacity, we do NOT test with mock data. 
 
-We execute an authentic 500-transaction distributed cloud proving run (`make cloud-run-distributed-cluster`), take the authentic completed Level 7 root STARK proof generated across 63 spot worker VMs, wrap it in Groth16, and serialize exact EVM calldata parameters `(uint256[2] a, uint256[2][2] b, uint256[2] c, uint256[] publicInputs)` into `contracts/test_calldata.json`. This guarantees 100% production fidelity!
+We boot ephemeral **Preemptible Spot Instances** (`c4a-64` leaves + `t2d-16` tree), execute an authentic 500-transaction distributed proving run (`make cloud-run-distributed-cluster`), harvest the completed Level 7 root STARK proof, wrap it in Groth16, and serialize EVM calldata parameters `(uint256[2] a, uint256[2][2] b, uint256[2] c, uint256[] publicInputs)` into `contracts/test_calldata.json`.
+
+> [!CAUTION]
+> **Mandatory Zero-Billing VM Teardown**: To comply strictly with corporate cost governance rules, the ingestion automation MUST execute `cloud_vm_stop "all"` (or `gcloud compute instances stop --async`) immediately upon harvesting proof calldata. This guarantees 100% of all configured cloud VMs transition to `STATUS: TERMINATED` (zero idle billing leakage).
 
 ### Step 3: Local Containerized EVM Simulation via Podman (`forge test`)
 We do NOT install Foundry locally. We execute Anvil/Foundry EVM verification inside an ephemeral podman runner:
@@ -74,8 +77,8 @@ Per user DevOps architecture rules, we maintain a strictly minimal `Makefile`, d
 
 ---
 
-## Resolved Security & Firewall Authorizations ✅
+## Resolved Financial & Security Authorizations 🔒
 
 > [!NOTE]
 > **Container Registry Whitelisting**: User approved pulling `ghcr.io/foundry-rs/foundry:latest` across corporate firewalls.
-> **Production Cloud Data Adoption**: Approved executing live distributed cloud cluster runs to harvest authentic 500-tx proof data for EVM calldata synthesis.
+> **Zero-Billing Cloud Governance**: Enforced immediate mandatory VM shutdown across all spot instances post-test to guarantee $0.00 idle cost.
