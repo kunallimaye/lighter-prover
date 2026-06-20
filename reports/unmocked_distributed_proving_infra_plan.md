@@ -11,10 +11,51 @@ Per user architectural review (*“No that is bad design - the proving pod min/m
 
 We establish an institutional **Event-Driven Autoscaling Architecture** separating workload generation from container orchestration:
 
-### 1. Workload Parameterization (`prover_pod_unit.yaml`)
-We author `infra-as-code/k8s/prover_pod_unit.yaml` defining stateless Proving Pod replica boundaries:
-*   **Min Replicas ($Q_{\min}$)**: `0` *(Scale-to-zero when exchange queues are empty, guaranteeing $0.00 idle cost)*.
-*   **Max Replicas ($Q_{\max}$)**: `240` *(Governed by Little's Law for 20 blocks/sec peak DEX traffic)*.
+### 1. Workload & Silicon Parameterization (`prover_pod_unit.yaml`)
+We author `infra-as-code/k8s/prover_pod_unit.yaml` defining stateless Proving Pod replica boundaries (min=0, max=240) and enforcing preemptible **Spot Instances on ARM Neoverse Axion `c4a` silicon** (64 cores @ 128 GiB RAM):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prover-pod-deployment
+  namespace: lighter-prover-dist
+spec:
+  replicas: 0 # Scaled autonomously by KEDA ScaledObject controller
+  selector:
+    matchLabels:
+      app: zkp-prover
+      role: leaf-worker
+  template:
+    metadata:
+      labels:
+        app: zkp-prover
+        role: leaf-worker
+    spec:
+      # Enforce GCP Spot Instances strictly on ARM Neoverse Axion c4a silicon
+      nodeSelector:
+        cloud.google.com/gke-spot: "true"
+        cloud.google.com/machine-family: "c4a"
+      tolerations:
+        - key: cloud.google.com/gke-spot
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      containers:
+        - name: zkp-prover-daemon
+          image: us-docker.pkg.dev/kunal-scratch/lighter-prover-iac/zkp-prover:arm64
+          imagePullPolicy: Always
+          command: ["/app/prover-node"]
+          args: ["leaf-worker", "--tx-per-proof", "4"]
+          resources:
+            # 64 ARM cores @ 128 GiB memory (100% NUMA socket match)
+            requests:
+              cpu: "64"
+              memory: "128Gi"
+            limits:
+              cpu: "64"
+              memory: "128Gi"
+```
 
 ### 2. KEDA Scaler Manifest (`ScaledObject`)
 We attach a KEDA `ScaledObject` monitoring Google Cloud Pub/Sub Stackdriver queue depth (`pubsub.googleapis.com/subscription/num_undelivered_messages` on subscription `tree-aggregators-sub`).
