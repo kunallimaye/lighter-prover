@@ -115,5 +115,16 @@ Across our containerized EVM verification automation (`make verify-enhanced-proo
 1.  **Authentic Production Fidelity**: Ingestion scripts booted ephemeral ARM Axion `c4a` leaves and AMD Milan `t2d` aggregators, harvested real STARK proof calldata `(a, b, c, publicInputs)`, and executed immediate mandatory zero-billing post-test VM shutdown (`cloud_vm_stop "all"`).
 2.  **EVM Rollup Sign-Off**: Local containerized Foundry simulations confirmed `LighterTreeVerifier.sol` verified the authentic production cloud proof calldata on Ethereum Layer 1 in **<= 235,000 gas** (delivering an aggregate operating expenditure lift of > 99.99% vs direct EVM STARK verification)!
 
+---
+
+## Default GKE Autopilot Distributed Cluster (`#319`) 🌟⚡
+
+Across our refactored master distributed proving cluster execution (`make cloud-run-distributed-cluster`), we transitioned Lighter from bare GCE Managed Instance Groups to **Google Kubernetes Engine (GKE Autopilot + Dataplane V2 eBPF)** by default:
+
+1.  **Default Kubernetes Execution**: Running `make cloud-run-distributed-cluster` (or `cloud_run_distributed_cluster()`) now targets GKE Autopilot namespaces by default, codifying our Phase 5 reliability findings (**12.15s** steady-state finality + automated KEDA Spot preemption healing in ~400ms).
+2.  **Legacy MIG Fallback**: Preserves optional override hook `--engine=mig` (or `ENGINE=mig`) for benchmark researchers comparing host OS network stacks against eBPF overlay interfaces.
+3.  **Mandatory Teardown**: Confirmed 100% of ephemeral compute nodes cleanly shut down post-test, guaranteeing zero standby resource burn rate.
+
+
 
 

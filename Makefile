@@ -20,8 +20,8 @@ CHUNK ?= 4
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)"
 
-cloud-run-distributed-cluster: ## Run true collaborative 6-VM cloud distributed proving experiment on Block #1042
-	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster
+cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment on GKE Autopilot (defaults to --engine=gke, fallback --engine=mig)
+	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster $(ENGINE)
 
 test-t2d-hypothesis: ## Execute 4-pod concurrent multi-block AB race comparing AMD Milan Tau t2d vs ARM Axion c4a
 	@bash infra-as-code/scripts/cloud.sh cloud-test-t2d-hypothesis
