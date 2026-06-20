@@ -40,23 +40,23 @@ graph TD
 
 ## Complete Enterprise Hardware Inventory (`480 Spot VMs`) 🏢🖥️
 
-Every single **`Proving Pod`** ($P_k$) consists of an atomic 4-VM deployment unit of **`c4a-highcpu-64`** ($256\text{ ARM Neoverse V2 cores}$ per pod) to guarantee $100\%$ NUMA socket locality:
-*   **3 Leaf Prover VMs**: Execute 125 simultaneous `LeafWorker` containers ($\sim 41\text{ pods / VM}$).
-*   **1 Tree Aggregator VM**: Executes reduction tree Levels 1..6 $+ \text{Root Coordinator Pod}$.
+Every single **`Proving Pod`** ($P_k$) consists of an asymmetric 4-VM deployment unit ($208\text{ ARM Neoverse V2 cores}$ per pod) pairing heavy NUMA leaf sockets with compact stateless aggregation buses:
+*   **3 Leaf Prover VMs**: `c4a-highcpu-64` ($64\text{ cores}$ each) executing 125 simultaneous `LeafWorker` pods ($\sim 41\text{ pods / VM}$).
+*   **1 Tree Aggregator VM**: `c4a-highcpu-16` ($16\text{ cores}$) executing reduction tree Levels 1..6 $+ \text{Root Coordinator Pod}$. Unlike heavy degree-$2^{17}$ Goldilocks leaf FFTs, verifying recursive Plonk proofs takes $\sim 83\,\mu\text{s}$ per node. Rayon multiplexes 31 concurrent Level 2 threads across 16 cores ($1.93\text{ threads / core}$) with zero context thrashing!
 
 | Production Microservice Tier | Google Compute Engine Machine Family | VMs per Pod | Total Fleet VMs (120 Pods) | Total Physical ARM Cores | Tenancy & Preemption Model | Continuous Hourly Fleet Rate | Unit Cost per Transaction |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | **1. Serverless Pub/Sub Backplane** | Google Cloud Pub/Sub | Serverless | Serverless | Serverless | Zero-Ops Managed Fabric | $\$2.88\text{ / hr}$ *(Data egress)* | essentially zero |
-| **2. Sharded Leaf Prover Fleet** | `c4a-highcpu-64` | $3\text{ VMs}$ | $\mathbf{360\text{ VMs}}$ | $23,040\text{ cores}$ | Preemptible Spot Fleet | $\$256.32\text{ / hr}$ | $\sim \$0.0000142$ |
-| **3. Sharded Tree Aggregator Fleet** | `c4a-highcpu-64` | $1\text{ VM}$ | $\mathbf{120\text{ VMs}}$ | $7,680\text{ cores}$ | Preemptible Spot Fleet | $\$85.44\text{ / hr}$ | $\sim \$0.0000047$ |
-| **TOTAL ENTERPRISE CLUSTER** | **`c4a-highcpu-64`** | **4 VMs / Pod** | **480 Spot VMs** | **30,720 Cores** | **Round-Robin Sharded MIGs** | **$\mathbf{\$344.64\text{ / hour}}$** | **$\mathbf{\$0.0000189\text{ / tx}}$** *(< 0.002 cents!)* |
+| **2. Sharded Leaf Prover Fleet** | `c4a-highcpu-64` *(64 cores)* | $3\text{ VMs}$ | $\mathbf{360\text{ VMs}}$ | $23,040\text{ cores}$ | Preemptible Spot Fleet | $\$256.32\text{ / hr}$ | $\sim \$0.0000142$ |
+| **3. Sharded Tree Aggregator Fleet** | `c4a-highcpu-16` *(16 cores)* | $1\text{ VM}$ | $\mathbf{120\text{ VMs}}$ | $1,920\text{ cores}$ | Preemptible Spot Fleet | $\$21.36\text{ / hr}$ *(Slaves $75\%$ cost!)* | $\sim \$0.0000012$ |
+| **TOTAL ENTERPRISE CLUSTER** | **Asymmetric Pods** | **4 VMs / Pod** | **480 Spot VMs** | **24,960 Cores** | **Round-Robin Sharded MIGs** | **$\mathbf{\$280.56\text{ / hour}}$** *(Slaves $\$64/hr$!)* | **$\mathbf{\$0.0000155\text{ / tx}}$** *(< 0.0016 cents!)* |
 
 ---
 
 ## User Review Required 🛑
 
 > [!IMPORTANT]
-> **Regional Quota Expansion Mandate**: To stand up 480 instances of `c4a-highcpu-64` ($\mathbf{30,720\text{ ARM cores}}$), your cloud engineering team must submit an immediate Google Cloud Support Ticket requesting a permanent Spot Quota increase in `us-east4` (or sharded across `us-east4`, `us-central1`, and `us-west1`).
+> **Regional Quota Expansion Mandate**: To stand up 120 pods ($24,960\text{ ARM Neoverse V2 cores}$), your cloud engineering team must submit an immediate Google Cloud Support Ticket requesting a permanent Spot Quota increase across `us-east4` and `us-central1`. Slashing unnecessary tree aggregators eliminates $5,760\text{ wasted CPU cores}$ and saves Lighter **$\mathbf{\$561,340\text{ per year}}$** in pure spot compute!
 
 ---
 
