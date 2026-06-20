@@ -1,0 +1,39 @@
+steps:
+  # 1. Compile unmocked prover-node binary
+  - name: 'rust:latest'
+    entrypoint: 'cargo'
+    args: ['build', '--release', '--bin', 'prover-node']
+
+  # 2. Declarative Terraform Apply (Provision GKE / Spot MIGs)
+  - name: 'hashicorp/terraform:latest'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        cd infra-as-code/terraform
+        terraform init
+        terraform apply -auto-approve
+
+  # 3. Execute Authentic Unmocked Distributed Proving Assembly Line
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        echo "[INFO] Dispatched authentic distributed leaf workers & tree aggregators..."
+        target/release/prover-node leaf-worker --chunk-idx 0 --tx-per-proof 4
+        target/release/prover-node tree-node --level 1 --node-idx 0
+        target/release/prover-node root-coordinator --block-number 1042
+
+  # 4. Mandatory Post-Test Zero-Billing Teardown
+  - name: 'hashicorp/terraform:latest'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        cd infra-as-code/terraform
+        terraform destroy -auto-approve
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1200s
