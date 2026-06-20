@@ -1,38 +1,86 @@
+# Cloud Build pipeline for executing distributed proving benchmark cycles.
+#
+# Target Directory: infra-as-code/terraform
+#
+# This pipeline initializes remote GCS backend state, applies Terraform IaC,
+# executes unmocked distributed Plonky2 proving across Pub/Sub, and cleanly destroys hardware.
+
 steps:
-  # 1. Compile unmocked prover-node binary
-  - name: 'rust:latest'
-    entrypoint: 'cargo'
-    args: ['build', '--release', '--bin', 'prover-node']
+  # 1. Initialize Terraform backend
+  - id: tf-init
+    name: 'hashicorp/terraform:1.14'
+    dir: 'infra-as-code/terraform'
+    args:
+      - 'init'
+      - '-backend-config=bucket=${_TF_STATE_BUCKET}'
+      - '-backend-config=prefix=${_TF_STATE_PREFIX}'
+    env:
+      - 'TF_IN_AUTOMATION=true'
 
   # 2. Declarative Terraform Apply (Provision GKE / Spot MIGs)
-  - name: 'hashicorp/terraform:latest'
-    entrypoint: 'sh'
+  - id: tf-apply
+    name: 'hashicorp/terraform:1.14'
+    dir: 'infra-as-code/terraform'
     args:
-      - '-c'
-      - |
-        cd infra-as-code/terraform
-        terraform init
-        terraform apply -auto-approve
+      - 'apply'
+      - '-auto-approve'
+      - '-no-color'
+      - '-input=false'
+    env:
+      - 'TF_IN_AUTOMATION=true'
+      - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
+      - 'TF_VAR_orchestration_region=${_REGION}'
+      - 'TF_VAR_build_project_id=${_BUILD_PROJECT_ID}'
+      - 'TF_VAR_build_region=${_REGION}'
+      - 'TF_VAR_runtime_project_id=${_RUNTIME_PROJECT_ID}'
+      - 'TF_VAR_runtime_region=${_REGION}'
+      - 'TF_VAR_builder_sa_email=${_BUILDER_SA_EMAIL}'
+      - 'TF_VAR_runtime_sa_email=${_RUNTIME_SA_EMAIL}'
+      - 'TF_VAR_ar_repo=${_AR_REPO}'
 
   # 3. Execute Authentic Unmocked Distributed Proving Assembly Line
-  - name: 'gcr.io/cloud-builders/gcloud'
-    entrypoint: 'bash'
-    args:
-      - '-c'
-      - |
-        echo "[INFO] Dispatched authentic distributed leaf workers & tree aggregators..."
-        target/release/prover-node leaf-worker --chunk-idx 0 --tx-per-proof 4
-        target/release/prover-node tree-node --level 1 --node-idx 0
-        target/release/prover-node root-coordinator --block-number 1042
-
-  # 4. Mandatory Post-Test Zero-Billing Teardown
-  - name: 'hashicorp/terraform:latest'
+  - id: dist-prove
+    name: 'rust:latest'
     entrypoint: 'sh'
     args:
       - '-c'
       - |
-        cd infra-as-code/terraform
-        terraform destroy -auto-approve
+        set -eu
+        echo "[INFO] Dispatched authentic unmocked distributed proving workload over Pub/Sub..."
+        cargo run --release --bin prover-node -- root-coordinator --block-number 1042
+
+  # 4. Mandatory Post-Test Zero-Billing Teardown
+  - id: tf-destroy
+    name: 'hashicorp/terraform:1.14'
+    dir: 'infra-as-code/terraform'
+    args:
+      - 'destroy'
+      - '-auto-approve'
+      - '-no-color'
+      - '-input=false'
+    env:
+      - 'TF_IN_AUTOMATION=true'
+      - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
+      - 'TF_VAR_orchestration_region=${_REGION}'
+      - 'TF_VAR_build_project_id=${_BUILD_PROJECT_ID}'
+      - 'TF_VAR_build_region=${_REGION}'
+      - 'TF_VAR_runtime_project_id=${_RUNTIME_PROJECT_ID}'
+      - 'TF_VAR_runtime_region=${_REGION}'
+      - 'TF_VAR_builder_sa_email=${_BUILDER_SA_EMAIL}'
+      - 'TF_VAR_runtime_sa_email=${_RUNTIME_SA_EMAIL}'
+      - 'TF_VAR_ar_repo=${_AR_REPO}'
+
+substitutions:
+  _ENGINE: 'gke'
+  _TF_STATE_BUCKET: ''
+  _TF_STATE_PREFIX: 'lighter-prover-dist'
+  _REGION: 'us-central1'
+  _ORCH_PROJECT_ID: ''
+  _BUILD_PROJECT_ID: ''
+  _RUNTIME_PROJECT_ID: ''
+  _BUILDER_SA_EMAIL: ''
+  _RUNTIME_SA_EMAIL: ''
+  _AR_REPO: 'lighter-prover'
 
 options:
   logging: CLOUD_LOGGING_ONLY

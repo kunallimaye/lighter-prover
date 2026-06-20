@@ -574,11 +574,35 @@ cloud_run_distributed_cluster() {
   done
 
   local build_project="$(_resolve_build_project)"
-  _log_info "Submitting unmocked distributed proving execution to GCP Cloud Build (engine=${engine})..."
-  _log_info "Declarative Terraform IaC + Pub/Sub GCS IPC Backplane + OpenTelemetry JSON Instrumentation"
+  _generate_tfvars
 
-  gcloud builds submit --project="${build_project}" --config="infra-as-code/cloudbuild-distributed.yaml" \
-    --substitutions="_ENGINE=${engine}" "${ROOT_DIR}" 2>/dev/null || true
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local builder_sa="" runtime_sa="" build_machine=""
+  if [[ -f "${target_sa}" ]]; then
+    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
+  fi
+
+  _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine})..."
+  local substitutions
+  substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
+  substitutions="${substitutions},_ENGINE=${engine}"
+
+  local cb_args=()
+  if [[ -n "${builder_sa}" ]]; then
+    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
+    cb_args+=(--machine-type="${build_machine}")
+  fi
+
+  gcloud builds submit "${ROOT_DIR}" \
+    --project="${build_project}" \
+    "${cb_args[@]}" \
+    --config="infra-as-code/cloudbuild-distributed.yaml" \
+    --substitutions="${substitutions}" \
+    --quiet
 
   _log_ok "GCP Cloud Build declarative distributed proving cycle completed successfully!"
 }
