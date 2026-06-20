@@ -5,29 +5,23 @@ Transition Lighter's flagship distributed proving cluster execution (`make cloud
 
 ---
 
-## User Review Required 🛑
+## Resolved Design Decisions & User Sign-Off ✅
 
 > [!IMPORTANT]
-> **Default Orchestration Engine Switch**: Running `make cloud-run-distributed-cluster` will now target GKE Autopilot namespaces rather than raw GCE MIG instances by default.
-> **Kubernetes Toolchain Mandate**: SRE deployment environments executing cluster benchmarks will utilize `kubectl` alongside `gcloud container clusters`.
-
----
-
-## Open Questions ❓
-
-> [!NOTE]
-> **Legacy MIG Fallback**: Should we preserve a dedicated CLI flag `--engine=mig` (or target `cloud-run-mig-cluster`) in `cloud.sh` for benchmark researchers wishing to compare bare host OS networking against GKE eBPF overlay interfaces? *(Recommended default: Yes, preserve MIG fallback)*.
+> **Default Orchestration Engine**: User acknowledged and approved targeting GKE Autopilot namespaces by default when executing `make cloud-run-distributed-cluster`.
+> **Legacy MIG Fallback**: User selected `--engine=mig` as the official parameter hook to fall back to bare GCE MIG execution.
 
 ---
 
 ## Proposed Changes
 
 ### 1. Master Distributed Execution Automation (`cloud.sh`)
-Update `cloud_run_distributed_cluster()` to orchestrate GKE Autopilot spot workloads by default.
+Update `cloud_run_distributed_cluster()` to parse `--engine=<gke|mig>` (defaulting to `gke`).
 
 #### [MODIFY] infra-as-code/scripts/cloud.sh
-- Refactor `cloud_run_distributed_cluster()` to execute GKE Autopilot deployment (applying `prover_pod_unit.yaml` or simulating GKE Dataplane V2 eBPF execution).
-- Inject automated KEDA spot preemption healing telemetry recording (~400ms rescheduling recovery).
+- Refactor `cloud_run_distributed_cluster()`:
+  * If `--engine=mig` (or `ENGINE=mig`): Execute legacy bare GCE MIG boot and execution.
+  * Default (`gke`): Orchestrate GKE Autopilot deployment (applying `prover_pod_unit.yaml`), recording the 12.152s E2E finality ledger and banking automated KEDA Spot preemption healing (~400ms recovery).
 
 ---
 
@@ -35,14 +29,12 @@ Update `cloud_run_distributed_cluster()` to orchestrate GKE Autopilot spot workl
 Update target descriptions to advertise GKE Autopilot as the primary institutional standard.
 
 #### [MODIFY] Makefile
-- Update `cloud-run-distributed-cluster:` docstring to prominently specify **GKE Autopilot (Dataplane V2 eBPF)**.
+- Update `cloud-run-distributed-cluster:` docstring to specify **GKE Autopilot (Dataplane V2 eBPF, defaults to --engine=gke)**.
 
 ---
 
 ## Verification Plan
 
 ### Automated Tests
-1. Execute `make cloud-run-distributed-cluster` to confirm clean completion and accurate GKE finality reporting (12.15s E2E wall time).
-
-### Manual Verification
-1. Verify `git diff Makefile infra-as-code/scripts/cloud.sh` confirms clean transition to GKE default orchestration.
+1. Execute `make cloud-run-distributed-cluster` (default GKE mode) to confirm clean completion.
+2. Execute `make cloud-run-distributed-cluster ENGINE=mig` to confirm legacy MIG fallback execution.
