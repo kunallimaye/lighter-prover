@@ -90,9 +90,42 @@ graph TD
 ### 4. CPU Starvation Prevention: Guaranteed QoS & Static Core Pinning Physics 🛡️⚡
 Per user engineering review (*“Do we require any other config to ensure there is no CPU starvation as ZKP is partial to that”*), cryptographic Goldilocks NTTs are hyper-sensitive to Linux Completely Fair Scheduler (CFS) bandwidth quota throttling.
 
-To guarantee 100% zero CPU starvation and exclusive bare-metal NUMA socket affinity, we codify a three-layer kernel scheduling policy:
+To guarantee 100% zero CPU starvation and exclusive bare-metal NUMA socket affinity, we codify a three-layer kernel scheduling policy backed by declarative GKE Standard Node Pool provisioning:
 1.  **Guaranteed QoS Class on GKE Standard**: Enforcing `requests.cpu == limits.cpu` (64 cores) and `requests.memory == limits.memory` (128 GiB) on a **GKE Standard Spot Node Pool (`google_container_node_pool`)** configured with Kubelet option `cpu_manager_policy = "static"`. Kubelet removes the container from the shared CFS cgroup and pins it to 64 dedicated physical host core IDs (`cpuset.cpus = 0-63`) with zero cgroup quota bounds!
-2.  **Disabled CFS Quota Throttling (`cpu_cfs_quota = false`)**: Codified in GKE Standard Terraform node pool blocks (`main.tf`), completely disabling Linux 100ms CFS bandwidth quota throttling.
+2.  **Declarative Node Pool Configuration (`main.tf`)**: We author `infra-as-code/terraform/main.tf` provisioning dedicated ARM Axion `c4a-highcpu-64` spot silicon with `cpu_cfs_quota = false`:
+
+```hcl
+resource "google_container_node_pool" "prover_spot_nodes" {
+  name       = "prover-c4a-spot-pool"
+  cluster    = google_container_cluster.prover_cluster.id
+  node_count = 0 # Scaled autonomously from 0 up to 30 spot nodes by KEDA / Cluster Autoscaler
+
+  node_config {
+    machine_type = "c4a-highcpu-64" # 64 ARM Neoverse Axion cores @ 128 GiB RAM
+    spot         = true
+
+    # Explicit host kubelet core pinning & unthrottled CFS configuration
+    kubelet_config {
+      cpu_manager_policy = "static"
+      cpu_cfs_quota      = false
+    }
+
+    labels = {
+      role = "zkp-prover-host"
+    }
+
+    taints {
+      key    = "zkp-workload"
+      value  = "true"
+      effect = "NO_SCHEDULE"
+    }
+
+    service_account = var.runtime_sa_email
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+}
+```
+
 3.  **Linux Real-Time Scheduling (`chrt -f 99`)**: Worker container entrypoints run under Linux FIFO real-time priority (`command: ["chrt", "-f", "99", "/app/prover-node"]`), guaranteeing host background daemons never preempt active Goldilocks NTT Rayon threads.
 
 ---
