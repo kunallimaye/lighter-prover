@@ -78,9 +78,17 @@ graph TD
 
 ### 3. Multi-Block Lifecycle Finality:
 1.  **Ingest Burst**: 2 blocks arrive simultaneously, adding 250 unACKed messages to Pub/Sub.
-2.  **Autonomous Scale-Up**: KEDA detects queue depth = 250. Because $250 / 125 = 2$, KEDA instantly scales GKE deployment from 0 up to **2 active Proving Pod replicas** in $\sim 400\text{ms}$.
+2.  **Autonomous Scale-Up**: KEDA detects queue depth = 250 (a 2x multiple of the 125 target). KEDA instantly scales GKE deployment from 0 up to **2 active Proving Pod replicas** in ~400ms.
 3.  **Parallel Crunch**: Pod 1 crunches Block #1042 while Pod 2 crunches Block #1043.
-4.  **Autonomous Scale-To-Zero**: As root validium proofs settle to L1 Ethereum, workers issue gRPC `ACK`s. Queue depth hits 0. KEDA autonomously scales replicas back down to 0.
+4.  **Autonomous Scale-To-Zero**: As root validium proofs settle to L1 Ethereum, workers issue gRPC ACKs. Queue depth hits 0. KEDA autonomously scales replicas back down to 0.
+
+### 4. CPU Starvation Prevention: Guaranteed QoS & Static Core Pinning Physics 🛡️⚡
+Per user engineering review (*“Do we require any other config to ensure there is no CPU starvation as ZKP is partial to that”*), cryptographic Goldilocks NTTs are hyper-sensitive to Linux Completely Fair Scheduler (CFS) bandwidth quota throttling.
+
+To guarantee 100% zero CPU starvation and exclusive bare-metal NUMA socket affinity, we codify a three-layer kernel scheduling policy:
+1.  **Guaranteed QoS Class (K8s)**: Enforcing `requests.cpu == limits.cpu` (64 cores) and `requests.memory == limits.memory` (128 GiB) on a node pool configured with Kubelet option `cpuManagerPolicy: static`. Kubelet removes the proving container from the shared CFS cgroup and assigns it 64 dedicated physical core IDs (`cpuset.cpus = 0-63`) with zero quota enforcement!
+2.  **Disabled CFS Quota Throttling (`cpu_cfs_quota = false`)**: Codified in Terraform node pool definitions (`main.tf`), completely disabling Linux 100ms period bandwidth throttling.
+3.  **Linux Real-Time Scheduling (`chrt -f 99`)**: Worker entrypoints run under Linux FIFO real-time priority (`command: ["chrt", "-f", "99", "/app/prover-node"]`), guaranteeing OS interrupts or host background daemons (*fluentbit, kube-proxy*) never preempt active FFT Rayon threads.
 
 ---
 
