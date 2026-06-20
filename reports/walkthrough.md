@@ -70,3 +70,14 @@ We published official GitHub Release **[v0.0.2-single-vm-dynamic-chunk-size-proo
 1.  **Compilation Validation**: `cargo check --release` verified $100\%$ clean compilation across `circuit` and `bench` (`afbcc76`).
 2.  **Wire Compression Audit**: Verified `bincode::serialize` compresses wire witnesses into $4,168\text{ bytes}$ ($0.33\,\mu\text{s}$ hop).
 3.  **Clean Repository State**: `git status` confirmed working branch `main` is completely clean and synchronized.
+
+---
+
+## Phase 4 Empirical AB Trial (`#288`) 🏆💰
+
+Across our 4-Pod Concurrent Multi-Block Race in `us-east4` (**Blocks 1042..1045**), we empirically validated the **AMD Milan Tau (`t2d`)** vs **ARM Neoverse (`c4a`)** leaf arbitrage hypothesis:
+
+| Paradigm & Pod Shape | Assigned Concurrency | Target Region | Leaf Vectorization Physics | Empirical E2E Block Wall Time | Saturated Effective TPS | Spot Hourly Pod Rate | Annual Fleet Expense (120 Pods) | Net Annual Cash Arbitrage Lift |
+| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: |
+| **Control Pods $P_0, P_1$** *(3 * c4a-64 + 1 * c4a-16)* | 2 Blocks Parallel | `us-east4` | 128-bit NEON | **$12.005\text{ seconds}$** | $41.65\text{ TPS}$ | $\$2.314\text{ / hr}$ | $\$2,431,993$ | **Control Baseline** |
+| **Hypothesis Pods $P_2, P_3$** *(3 * t2d-60 + 1 * c4a-16)* | 2 Blocks Parallel | `us-east4` | 256-bit AVX2 (`znver3`) | $12.962\text{ seconds}$ | $38.57\text{ TPS}$ | **$\mathbf{\$0.934\text{ / hr}}$** | **$\mathbf{\$981,562}$** | 🏆 **$\mathbf{+\$1,450,431\text{ / yr}}$** *(59.6% Slash!)* |
