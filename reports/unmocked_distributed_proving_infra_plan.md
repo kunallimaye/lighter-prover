@@ -1,52 +1,43 @@
 # Technical Implementation Plan: Unmocked Distributed Proving Infrastructure
 
 ## Goal Description
-Permanently eliminate all deterministic mock simulation sleeps (`sleep 12`) across Lighter Prover's orchestration scripts (`cloud.sh`) and microservice daemons (`prover_node.rs`), replacing them with **100% authentic physical distributed cryptographic proving** across live Google Compute Engine (GCE) Spot MIGs and Google Kubernetes Engine (GKE Autopilot) clusters.
+Permanently eliminate all deterministic mock simulation sleeps (`sleep 12`) across Lighter Prover's orchestration scripts (`cloud.sh`) and microservice daemons (`prover_node.rs`), replacing them with **100% authentic physical distributed cryptographic proving** across live Google Compute Engine (GCE) Spot MIGs and Google Kubernetes Engine (GKE Autopilot) clusters managed declaratively via Terraform.
 
 ---
 
-## User Review Required 🛑
+## Resolved Design Decisions & Institutional Corrections ✅
 
 > [!IMPORTANT]
-> **Execution Duration Increase**: Because `cloud_run_distributed_cluster` will now physically crunch 125 Goldilocks STARK chunks across remote cloud silicon rather than sleeping for 12 seconds, automated CI/CD benchmark runs will take ~45 to 90 seconds of active physical CPU runtime.
-> **External Network Backplane**: Distributed tree aggregation pods require an intermediate IPC store (shared NFS GCS fuse volume `/data/reports` or live Pub/Sub emulator backplane) to route binary intermediate proofs between parent and child nodes.
-
----
-
-## Open Questions ❓
-
-> [!CAUTION]
-> **Production Backplane Selection**: For un-mocking distributed proof routing between leaf workers and tree aggregators in CI/CD, do you prefer:
-> 1. **Option 1 (File-Based IPC Store)**: Worker pods write intermediate bincode proof files to shared `/tmp/reports/level_X/node_Y.proof`, which parent tree aggregators poll and verify. *(Recommended default: Option 1, zero external broker dependency in CI)*.
-> 2. **Option 2 (Live Pub/Sub Backplane)**: Worker pods connect to `localhost:8085` gRPC Pub/Sub emulator streams.
+> **Cross-Host Proof Backplane (GCS IPC Store)**: Per user review (*“How can we use file-based if workers and aggregators are not on the same host?”*), local disk files cannot cross VM boundaries. We codify **Google Cloud Storage (GCS Object Store)** as the universal distributed proof IPC fabric (`gs://${BENCH_BUCKET}/proof_store/block_1042/`). Leaf workers stream serialized proof bytes directly to GCS, where parent reduction aggregators poll and dequeue them.
+> **Declarative Terraform Mandate**: Per user review (*“This needs to be done via Terraform not kubectl”*), imperative `kubectl apply` shell scripts are prohibited. All GKE Autopilot namespaces, KEDA scalers, and distributed proving Kubernetes Jobs will be provisioned and managed strictly via **Terraform (`terraform apply -auto-approve`)** in `infra-as-code/terraform/`.
 
 ---
 
 ## Proposed Changes
 
 ### 1. Cryptographic Microservice Daemon (`prover_node.rs`)
-Replace log simulation strings with real Plonky2 circuit synthesis and recursive proof wrapping.
+Replace log simulation strings with real Plonky2 Goldilocks proof generation and GCS IPC storage transfer.
 
 #### [MODIFY] bench/src/bin/prover_node.rs
 - Import `circuit::block_tx_constraints::BlockTxCircuit` and `circuit::binary_tree_chain_constraints::BinaryTreeChainCircuit`.
-- **LeafWorker Subcommand**: Load `bench_test.json`, extract transaction slice `chunk_idx`, define Goldilocks field constraints, execute `circuit.prove()`, and serialize `ProofWithPublicInputs` to output storage.
-- **TreeNode Subcommand**: Poll output storage for child proof pair `(2*node_idx, 2*node_idx+1)`, evaluate recursive Plonk constraints inside `BinaryTreeChainCircuit::prove()`, and emit aggregated parent proof.
+- **LeafWorker Subcommand**: Load `bench_test.json`, synthesize Goldilocks witness chunk `chunk_idx`, execute `circuit.prove()`, and stream `ProofWithPublicInputs` bytes to GCS URI `gs://${BENCH_BUCKET}/proofs/leaf_${chunk_idx}.bin`.
+- **TreeNode Subcommand**: Poll GCS URI for child proof pair `(2*I, 2*I+1)`, evaluate recursive Plonk constraints inside `BinaryTreeChainCircuit::prove()`, and upload parent proof to GCS.
 
 ---
 
-### 2. Master Fleet Orchestration Automation (`cloud.sh`)
-Replace `sleep 12` mock placeholders with real parallel remote execution across cloud silicon.
+### 2. Declarative IaC Orchestration (`cloud.sh` & `terraform/`)
+Replace `sleep 12` mock placeholders with real Terraform execution across cloud silicon.
 
 #### [MODIFY] infra-as-code/scripts/cloud.sh
 - Refactor `cloud_run_distributed_cluster()`:
-  * **MIG Mode (`--engine=mig`)**: Boot Spot instances, loop across `prover-vm-1` through `prover-vm-6` invoking real parallel `cloud_bench_run "${vm}" 10 4 &`, block on `wait`, and aggregate real summary JSON ledgers.
-  * **GKE Mode (`--engine=gke`)**: Execute real `kubectl apply -f infra-as-code/k8s/prover_pod_unit.yaml` and `kubectl wait --for=condition=complete job/root-coordinator`, harvesting exact physical pod telemetry.
-  * Enforce mandatory zero-billing post-test VM teardown (`cloud_vm_stop "all"`).
+  * **GKE Mode (Default)**: Execute `terraform -chdir=infra-as-code/terraform apply -var="execution_mode=gke_distributed" -auto-approve` to declaratively spin up GKE Autopilot prover jobs, poll GCS object store for final finality assertion, and record exact real-world proof telemetry.
+  * **MIG Mode (`--engine=mig`)**: Execute `terraform -chdir=infra-as-code/terraform apply -var="execution_mode=mig_distributed" -auto-approve` across remote GCE Spot fleet.
+  * Mandatory zero-billing teardown: `terraform destroy -auto-approve`.
 
 ---
 
 ## Verification Plan
 
 ### Automated Tests
-1. Execute `make test-distributed-fast` locally to confirm unmocked `prover-node` binary physically crunches and verifies Plonky2 proofs.
-2. Execute `make cloud-run-distributed-cluster ENGINE=mig` to confirm physical remote GCE Spot MIG parallel execution.
+1. Execute `make test-distributed-fast` locally to confirm unmocked `prover-node` binary crunches real proofs.
+2. Execute `make cloud-run-distributed-cluster` to confirm declarative Terraform GKE distributed execution.
