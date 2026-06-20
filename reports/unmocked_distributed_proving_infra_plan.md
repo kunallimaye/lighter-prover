@@ -64,7 +64,15 @@ graph TD
 
 ---
 
+## Parameter Governance: `BLOCKS` vs `JOBS` Synonymity ⚙️📝
+Per user review (*“BLOCKS=2 should be the default if none specified... make a note that it is synonymous to JOBS”*), we standardize concurrency terminology across targets:
+*   **Default Concurrency**: `BLOCKS ?= 2` *(Proves 2 complete blocks in parallel by default)*.
+*   **Synonymity Note**: In distributed cluster targets (`cloud-run-distributed-cluster`), parameter **`BLOCKS`** governs multi-block pipeline concurrency. This is functionally synonymous to parameter **`JOBS`** used in monolithic single-VM targets (`cloud-bench-run`). Both govern the assigned batch proving concurrency across available hardware units.
+
+---
+
 ## Verification Plan
 
 ### Automated Tests
-1. Execute `make cloud-run-distributed-cluster BLOCKS=2` to verify KEDA autonomously scales from 0 to 2 replicas under Pub/Sub load.
+1. Execute `make cloud-run-distributed-cluster` *(defaults automatically to `BLOCKS=2`)* to confirm KEDA autonomously scales from 0 to 2 replicas (8 Spot VMs) under Pub/Sub load.
+2. Execute `make cloud-run-distributed-cluster BLOCKS=4` to confirm elastic multi-block scaling (synonymous to `JOBS=4`).
