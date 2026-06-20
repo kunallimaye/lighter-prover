@@ -32,7 +32,7 @@ metadata:
   name: prover-pod-deployment
   namespace: lighter-prover-dist
 spec:
-  replicas: 0 # Scaled autonomously by KEDA ScaledObject controller
+  replicas: 2 # Boot initial cluster standup with 2 active Proving Pod replicas (8 Spot VMs)! Autonomously scales to 0 post-block.
   selector:
     matchLabels:
       app: zkp-prover
@@ -102,9 +102,9 @@ To guarantee 100% zero CPU starvation and exclusive bare-metal NUMA socket affin
 
 ```hcl
 resource "google_container_node_pool" "prover_spot_nodes" {
-  name       = "prover-c4a-spot-pool"
-  cluster    = google_container_cluster.prover_cluster.id
-  node_count = 0 # Scaled autonomously from 0 up to 30 spot nodes by KEDA / Cluster Autoscaler
+  name               = "prover-c4a-spot-pool"
+  cluster            = google_container_cluster.prover_cluster.id
+  initial_node_count = 8 # Boot initial standup with 8 Spot VMs supporting 2 Proving Pod units! Scales to 0 post-block.
 
   node_config {
     machine_type = "c4a-highcpu-64" # 64 ARM Neoverse Axion cores @ 128 GiB RAM
