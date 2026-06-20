@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lighter-leaf-worker
+  labels:
+    app: zkp-prover
+    role: leaf-worker
+spec:
+  replicas: 6 # 3 worker pods per Proving Pod * 2 parallel blocks!
+  selector:
+    matchLabels:
+      role: leaf-worker
+  template:
+    metadata:
+      labels:
+        role: leaf-worker
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-spot: "true"
+        cloud.google.com/compute-class: "c4a" # Enforces ARM Neoverse Axion silicon!
+        kubernetes.io/arch: arm64
+      containers:
+      - name: prover
+        image: us-docker.pkg.dev/lighter-prover/zkp-prover:multiarch
+        command: ["prover-node", "leaf-worker"]
+        resources:
+          limits:
+            cpu: "64"
+            memory: "128Gi" # Corrects memory ratio to 2 GiB/vCPU complying with Autopilot limits!
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lighter-tree-aggregator
+  labels:
+    app: zkp-prover
+    role: tree-node
+spec:
+  replicas: 2 # 1 aggregator pod per Proving Pod * 2 parallel blocks!
+  selector:
+    matchLabels:
+      role: tree-node
+  template:
+    metadata:
+      labels:
+        role: tree-node
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-spot: "true"
+        kubernetes.io/arch: amd64
+      containers:
+      - name: aggregator
+        image: us-docker.pkg.dev/lighter-prover/zkp-prover:multiarch
+        command: ["prover-node", "tree-node"]
+        resources:
+          limits:
+            cpu: "16"
+            memory: "32Gi"

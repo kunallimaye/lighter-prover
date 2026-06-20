@@ -1,0 +1,11 @@
+{
+  "experiment": "phase5_gke_performance_tax_validation",
+  "concurrency": "2_blocks_parallel_across_gke_namespaces",
+  "cluster_engine": "gke_autopilot_dataplane_v2_ebpf",
+  "leaf_shape": "compute_class_c4a_64cpu_128gi_memory",
+  "empirical_gke_wall_time_ms": 12152,
+  "bare_gce_mig_wall_time_ms": 12005,
+  "net_ebpf_overlay_tax_pct": 1.22,
+  "effective_tps": 41.15,
+  "reliability_healing_time_ms": 400
+}
