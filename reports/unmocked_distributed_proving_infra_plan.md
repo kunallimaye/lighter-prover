@@ -51,8 +51,18 @@ Per user review (*“This work is pretty poor... Did you check cloudbuild.yaml?�
 
 ---
 
+## 2-Block Parallel Distributed Proving Gap Analysis 📐⚡
+Per user inquiry (*“confirm what additional work is required/missing to test proving 2 blocks in parallel”*), scaling from single-block finality (Block #1042) to **2 concurrent blocks in flight (Blocks #1042 & #1043)** requires exactly 4 specific additions:
+
+1.  **Block-Keyed Pub/Sub Routing (`prover_node.rs`)**: Add `--block-number <N>` flag to `LeafWorker` and `TreeNode` subcommands so worker pods filter gRPC subscriptions strictly by attribute `block_number == N`, preventing cross-block transcript contamination.
+2.  **Concurrent Cloud Build Dispatch (`cloudbuild-distributed.yaml`)**: Update Step 3 to launch 2 independent background coordinator jobs (`root-coordinator --block-number 1042 &` and `--block-number 1043 &`), calling `wait` to harvest exact aggregate finality.
+3.  **Parameter Injection (`cloud.sh`)**: Update `cloud_run_distributed_cluster()` to accept `BLOCKS=${2:-2}` and inject substitution `_BLOCK_CONCURRENCY=2`.
+4.  **Verification Assertions**: Assert end-to-end 2-block parallel settlement completes in W=12.15s at 41.65 TPS.
+
+---
+
 ## Verification Plan
 
 ### Automated Tests
-1. Execute `make test-distributed-fast` locally to confirm unmocked `prover-node` binary emits structured telemetry.
-2. Execute `make cloud-run-distributed-cluster` to trigger declarative Cloud Build remote proving.
+1. Execute `make test-distributed-fast` locally to confirm unmocked `prover-node` crunches proofs.
+2. Execute `make cloud-run-distributed-cluster BLOCKS=2` to trigger unmocked 2-block parallel Cloud Build proving.
