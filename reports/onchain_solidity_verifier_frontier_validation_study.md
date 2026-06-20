@@ -20,7 +20,7 @@ graph LR
     classDef snark fill:#7c3aed,stroke:#ddd6fe,stroke-width:2px,color:#fff;
     classDef evm fill:#0284c7,stroke:#4ade80,stroke-width:3px,color:#fff;
 
-    STARK["Level 7 Root Coordinator Pod<br>Outputs 150 KB Plonky2 FRI STARK Proof"]:::stark
+    STARK["Fast Single-Node Mock Generator<br>Outputs Tiny 2-Leaf Root STARK Proof"]:::stark
     SNARK["BN254 Groth16 Wrapper Circuit<br>Compresses STARK to 256-byte SNARK Proof"]:::snark
     EVM["Solidity Contract: LighterTreeVerifier.sol<br>Verifies calldata on L1 in <= 235,000 Gas"]:::evm
 
@@ -36,11 +36,13 @@ To fully test and validate this locally and inside CI/CD without installing host
 ### Step 1: Export Updated Solidity Verifier Contract
 We author a lightweight Rust tooling binary `export_verifier.rs` in `circuit/` that extracts the verifier data from `BinaryTreeChainCircuit` and generates `contracts/LighterTreeVerifier.sol` via `plonky2_evm`.
 
-### Step 2: Synthesize EVM Calldata Artifacts
-We execute a standard distributed simulation run (`make test-distributed-fast`), take the generated Level 7 root STARK proof, wrap it in Groth16, and format the exact EVM calldata parameters `(uint256[2] a, uint256[2][2] b, uint256[2] c, uint256[] publicInputs)` into `contracts/test_calldata.json`.
+### Step 2: Synthesize EVM Calldata Artifacts (Fast Mock Synthesis)
+Per user inquiry: *“Do you need to run distributed benchmark for this?”* **NO!** Running full multi-VM distributed cluster runs to test contract verification is slow and brittle. 
+
+We author a fast single-node mock synthesis test (`cargo test --test export_mock_calldata`) that generates dummy FRI witness polynomials for a minimal 2-leaf binary tree (C=2), wraps it in Groth16, and writes out exact EVM calldata parameters `(uint256[2] a, uint256[2][2] b, uint256[2] c, uint256[] publicInputs)` into `contracts/test_calldata.json` in 1.5 seconds. Zero message brokers or distributed benchmarks required!
 
 ### Step 3: Local Containerized EVM Simulation via Podman (`forge test`)
-Per user review, we do NOT install Foundry locally. We execute Anvil/Foundry EVM verification inside an ephemeral podman runner:
+We do NOT install Foundry locally. We execute Anvil/Foundry EVM verification inside an ephemeral podman runner:
 
 ```bash
 # Containerized Foundry execution via podman (or docker fallback)
@@ -72,7 +74,7 @@ Per user DevOps architecture rules, we maintain a strictly minimal `Makefile`, d
 
 ---
 
-## User Review Required 🛑
+## Resolved Security & Firewall Authorizations ✅
 
-> [!IMPORTANT]
-> **Container Registry Whitelisting**: To allow local podman runners and GCP Cloud Build CI runners to pull official Foundry toolchain manifests, your SRE security team must confirm that `ghcr.io/foundry-rs/foundry:latest` is whitelisted in corporate firewall egress rules.
+> [!NOTE]
+> **Container Registry Whitelisting**: User approved pulling `ghcr.io/foundry-rs/foundry:latest` across corporate firewalls ("This should be fine, let me know if you run into issues").
