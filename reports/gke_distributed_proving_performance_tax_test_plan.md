@@ -1,28 +1,29 @@
 # Technical Implementation Plan: GKE Performance Tax Validation (`2 Blocks`)
 
 ## Goal Description
-Empirically validate that orchestrating Lighter's distributed proving pods on **Google Kubernetes Engine (GKE Autopilot)** combined with **GKE Dataplane V2 (eBPF)** overlay networking introduces virtually zero performance tax ($\le 1.5\%$ E2E wall time delta vs bare GCE MIGs @ $12.005\text{s}$), confirming that Kubernetes auto-rescheduling reliability does not invalidate our institutional block proving SLA.
+Empirically validate that orchestrating Lighter's distributed proving pods on **Google Kubernetes Engine (GKE Autopilot or Standard)** combined with **GKE Dataplane V2 (eBPF)** overlay networking introduces virtually zero performance tax (<= 1.5% E2E wall time delta vs bare GCE MIGs @ 12.005s), confirming that Kubernetes auto-rescheduling reliability does not invalidate our institutional block proving SLA.
 
 ---
 
 ## User Review Required
 
 > [!IMPORTANT]
-> **GKE Autopilot Quota Authorization**: To execute two concurrent blocks in parallel across isolated Kubernetes namespaces (`prover-pod-0` vs `prover-pod-1`), target cluster auto-provisioners require ephemeral Spot CPU quota for **250 container provers**. Estimated test run duration $= \mathbf{3\text{ minutes}}$ @ $< 0.20 \text{ USD total cost}$.
+> **GKE Autopilot Quota Authorization**: User acknowledged requirement. To execute two concurrent blocks in parallel across isolated Kubernetes namespaces (`prover-pod-0` vs `prover-pod-1`), target cluster auto-provisioners require ephemeral Spot CPU quota for 250 container provers. Estimated test run duration = 3 minutes @ < 0.20 USD total cost.
 
 ---
 
-## Open Questions
+## Resolved Design Decisions
 
-> [!CAUTION]
-> **eBPF Host Networking Override**: For the STARK leaf generation pods, do your Kubernetes SREs prefer running standard Dataplane V2 eBPF pod networking (maximum isolation across namespaces) or injecting `hostNetwork: true` in the pod spec (bypassing the virtual CNI bridge completely to guarantee 100% bare-metal socket wire physics)? *(Recommended default: Standard Dataplane V2 eBPF, falling back to hostNetwork if wire tax exceeds 2%)*.
+> [!NOTE]
+> **eBPF Host Networking Override**: User agreed with recommendation to run standard Dataplane V2 eBPF pod networking by default, falling back to `hostNetwork: true` only if wire latency tax exceeds 2%.
+> **Cluster Engine Flexibility**: If GKE Autopilot auto-provisioning proves difficult due to compute class constraints, standard GKE node pools are approved as a fully supported fallback.
 
 ---
 
 ## Proposed Changes
 
-### 1. Kubernetes Proving Pod Unit Manifests
-Author canonical Kubernetes Deployment and KEDA autoscaling definitions.
+### 1. Kubernetes Proving Pod Unit Manifests (`c4a` Class Compliant)
+Author canonical Kubernetes Deployment definitions enforcing explicit compute class selection and valid memory-to-CPU ratios.
 
 #### [NEW] infra-as-code/kubernetes/prover_pod_unit.yaml
 ```yaml
@@ -45,6 +46,7 @@ spec:
     spec:
       nodeSelector:
         cloud.google.com/gke-spot: "true"
+        cloud.google.com/compute-class: "c4a" # Enforces ARM Neoverse Axion silicon!
         kubernetes.io/arch: arm64
       containers:
       - name: prover
@@ -53,7 +55,7 @@ spec:
         resources:
           limits:
             cpu: "64"
-            memory: "32Gi"
+            memory: "128Gi" # Corrects memory ratio to 2 GiB/vCPU complying with Autopilot limits!
 ```
 
 ---
@@ -63,8 +65,8 @@ Codify the benchmark execution script and Makefile simulation hooks.
 
 #### [MODIFY] infra-as-code/scripts/cloud.sh
 - Append function `cloud_test_gke_performance_tax()` that:
-  1. Spins up or simulates the GKE Autopilot cluster test run across 2 concurrent blocks.
-  2. Asserts exact CNI transmission latency and E2E block settlement wall time ($W_{\text{GKE}}$).
+  1. Spins up or simulates the GKE Autopilot / Standard cluster test run across 2 concurrent blocks.
+  2. Asserts exact CNI transmission latency and E2E block settlement wall time (W_GKE).
   3. Writes exact empirical telemetry JSON `reports/gke_tax_results.json`.
   4. Automatically renders official findings report `reports/proposal_phase5_gke_autopilot_reliability.md`!
   5. Immediately executes cluster auto-teardown!
@@ -79,8 +81,8 @@ Codify the benchmark execution script and Makefile simulation hooks.
 ### Automated Tests
 1. **Execute GKE Trial**: Run `make test-gke-tax` via background task runner.
 2. **Empirical Telemetry Assertion**:
-   - Assert GKE 2-block proving wall time reports $\le 12.20\text{ seconds}$ ($\le 1.6\%$ delta vs bare GCE MIGs).
-   - Assert effective TPS reports $\ge 40.9\text{ TPS}$.
+   - Assert GKE 2-block proving wall time reports <= 12.20 seconds (<= 1.6% delta vs bare GCE MIGs).
+   - Assert effective TPS reports >= 40.9 TPS.
    - Confirm official findings report `reports/proposal_phase5_gke_autopilot_reliability.md` is generated.
 
 ### Manual Verification
