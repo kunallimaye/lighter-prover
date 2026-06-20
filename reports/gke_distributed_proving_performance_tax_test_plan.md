@@ -8,7 +8,7 @@ Empirically validate that orchestrating Lighter's distributed proving pods on **
 ## User Review Required
 
 > [!IMPORTANT]
-> **GKE Autopilot Quota Authorization**: User acknowledged requirement. To execute two concurrent blocks in parallel across isolated Kubernetes namespaces (`prover-pod-0` vs `prover-pod-1`), target cluster auto-provisioners require ephemeral Spot CPU quota for 250 container provers. Estimated test run duration = 3 minutes @ < 0.20 USD total cost.
+> **GKE Autopilot Quota Authorization**: User acknowledged requirement. To execute two concurrent blocks in parallel across isolated Kubernetes namespaces (`prover-pod-0` vs `prover-pod-1`), target cluster auto-provisioners require ephemeral Spot CPU quota for 6 leaf worker replicas (384 ARM cores) and 2 aggregator replicas (32 AMD vCPUs). Estimated test run duration = 3 minutes @ < 0.20 USD total cost.
 
 ---
 
@@ -17,13 +17,14 @@ Empirically validate that orchestrating Lighter's distributed proving pods on **
 > [!NOTE]
 > **eBPF Host Networking Override**: User agreed with recommendation to run standard Dataplane V2 eBPF pod networking by default, falling back to `hostNetwork: true` only if wire latency tax exceeds 2%.
 > **Cluster Engine Flexibility**: If GKE Autopilot auto-provisioning proves difficult due to compute class constraints, standard GKE node pools are approved as a fully supported fallback.
+> **Replica Concurrency Alignment**: Corrected worker pod replica count to exactly 6 replicas (3 replicas per Proving Pod across 2 parallel blocks).
 
 ---
 
 ## Proposed Changes
 
-### 1. Kubernetes Proving Pod Unit Manifests (`c4a` Class Compliant)
-Author canonical Kubernetes Deployment definitions enforcing explicit compute class selection and valid memory-to-CPU ratios.
+### 1. Kubernetes Proving Pod Unit Manifests (`6 Replicas @ c4a`)
+Author canonical Kubernetes Deployment definitions enforcing explicit compute class selection, 6 concurrent worker replicas, and valid memory-to-CPU ratios.
 
 #### [NEW] infra-as-code/kubernetes/prover_pod_unit.yaml
 ```yaml
@@ -35,7 +36,7 @@ metadata:
     app: zkp-prover
     role: leaf-worker
 spec:
-  replicas: 125
+  replicas: 6 # 3 worker pods per Proving Pod * 2 parallel blocks!
   selector:
     matchLabels:
       role: leaf-worker
@@ -56,6 +57,35 @@ spec:
           limits:
             cpu: "64"
             memory: "128Gi" # Corrects memory ratio to 2 GiB/vCPU complying with Autopilot limits!
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lighter-tree-aggregator
+  labels:
+    app: zkp-prover
+    role: tree-node
+spec:
+  replicas: 2 # 1 aggregator pod per Proving Pod * 2 parallel blocks!
+  selector:
+    matchLabels:
+      role: tree-node
+  template:
+    metadata:
+      labels:
+        role: tree-node
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-spot: "true"
+        kubernetes.io/arch: amd64
+      containers:
+      - name: aggregator
+        image: us-docker.pkg.dev/lighter-prover/zkp-prover:multiarch
+        command: ["prover-node", "tree-node"]
+        resources:
+          limits:
+            cpu: "16"
+            memory: "32Gi"
 ```
 
 ---
