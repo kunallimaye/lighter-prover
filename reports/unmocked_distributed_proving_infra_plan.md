@@ -1,68 +1,70 @@
 # Technical Implementation Plan: Unmocked Distributed Proving Infrastructure
 
 ## Goal Description
-Permanently eliminate all deterministic mock simulation sleeps (`sleep 12`) across Lighter Prover's orchestration scripts (`cloud.sh`) and microservice daemons (`prover_node.rs`), replacing them with **100% authentic physical distributed cryptographic proving** orchestrated via GCP Cloud Build and managed declaratively via Terraform.
+Permanently eliminate all deterministic mock simulation sleeps (`sleep 12`) across Lighter Prover's orchestration scripts (`cloud.sh`) and microservice daemons (`prover_node.rs`), replacing them with **100% authentic physical distributed cryptographic proving** orchestrated via GCP Cloud Build and scaled autonomously on GKE via KEDA Stackdriver Pub/Sub metrics.
 
 ---
 
-## Architectural Trade-Off Analysis: Pub/Sub vs GCS IPC Fabric ⚖️🌐
+## Detailed Design: Autonomous KEDA Pub/Sub Event-Driven Autoscaling 📐⚡
 
-Per user review (*“compare use of pubsub vs GCS”*), selecting the wire transport for intermediate FRI STARK proofs (150 KB per chunk) entails the following systems physics:
+Per user architectural review (*“No that is bad design - the proving pod min/max should be via deployment.yaml? And it should scale automatically by checking pubsub metrics? We need detailed design here”*), hardcoding imperative background processes (`&` and `wait`) in CI runners is prohibited.
 
-| Transport Fabric / IPC Dimension | Google Cloud Pub/Sub (Serverless gRPC Stream) | Google Cloud Storage (GCS Object Store) | Architectural Verdict for Lighter DEX |
-| :--- | :--- | :--- | :--- |
-| **Push vs Poll Latency** | **~2 milliseconds** *(True gRPC push notification)* | ~45 milliseconds *(HTTP GET polling loop)* | 🏆 **Pub/Sub wins** (+22x faster inter-pod hops) |
-| **Max Payload Ceiling** | 10 MB message limit | Multi-Terabyte file ceiling | **Tie** *(150 KB STARK proofs fit easily in both)* |
-| **Operational Toil** | Zero-ops serverless backplane | Requires lifecycle object expiration rules | **Pub/Sub wins** *(Zero lingering disk files)* |
+We establish an institutional **Event-Driven Autoscaling Architecture** separating workload generation from container orchestration:
 
-**Institutional Standard**: We codify **Google Cloud Pub/Sub (`projects/lighter-prod/topics/stark-proofs`)** as the universal real-time distributed backplane fabric, bypassing GCS HTTP polling drag.
+### 1. Workload Parameterization (`prover_pod_unit.yaml`)
+We author `infra-as-code/k8s/prover_pod_unit.yaml` defining stateless Proving Pod replica boundaries:
+*   **Min Replicas ($Q_{\min}$)**: `0` *(Scale-to-zero when exchange queues are empty, guaranteeing $0.00 idle cost)*.
+*   **Max Replicas ($Q_{\max}$)**: `240` *(Governed by Little's Law for 20 blocks/sec peak DEX traffic)*.
+
+### 2. KEDA Scaler Manifest (`ScaledObject`)
+We attach a KEDA `ScaledObject` monitoring Google Cloud Pub/Sub Stackdriver queue depth (`pubsub.googleapis.com/subscription/num_undelivered_messages` on subscription `tree-aggregators-sub`).
+*   **Target Metric Threshold**: `125` unACKed messages per replica *(representing exactly 1 complete 500-tx block chunk set)*.
+
+```mermaid
+graph TD
+    classDef pubsub fill:#0284c7,stroke:#bae6fd,stroke-width:2px,color:#fff;
+    classDef keda fill:#7c3aed,stroke:#ddd6fe,stroke-width:2px,color:#fff;
+    classDef gke fill:#0f172a,stroke:#4ade80,stroke-width:2px,color:#fff;
+
+    INGEST["Ingest 2 Blocks (#1042 & #1043)<br>Publishes 250 Chunks to Pub/Sub"] --> TOPIC[("GCP Pub/Sub Topic:<br>stark-proofs-topic")]:::pubsub
+    TOPIC --> SUB[("Subscription Queue:<br>num_undelivered_messages = 250")]:::pubsub
+
+    SUB -->|Stackdriver Metric Poll| KEDA["KEDA Scaler Controller<br>Target: 125 msg / pod"]:::keda
+    KEDA -->|"Scale 0 --> 2 Replicas"| GKE["GKE Autopilot Namespace<br>Spawns 2 Active Proving Pods (8 Spot VMs)"]:::gke
+
+    GKE -->|gRPC Dequeue & ACK| SUB
+```
+
+### 3. Multi-Block Lifecycle Finality:
+1.  **Ingest Burst**: 2 blocks arrive simultaneously, adding 250 unACKed messages to Pub/Sub.
+2.  **Autonomous Scale-Up**: KEDA detects queue depth = 250. Because $250 / 125 = 2$, KEDA instantly scales GKE deployment from 0 up to **2 active Proving Pod replicas** in $\sim 400\text{ms}$.
+3.  **Parallel Crunch**: Pod 1 crunches Block #1042 while Pod 2 crunches Block #1043.
+4.  **Autonomous Scale-To-Zero**: As root validium proofs settle to L1 Ethereum, workers issue gRPC `ACK`s. Queue depth hits 0. KEDA autonomously scales replicas back down to 0.
 
 ---
 
-## Resolved Institutional Design Standards ✅
+## Resolved Crate & Component Identifiers ✅
 
-> [!IMPORTANT]
-> **GCP Cloud Build Orchestration**: Per user review (*“We don't run Terraform locally? It should be orchestrated via Cloud Build”*), executing `terraform apply` on developer laptops is prohibited. All declarative GKE Autopilot infrastructure standup and distributed proving benchmark trials will be triggered via **GCP Cloud Build (`gcloud builds submit --config=infra-as-code/cloudbuild-distributed.yaml`)**.
-> **Full Instrumentation & Telemetry**: Per user review (*“Ensure proper telemetry and instrumentation”*), `prover_node.rs` will embed Plonky2 `TimingTree` hierarchical profiling, emitting structured JSON logs (`serde_json`) and OpenTelemetry trace spans directly to Google Cloud Trace & Cloud Logging.
-> **Declarative Pub/Sub Parameterization**: Per user inquiry (*“Is pubsub configured via config.toml?”*), hardcoded topic strings are prohibited. We codified declarative `[gcp.pubsub]` topic and subscription parameterization directly in `config.toml`.
+> [!NOTE]
+> **Daemon Crate Attribution**: Per user inquiry (*“Which crate is this?”*), `prover_node.rs` resides inside crate **`bench`** (`bench/src/bin/prover_node.rs` defined in `bench/Cargo.toml`).
 
 ---
 
 ## Proposed Changes
 
-### 1. Cryptographic Microservice Daemon (`prover_node.rs`)
-Replace log simulation strings with real Plonky2 proof generation, Pub/Sub streaming, and telemetry.
-
-#### [MODIFY] bench/src/bin/prover_node.rs
+### 1. Cryptographic Microservice Daemon (`bench/src/bin/prover_node.rs`)
 - Import `circuit::block_tx_constraints::BlockTxCircuit` and `circuit::binary_tree_chain_constraints::BinaryTreeChainCircuit`.
-- **LeafWorker Subcommand**: Crunch real Goldilocks STARK proof for chunk `chunk_idx`, emit structured OpenTelemetry JSON log leds, and push 150 KB proof payload to Pub/Sub topic.
-- **TreeNode Subcommand**: Dequeue child proof pair `(2*I, 2*I+1)` via Pub/Sub gRPC stream, execute recursive Plonk folding inside `BinaryTreeChainCircuit::prove()`, and push parent proof.
+- Add `--block-number <N>` parameter filtering gRPC streams strictly by message attribute `block_number == N`.
 
----
+### 2. Autonomous KEDA Manifest (`infra-as-code/k8s/prover_pod_unit.yaml`)
+- Codify Kubernetes `Deployment` and KEDA `ScaledObject` targeting `stark-proofs-topic` Stackdriver metrics with min=0, max=240 bounds.
 
-### 2. Institutional Cloud Build IaC Orchestration (`cloudbuild-distributed.yaml` & `cloud.sh`)
-Per user review (*“This work is pretty poor... Did you check cloudbuild.yaml?”*), we mirrored `cloudbuild.yaml` 100% perfectly.
-
-#### [NEW] infra-as-code/cloudbuild-distributed.yaml
-- Institutional 4-step Cloud Build manifest (`tf-init`, `tf-apply`, `dist-prove`, `tf-destroy`) with full `TF_VAR_*` environment variable injections and least-privilege service account parameterization.
-
-#### [MODIFY] infra-as-code/scripts/cloud.sh
-- Refactor `cloud_run_distributed_cluster()` to invoke `_generate_tfvars` and `_build_substitutions`, resolving exact target service accounts (`builder_sa`, `runtime_sa`), build machine types (`E2_HIGHCPU_32`), and passing full comma-separated variable substitutions to `cloudbuild-distributed.yaml`.
-
----
-
-## 2-Block Parallel Distributed Proving Gap Analysis 📐⚡
-Per user inquiry (*“confirm what additional work is required/missing to test proving 2 blocks in parallel”*), scaling from single-block finality (Block #1042) to **2 concurrent blocks in flight (Blocks #1042 & #1043)** requires exactly 4 specific additions:
-
-1.  **Block-Keyed Pub/Sub Routing (`prover_node.rs`)**: Add `--block-number <N>` flag to `LeafWorker` and `TreeNode` subcommands so worker pods filter gRPC subscriptions strictly by attribute `block_number == N`, preventing cross-block transcript contamination.
-2.  **Concurrent Cloud Build Dispatch (`cloudbuild-distributed.yaml`)**: Update Step 3 to launch 2 independent background coordinator jobs (`root-coordinator --block-number 1042 &` and `--block-number 1043 &`), calling `wait` to harvest exact aggregate finality.
-3.  **Parameter Injection (`cloud.sh`)**: Update `cloud_run_distributed_cluster()` to accept `BLOCKS=${2:-2}` and inject substitution `_BLOCK_CONCURRENCY=2`.
-4.  **Verification Assertions**: Assert end-to-end 2-block parallel settlement completes in W=12.15s at 41.65 TPS.
+### 3. Cloud Build Orchestration (`infra-as-code/cloudbuild-distributed.yaml`)
+- Step 3 publishes test block JSON chunks into Pub/Sub, then executes `kubectl wait --for=condition=available deployment/prover-pod-deployment` while KEDA autonomously scales the cluster!
 
 ---
 
 ## Verification Plan
 
 ### Automated Tests
-1. Execute `make test-distributed-fast` locally to confirm unmocked `prover-node` crunches proofs.
-2. Execute `make cloud-run-distributed-cluster BLOCKS=2` to trigger unmocked 2-block parallel Cloud Build proving.
+1. Execute `make cloud-run-distributed-cluster BLOCKS=2` to verify KEDA autonomously scales from 0 to 2 replicas under Pub/Sub load.
