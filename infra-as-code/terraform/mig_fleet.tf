@@ -17,7 +17,7 @@ resource "google_compute_instance_template" "leaf_prover_template" {
     source_image = "debian-cloud/debian-12"
     auto_delete  = true
     boot         = true
-    disk_type    = "pd-balanced"
+    disk_type    = "hyperdisk-balanced"
     disk_size_gb = 50
   }
 

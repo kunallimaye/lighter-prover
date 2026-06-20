@@ -21,7 +21,7 @@ resource "google_compute_instance" "control_leaf_provers" {
     initialize_params {
       image = "debian-cloud/debian-12"
       size  = 50
-      type  = "pd-balanced"
+      type  = "hyperdisk-balanced"
     }
   }
 
@@ -62,7 +62,7 @@ resource "google_compute_instance" "hypothesis_leaf_provers" {
     initialize_params {
       image = "debian-cloud/debian-12"
       size  = 50
-      type  = "pd-balanced"
+      type  = "hyperdisk-balanced"
     }
   }
 
@@ -103,7 +103,7 @@ resource "google_compute_instance" "shared_tree_nodes" {
     initialize_params {
       image = "debian-cloud/debian-12"
       size  = 30
-      type  = "pd-balanced"
+      type  = "hyperdisk-balanced"
     }
   }
 
