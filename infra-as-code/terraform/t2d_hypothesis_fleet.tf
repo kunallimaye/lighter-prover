@@ -9,7 +9,7 @@ resource "google_compute_instance" "control_leaf_provers" {
   project      = coalesce(var.runtime_project_id, var.build_project_id)
   name         = "lighter-control-leaf-${count.index}"
   machine_type = "c4a-highcpu-64"
-  zone         = "us-east4-b"
+  zone         = "us-east4-a"
 
   scheduling {
     preemptible        = true
@@ -91,7 +91,7 @@ resource "google_compute_instance" "shared_tree_nodes" {
   project      = coalesce(var.runtime_project_id, var.build_project_id)
   name         = "lighter-tree-aggregator-${count.index}"
   machine_type = "c4a-highcpu-16"
-  zone         = "us-east4-b"
+  zone         = "us-east4-a"
 
   scheduling {
     preemptible        = true
