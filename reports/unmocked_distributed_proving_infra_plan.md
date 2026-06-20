@@ -1,9 +1,14 @@
 # Technical Implementation Plan: Unmocked Distributed Proving Infrastructure
 
 ## Goal Description
-Permanently eliminate all deterministic mock simulation sleeps (`sleep 12`) across Lighter Prover's orchestration scripts (`cloud.sh`) and microservice daemons (`prover_node.rs`), replacing them with **100% authentic physical distributed cryptographic proving** orchestrated via GCP Cloud Build and scaled autonomously on GKE via KEDA Stackdriver Pub/Sub metrics.
+Permanently eliminate all deterministic mock simulation sleeps (`sleep 12`) across Lighter Prover's orchestration scripts (`cloud.sh`) and daemons (`prover_node.rs`), replacing them with **100% authentic physical distributed cryptographic proving** orchestrated via GCP Cloud Build and scaled autonomously on **GKE Standard** clusters via KEDA Stackdriver Pub/Sub metrics.
 
 ---
+
+## GKE Standard Transition Mandate: Bypassing Autopilot Sandbox Limits ☸️🔒
+Per user engineering check (*“Confirm this is compatible with GKE Autopilot? If not switch to using standard”*), we audit Google Cloud Kubelet restrictions:
+*   **Autopilot Incompatibility**: GKE Autopilot strictly prohibits custom `kubelet_config` overrides (`cpuManagerPolicy: static` and `cpu_cfs_quota = false`). Furthermore, real-time scheduling (`chrt -f 99`) requires `SYS_NICE` capabilities rejected by Autopilot security boundaries.
+*   **GKE Standard Adoption**: We transition exclusive distributed proving orchestration to **GKE Standard Cluster Node Pools**, acquiring full root authority over static host core pinning, unthrottled CFS bandwidth quotas, and real-time thread scheduling.
 
 ## Detailed Design: Autonomous KEDA Pub/Sub Event-Driven Autoscaling 📐⚡
 
@@ -86,9 +91,9 @@ graph TD
 Per user engineering review (*“Do we require any other config to ensure there is no CPU starvation as ZKP is partial to that”*), cryptographic Goldilocks NTTs are hyper-sensitive to Linux Completely Fair Scheduler (CFS) bandwidth quota throttling.
 
 To guarantee 100% zero CPU starvation and exclusive bare-metal NUMA socket affinity, we codify a three-layer kernel scheduling policy:
-1.  **Guaranteed QoS Class (K8s)**: Enforcing `requests.cpu == limits.cpu` (64 cores) and `requests.memory == limits.memory` (128 GiB) on a node pool configured with Kubelet option `cpuManagerPolicy: static`. Kubelet removes the proving container from the shared CFS cgroup and assigns it 64 dedicated physical core IDs (`cpuset.cpus = 0-63`) with zero quota enforcement!
-2.  **Disabled CFS Quota Throttling (`cpu_cfs_quota = false`)**: Codified in Terraform node pool definitions (`main.tf`), completely disabling Linux 100ms period bandwidth throttling.
-3.  **Linux Real-Time Scheduling (`chrt -f 99`)**: Worker entrypoints run under Linux FIFO real-time priority (`command: ["chrt", "-f", "99", "/app/prover-node"]`), guaranteeing OS interrupts or host background daemons (*fluentbit, kube-proxy*) never preempt active FFT Rayon threads.
+1.  **Guaranteed QoS Class on GKE Standard**: Enforcing `requests.cpu == limits.cpu` (64 cores) and `requests.memory == limits.memory` (128 GiB) on a **GKE Standard Spot Node Pool (`google_container_node_pool`)** configured with Kubelet option `cpu_manager_policy = "static"`. Kubelet removes the container from the shared CFS cgroup and pins it to 64 dedicated physical host core IDs (`cpuset.cpus = 0-63`) with zero cgroup quota bounds!
+2.  **Disabled CFS Quota Throttling (`cpu_cfs_quota = false`)**: Codified in GKE Standard Terraform node pool blocks (`main.tf`), completely disabling Linux 100ms CFS bandwidth quota throttling.
+3.  **Linux Real-Time Scheduling (`chrt -f 99`)**: Worker container entrypoints run under Linux FIFO real-time priority (`command: ["chrt", "-f", "99", "/app/prover-node"]`), guaranteeing host background daemons never preempt active Goldilocks NTT Rayon threads.
 
 ---
 
