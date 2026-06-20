@@ -91,7 +91,7 @@ resource "google_compute_instance" "shared_tree_nodes" {
   project      = coalesce(var.runtime_project_id, var.build_project_id)
   name         = "lighter-tree-aggregator-${count.index}"
   machine_type = "c4a-highcpu-16"
-  zone         = "us-east4-a"
+  zone         = "us-east4-c"
 
   scheduling {
     preemptible        = true
