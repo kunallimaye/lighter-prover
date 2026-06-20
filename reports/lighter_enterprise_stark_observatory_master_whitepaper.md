@@ -124,6 +124,9 @@ graph TD
     BUS <--> Tier 1 <--> Tier 2 <--> ROOT
 ```
 
+> [!WARNING]
+> **Smart Contract Verifier Frontier**: We call out that transitioning from linear recursive chaining (`BlockTxChainCircuit`) down to log-depth binary reduction trees (`BinaryTreeChainCircuit`) modifies the public input layout and verification key structure of the root proof. Before production release on mainnet, this architectural enhancement must be explicitly audited and verified against downstream Solidity verification logic in Lighter's Ethereum L1 settlement smart contract verifier.
+
 ### 4. Deployment Topology
 *   **Serverless Backplane**: Google Cloud Pub/Sub gRPC endpoints (`stark-proofs-topic`). Eliminates standby infrastructure leakage (zero standby resource utilization rate).
 *   **Little's Law Pod Sharding**: At a continuous institutional requirement of 10 to 20 blocks/sec (5,000 to 10,000 TPS), Little's Law (Pods = Throughput * Wall Time) dictates provisioning **120 to 240 Isolated Proving Pods**.
