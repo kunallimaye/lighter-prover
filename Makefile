@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster test-t2d-hypothesis test-gke-tax cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster test-t2d-hypothesis test-gke-tax test-capstone cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -28,6 +28,10 @@ test-t2d-hypothesis: ## Execute 4-pod concurrent multi-block AB race comparing A
 
 test-gke-tax: ## Execute 2-block distributed proving benchmark on GKE Autopilot validating zero eBPF overlay tax
 	@bash infra-as-code/scripts/cloud.sh cloud-test-gke-performance-tax
+
+test-capstone: ## Execute sequential 4-release benchmark trial at JOB=10 on c4a-64 spot instances
+	@bash infra-as-code/scripts/cloud.sh cloud-test-capstone-matrix
+
 
 
 cloud-vm-start: ## Start GCE VM instances (defaults to ALL VMs in config.toml unless VM=<id> is specified)

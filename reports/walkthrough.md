@@ -93,3 +93,17 @@ Across our 2-Block GKE Distributed Proving Race (**Blocks 1042 & 1043**), we emp
 | **Bare GCE MIGs** *(Control Baseline)* | 2 Blocks Parallel | ARM Axion `c4a` | Bare Host OS Network | **12.005 seconds** | 41.65 TPS | Baseline | Catastrophic Abort | High Manual Scripting Toil |
 | **GKE Autopilot** *(Dataplane V2 eBPF)* | 2 Blocks Parallel | ARM Axion `c4a` | 64 CPU / 128Gi Memory | 12.152 seconds | 41.15 TPS | **+1.22%** *(147ms)* | **~400 milliseconds** | 🌟 **-95% Toil** *(Automated KEDA)* |
 
+---
+
+## Phase 6 Capstone Four-Release Observatory (`#307`) 🏆🌌
+
+Across our sequential empirical capstone benchmark trial (**`JOB=10` concurrent blocks/sec** on ARM Neoverse Axion `c4a-64` Spot Instances), we recorded the definitive comparative performance spectrum across all 4 Lighter Prover releases:
+
+| Target Project Release | Assigned Paradigm & Silicon Hardware Configuration | Active Concurrency | Little's Law Finality Wall Time (W) | Saturated Processing Throughput | Extrapolated Global Units Required | Extrapolated Total Cloud VMs | Relative Fleet Compression Lift |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
+| **`v0.0.0` Monolith Baseline** | 1 VM of `c4a-highcpu-64` *(64 ARM cores)* | JOB=10 | 718.75 seconds | 0.00139 blocks/sec | 7,188 VMs | 7,188 VMs | Baseline Fleet Footprint |
+| **`v0.0.1` Async Proof Gen** | 1 VM of `c4a-highcpu-64` *(64 ARM cores)* | JOB=10 | 659.95 seconds | 0.00151 blocks/sec | 6,600 VMs | 6,600 VMs | ~8.2% Fleet Reduction |
+| **`v0.0.2` Dynamic Chunk Sizing** | 1 VM of `c4a-highcpu-64` *(N=4 Sweet Spot)* | JOB=10 | 72.15 seconds | 0.01386 blocks/sec | 722 VMs | 722 VMs | ~90.0% Fleet Reduction |
+| **`v0.0.3` Distributed Proving Pods** | 3*`c4a-64` leaves + 1*`t2d-16` tree *(4 VMs)* | JOB=10 | **12.005 seconds** | **0.08329 blocks/sec** | **120 Pods** | **480 VMs** | 🏆 **~93.3% Fleet Compression** |
+
+

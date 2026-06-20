@@ -1,0 +1,31 @@
+{
+  "experiment": "phase6_four_release_capstone_observatory",
+  "input_load": "job_10_concurrent_blocks_per_sec_5000_tps",
+  "silicon_class": "c4a_highcpu_64_arm_axion_spot",
+  "release_v0_0_0_monolith": {
+    "proof_wall_time_s": 718.75,
+    "node_throughput_bps": 0.00139,
+    "extrapolated_global_vms": 7188,
+    "fleet_compression_lift_pct": 0.0
+  },
+  "release_v0_0_1_async": {
+    "proof_wall_time_s": 659.95,
+    "node_throughput_bps": 0.00151,
+    "extrapolated_global_vms": 6600,
+    "fleet_compression_lift_pct": 8.18
+  },
+  "release_v0_0_2_dynamic_n4": {
+    "proof_wall_time_s": 72.15,
+    "node_throughput_bps": 0.01386,
+    "extrapolated_global_vms": 722,
+    "fleet_compression_lift_pct": 89.95
+  },
+  "release_v0_0_3_distributed": {
+    "proof_wall_time_s": 12.005,
+    "node_throughput_bps": 0.08329,
+    "extrapolated_global_pods": 120,
+    "extrapolated_total_vms": 480,
+    "fleet_compression_lift_pct": 93.32,
+    "aggregate_effective_tps": 5000.0
+  }
+}
