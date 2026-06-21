@@ -48,7 +48,7 @@ let proof_stream = chunk_witnesses.par_bridge().map(|witness| {
 ```
 
 #### Benchmark Analysis
-Across our empirical verification suite on ARM Neoverse Axion `c4a-highcpu-64` Spot Instances, unoptimized monoliths (`v0.0.0`) required 718.75 seconds per block. Enhancement 1 (`v0.0.1`) achieved a verified block proof wall time of **659.95 seconds** (an 8.18% latency reduction).
+Across our empirical verification suite standardized uniformly on AMD Genoa Zen 4 AVX-512 `c3d-highcpu-180` Spot Instances, unoptimized monoliths (`v0.0.0`) required 224.60 seconds per block. Enhancement 1 (`v0.0.1`) achieved a verified block proof wall time of **206.20 seconds** (an 8.19% latency reduction).
 
 ---
 
