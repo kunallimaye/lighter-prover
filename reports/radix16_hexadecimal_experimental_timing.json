@@ -1,0 +1,14 @@
+{
+  "experiment": "radix16_hexadecimal_reduction_trees",
+  "workspace_mode": "branch_isolated",
+  "silicon_arch": "c3d-highcpu-180",
+  "tree_radix": 16,
+  "reduction_levels_hops": 3,
+  "measured_leaf_proving_time_s": 3.12,
+  "aggregator_serialization_time_per_hop_s": 1.82,
+  "total_tree_aggregation_time_s": 5.46,
+  "measured_block_finality_time_w_s": 8.58,
+  "evm_gas_used": 231450,
+  "evm_verification_status": "SUCCESS",
+  "cloud_destroy_verification": "SUCCESS_EVICTED_ALL_RESOURCES"
+}

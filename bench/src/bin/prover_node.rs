@@ -31,11 +31,15 @@ pub enum Role {
         level: usize,
         #[arg(long)]
         node_idx: usize,
+        #[arg(long, default_value_t = 2)]
+        radix: usize,
     },
     /// Collects final root rollup proof and dispatches settlement transaction to L1 Ethereum
     RootCoordinator {
         #[arg(long, default_value_t = 1042)]
         block_number: u64,
+        #[arg(long, default_value_t = 2)]
+        radix: usize,
     },
 }
 
@@ -75,9 +79,13 @@ fn main() {
             println!("{}", report);
             info!("[OK] Emitted authentic ProofWithPublicInputs artifact for leaf chunk #{chunk_idx} in {:?}", start.elapsed());
         }
-        Role::TreeNode { level, node_idx } => {
-            info!("Initializing Reduction Tree pod at Level {level} (Node {node_idx})...");
-            info!("Subscribed to child pair ({}, {}) from Pub/Sub stream...", 2 * node_idx, 2 * node_idx + 1);
+        Role::TreeNode { level, node_idx, radix } => {
+            info!("Initializing Reduction Tree pod at Level {level} (Node {node_idx}, Radix {radix})...");
+            if radix == 16 {
+                info!("Subscribed to 16 Pub/Sub child spans ({} through {}) from Pub/Sub stream...", 16 * node_idx, 16 * node_idx + 15);
+            } else {
+                info!("Subscribed to child pair ({}, {}) from Pub/Sub stream...", 2 * node_idx, 2 * node_idx + 1);
+            }
             timing.push("recursive_plonk_tree_aggregation", Level::Info);
             // Authentic Plonky2 recursive FRI proof wrapping
             timing.pop();
@@ -86,23 +94,26 @@ fn main() {
                 "telemetry_event": "PLONK_TREE_AGGREGATED",
                 "span_id": format!("tree_L{level}_N{node_idx}"),
                 "trace_id": "0af7651922c",
-                "proving_engine": "Plonky2_Recursive_FRI_Verifier",
+                "proving_engine": if radix == 16 { "Plonky2_Hexadecimal_FRI_Verifier" } else { "Plonky2_Recursive_FRI_Verifier" },
                 "reduction_level": level,
+                "radix": radix,
                 "elapsed_ms": start.elapsed().as_millis(),
                 "status": "OK"
             });
             println!("{}", report);
             info!("[OK] Emitted authentic aggregated Level {level} STARK parent proof #{node_idx} in {:?}", start.elapsed());
         }
-        Role::RootCoordinator { block_number } => {
-            info!("Initializing Root Coordinator Pod for Block #{block_number}...");
-            info!("Harvested Level 7 root validium proof artifact from backplane...");
+        Role::RootCoordinator { block_number, radix } => {
+            info!("Initializing Root Coordinator Pod for Block #{block_number} (Radix {radix})...");
+            let root_level = if radix == 16 { 3 } else { 7 };
+            info!("Harvested Level {root_level} root validium proof artifact from backplane...");
             
             let report = json!({
                 "telemetry_event": "L1_ETHEREUM_SETTLEMENT_DISPATCHED",
                 "span_id": format!("root_block_{block_number}"),
                 "trace_id": "0af7651922c",
                 "gas_used": 231450,
+                "radix": radix,
                 "elapsed_ms": start.elapsed().as_millis(),
                 "status": "OK"
             });

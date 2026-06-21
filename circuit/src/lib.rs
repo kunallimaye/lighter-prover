@@ -38,6 +38,7 @@ pub mod block_tx;
 pub mod block_tx_chain;
 pub mod block_tx_chain_constraints;
 pub mod binary_tree_chain_constraints;
+pub mod hexadecimal_tree_chain_constraints;
 pub mod block_tx_constraints;
 pub mod bool_utils;
 pub mod builder;
