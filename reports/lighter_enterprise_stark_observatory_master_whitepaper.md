@@ -127,13 +127,15 @@ To reconcile absolute SLA finality guarantees with aggressive spot cost arbitrag
 1.  **Baseload Saturated Allocation (60% Dedicated CUD)**: Allocates exactly **60% of dedicated proving capacity** (6 blocks/sec @ 3,000 TPS) via **`c3d-highcpu-180` AMD Genoa Proving Pods** locked under 3-Year Committed Use Discounts (CUD). By Little's Law (Pods = load * W where W=19.50s), sustaining baseload traffic requires exactly **117 Dedicated `c3d` Proving Pods**.
 2.  **Elastic Volatility Burst (40%+ Spot Pricing)**: Any further market volume spikes above baseload (the remaining 40%+ capacity up to +4 blocks/sec) are absorbed dynamically via **`t2d-standard-60` AMD Milan Proving Pods utilizing Spot pricing**. By Little's Law (W=26.41s), absorbing peak burst requires exactly **106 Elastic `t2d` Spot Pods** (delivering a global bimodal fleet total of **223 Proving Pods**).
 
-#### Projected Bimodal Proving Infrastructure Matrix (10 Blocks/sec Target Saturation)
+#### Split Bimodal Proving Infrastructure Matrix (Leaf Worker Tier vs. Aggregator Tier Sizing)
 
-| Proving Fleet Tier & Commercial Paradigm | Assigned GCP Machine Shape & Sizing | Assigned Leaf Batch (`CHUNK`) | Allocated Saturated Load | Bounded Finality Time ($W$) | Required Proving Pods | Total Provisioned Leaf Workers | Total Provisioned Tree Aggregators | Projected Total Cloud Cores |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Tier 1 Core Baseload** *(3-Year Dedicated CUD)* | `c3d-highcpu-180` *(Genoa Zen 4 AVX-512)* | `CHUNK = 1` | 6 blocks/sec *(3,000 TPS)* | 19.50s | **117 Pods** | 58,500 workers | 234 aggregators | 21,060 cores |
-| **Tier 2 Volatility Burst** *(Global Spot MIG)* | `t2d-standard-60` *(Milan Zen 3 Spot)* | `CHUNK = 2` | 4 blocks/sec *(2,000 TPS)* | 26.41s | **106 Pods** | 26,500 workers | 212 aggregators | 6,360 cores |
-| **Global Bimodal Total** | **Hybrid `c3d` $+$ `t2d` Fleet** | **Bimodal Mix** | **10 blocks/sec *(5,000 TPS)*** | **<= 26.41s** | **223 Pods** | **85,000 workers** | **446 aggregators** | **27,420 cores** |
+| Proving Fleet Pool & Tier | Assigned K8s Container Config (Limits) | Sized Leaf Batch (`CHUNK`) | Assigned GCP Node Pool Machine Shape | Pod Packing Density per Host | Active Tasks in Flight (Little's Law) | Required Host Nodes | Provisioned Cloud Cores | Commercial Paradigm |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1. Baseload Leaf Worker Pool** | `cpu: "30", mem: "60Gi"` *(Guaranteed)* | `CHUNK = 1` | `c3d-highcpu-180` *(Genoa AVX-512)* | 6 pods / node | 9,360 leaf tasks | **1,560 Nodes** | 280,800 vCPUs | 3-Yr Dedicated CUD ($60\%$) |
+| **2. Baseload Aggregator Pool** | `cpu: "30", mem: "60Gi"` *(Guaranteed)* | Recursive FRI | `c3d-highcpu-180` *(Genoa AVX-512)* | 6 pods / node | 234 agg tasks | **39 Nodes** | 7,020 vCPUs | 3-Yr Dedicated CUD ($60\%$) |
+| **3. Burst Leaf Worker Pool** | `cpu: "15", mem: "30Gi"` *(Guaranteed)* | `CHUNK = 2` | `t2d-standard-60` *(Milan Zen 3)* | 4 pods / node | 4,240 leaf tasks | **1,060 Nodes** | 63,600 vCPUs | Elastic Spot Pricing ($40\%+$) |
+| **4. Burst Aggregator Pool** | `cpu: "15", mem: "30Gi"` *(Guaranteed)* | Recursive FRI | `t2d-standard-60` *(Milan Zen 3)* | 4 pods / node | 212 agg tasks | **53 Nodes** | 3,180 vCPUs | Elastic Spot Pricing ($40\%+$) |
+| **Global Bimodal Total** | **Guaranteed Exclusive Core Pinning** | **Hybrid Mix** | **Dedicated `c3d` $+$ Spot `t2d` Fleet** | **High Density** | **14,046 total tasks** | **2,712 Total Nodes** | **354,600 vCPUs** | **10 blocks/sec Saturated** |
 
 ### B. Horizontal Container Orchestration via Google Kubernetes Engine (GKE)
 While standalone virtual machines or rigid Managed Instance Groups (MIGs) introduce severe day-2 maintenance toil, Lighter standardizes its horizontal scaling architecture on **Google Kubernetes Engine (GKE)**. Using GKE instead of bare VMs or MIGs eliminates operational friction:
