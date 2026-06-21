@@ -1,0 +1,821 @@
+[INFO] Tx and chain circuits are configured to prove 4 txs per proof in each iteration. There are 500 txs in the test block, so there will be 125 iterations of proving.
+
+
+[DEBUG] Degree before blinding & padding: 53350
+[DEBUG] Degree after blinding & padding: 65536
+[DEBUG] Building circuit took 11.195091s
+[INFO] BlockTxCircuit defined!
+[INFO] BlockTxCircuit # public inputs = 13273
+[INFO] BlockTxCircuit # num_gate_constraints = 136
+[DEBUG] Degree before blinding & padding: 8877
+[DEBUG] Degree after blinding & padding: 16384
+[DEBUG] Building circuit took 2.6537266s
+[INFO] BlockPreExecutionCircuit defined!
+[DEBUG] Degree before blinding & padding: 2
+[DEBUG] Degree after blinding & padding: 2
+[DEBUG] Building circuit took 0.006680231s
+[DEBUG] Degree before blinding & padding: 1497
+[DEBUG] Degree after blinding & padding: 2048
+[DEBUG] Building circuit took 0.32243234s
+[DEBUG] Degree before blinding & padding: 8193
+[DEBUG] Degree after blinding & padding: 16384
+[DEBUG] Building circuit took 2.7341964s
+[DEBUG] Degree before blinding & padding: 16384
+[DEBUG] Degree after blinding & padding: 16384
+[DEBUG] Building circuit took 2.7315366s
+[DEBUG] Degree before blinding & padding: 14568
+[DEBUG] Degree after blinding & padding: 16384
+[DEBUG] Building circuit took 2.6466832s
+[INFO] BlockTxChainCircuit defined!
+[INFO] BlockTxChainCircuit # public inputs = 1609
+[DEBUG] Degree before blinding & padding: 16384
+[DEBUG] Degree after blinding & padding: 16384
+[DEBUG] Building circuit took 2.742723s
+[INFO] Dummy Tx Chain Circuit defined!
+[DEBUG] 6.8153s to BlockPreExecutionCircuit::prove
+[DEBUG] | 0.0004s to witness
+[DEBUG] | 0.0936s to run 94267 generators
+[DEBUG] | 0.0058s to compute full witness
+[DEBUG] | 0.0007s to compute wire polynomials
+[DEBUG] | 3.1125s to compute wires commitment
+[DEBUG] | | 0.0477s to IFFT
+[DEBUG] | | 0.3488s to FFT + blinding
+[DEBUG] | | 0.0678s to transpose LDEs
+[DEBUG] | | 2.6478s to build Merkle tree
+[DEBUG] | 0.0898s to compute partial products
+[DEBUG] | 0.5978s to commit to partial products, Z's and, if any, lookup polynomials
+[DEBUG] | | 0.0119s to IFFT
+[DEBUG] | | 0.0347s to FFT + blinding
+[DEBUG] | | 0.0084s to transpose LDEs
+[DEBUG] | | 0.5425s to build Merkle tree
+[DEBUG] | 2.1510s to compute quotient polys
+[DEBUG] | 0.0011s to split up quotient polys
+[DEBUG] | 0.4759s to commit to quotient polys
+[DEBUG] | | 0.0599s to FFT + blinding
+[DEBUG] | | 0.0081s to transpose LDEs
+[DEBUG] | | 0.4076s to build Merkle tree
+[DEBUG] | 0.0560s to construct the opening set, including lookups
+[DEBUG] | 0.1724s to compute opening proofs
+[DEBUG] | | 0.0311s to reduce batch of 258 polynomials
+[DEBUG] | | 0.0001s to reduce batch of 2 polynomials
+[DEBUG] | | 0.0290s to perform final FFT 131072
+[DEBUG] | | 0.0450s to fold codewords in the commitment phase
+[DEBUG] | | 0.0591s to find proof-of-work witness
+[DEBUG] | 0.0053s to verify
+[INFO] tx chunk #0/125 BlockTxCircuit::prove time: 21.949818233s (witness: 19.745765ms, prove: 21.930072468s)
+[DEBUG] 22.2610s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0248s to verify
+[INFO] tx chunk #0/125 BlockTxChainCircuit::prove time: 22.261103044s
+
+[INFO] tx chunk #1/125 BlockTxCircuit::prove time: 23.67383825s (witness: 2.482079ms, prove: 23.671356171s)
+[DEBUG] 23.2475s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #1/125 BlockTxChainCircuit::prove time: 23.247523709s
+
+[INFO] tx chunk #2/125 BlockTxCircuit::prove time: 24.030811732s (witness: 2.491733ms, prove: 24.028319999s)
+[DEBUG] 13.7575s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #2/125 BlockTxChainCircuit::prove time: 13.75747289s
+
+[INFO] tx chunk #3/125 BlockTxCircuit::prove time: 24.06374231s (witness: 2.503924ms, prove: 24.061238386s)
+[DEBUG] 23.2865s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0050s to verify
+[INFO] tx chunk #3/125 BlockTxChainCircuit::prove time: 23.286492247s
+
+[INFO] tx chunk #4/125 BlockTxCircuit::prove time: 23.879375819s (witness: 2.520689ms, prove: 23.87685513s)
+[DEBUG] 22.1816s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0248s to verify
+[INFO] tx chunk #4/125 BlockTxChainCircuit::prove time: 22.181588855s
+
+[INFO] tx chunk #5/125 BlockTxCircuit::prove time: 23.665328159s (witness: 2.521614ms, prove: 23.662806545s)
+[DEBUG] 23.2960s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #5/125 BlockTxChainCircuit::prove time: 23.296004348s
+
+[INFO] tx chunk #6/125 BlockTxCircuit::prove time: 23.980837022s (witness: 10.652659ms, prove: 23.970184363s)
+[DEBUG] 23.4914s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #6/125 BlockTxChainCircuit::prove time: 23.491426065s
+
+[INFO] tx chunk #7/125 BlockTxCircuit::prove time: 24.082799387s (witness: 2.60209ms, prove: 24.080197297s)
+[DEBUG] 23.1167s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0087s to verify
+[INFO] tx chunk #7/125 BlockTxChainCircuit::prove time: 23.116755611s
+
+[INFO] tx chunk #8/125 BlockTxCircuit::prove time: 23.785619564s (witness: 2.591305ms, prove: 23.783028259s)
+[DEBUG] 18.5988s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0089s to verify
+[INFO] tx chunk #8/125 BlockTxChainCircuit::prove time: 18.598805079s
+
+[INFO] tx chunk #9/125 BlockTxCircuit::prove time: 19.209227497s (witness: 2.620553ms, prove: 19.206606944s)
+[DEBUG] 17.6590s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0408s to verify
+[INFO] tx chunk #9/125 BlockTxChainCircuit::prove time: 17.659034139s
+
+[INFO] tx chunk #10/125 BlockTxCircuit::prove time: 19.048088895s (witness: 2.583982ms, prove: 19.045504913s)
+[DEBUG] 18.4884s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #10/125 BlockTxChainCircuit::prove time: 18.488390325s
+
+[INFO] tx chunk #11/125 BlockTxCircuit::prove time: 19.048493246s (witness: 2.555211ms, prove: 19.045938035s)
+[DEBUG] 18.5815s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0248s to verify
+[INFO] tx chunk #11/125 BlockTxChainCircuit::prove time: 18.581545566s
+
+[INFO] tx chunk #12/125 BlockTxCircuit::prove time: 18.933078356s (witness: 2.568992ms, prove: 18.930509364s)
+[DEBUG] 18.4577s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #12/125 BlockTxChainCircuit::prove time: 18.457711843s
+
+[INFO] tx chunk #13/125 BlockTxCircuit::prove time: 19.140168903s (witness: 2.525912ms, prove: 19.137642991s)
+[DEBUG] 18.3760s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #13/125 BlockTxChainCircuit::prove time: 18.375994999s
+
+[INFO] tx chunk #14/125 BlockTxCircuit::prove time: 18.985573658s (witness: 2.603216ms, prove: 18.982970442s)
+[DEBUG] 17.5051s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #14/125 BlockTxChainCircuit::prove time: 17.50515418s
+
+[INFO] tx chunk #15/125 BlockTxCircuit::prove time: 18.796516371s (witness: 2.616541ms, prove: 18.79389983s)
+[DEBUG] 18.1554s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #15/125 BlockTxChainCircuit::prove time: 18.155456261s
+
+[INFO] tx chunk #16/125 BlockTxCircuit::prove time: 19.881524108s (witness: 2.559842ms, prove: 19.878964266s)
+[DEBUG] 18.4899s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0088s to verify
+[INFO] tx chunk #16/125 BlockTxChainCircuit::prove time: 18.489944602s
+
+[INFO] tx chunk #17/125 BlockTxCircuit::prove time: 19.087219411s (witness: 2.533928ms, prove: 19.084685483s)
+[DEBUG] 17.7585s to BlockTxChainCircuit
+[DEBUG] | 0.0031s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #17/125 BlockTxChainCircuit::prove time: 17.758533465s
+
+[INFO] tx chunk #18/125 BlockTxCircuit::prove time: 19.176328278s (witness: 2.505411ms, prove: 19.173822867s)
+[DEBUG] 18.6389s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #18/125 BlockTxChainCircuit::prove time: 18.638943877s
+
+[INFO] tx chunk #19/125 BlockTxCircuit::prove time: 19.078908704s (witness: 2.584748ms, prove: 19.076323956s)
+[DEBUG] 18.2523s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0109s to verify
+[INFO] tx chunk #19/125 BlockTxChainCircuit::prove time: 18.252334158s
+
+[INFO] tx chunk #20/125 BlockTxCircuit::prove time: 18.818148372s (witness: 2.611907ms, prove: 18.815536465s)
+[DEBUG] 18.2164s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #20/125 BlockTxChainCircuit::prove time: 18.216458407s
+
+[INFO] tx chunk #21/125 BlockTxCircuit::prove time: 18.782708174s (witness: 2.529734ms, prove: 18.78017844s)
+[DEBUG] 18.5953s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #21/125 BlockTxChainCircuit::prove time: 18.595342591s
+
+[INFO] tx chunk #22/125 BlockTxCircuit::prove time: 19.223987954s (witness: 2.559248ms, prove: 19.221428706s)
+[DEBUG] 18.8881s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #22/125 BlockTxChainCircuit::prove time: 18.888126138s
+
+[INFO] tx chunk #23/125 BlockTxCircuit::prove time: 19.111500071s (witness: 2.598448ms, prove: 19.108901623s)
+[DEBUG] 18.4015s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0131s to verify
+[INFO] tx chunk #23/125 BlockTxChainCircuit::prove time: 18.401557601s
+
+[INFO] tx chunk #24/125 BlockTxCircuit::prove time: 18.982101527s (witness: 2.567115ms, prove: 18.979534412s)
+[DEBUG] 18.6018s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #24/125 BlockTxChainCircuit::prove time: 18.601810341s
+
+[INFO] tx chunk #25/125 BlockTxCircuit::prove time: 19.023765073s (witness: 2.490505ms, prove: 19.021274568s)
+[DEBUG] 17.1935s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #25/125 BlockTxChainCircuit::prove time: 17.193500132s
+
+[INFO] tx chunk #26/125 BlockTxCircuit::prove time: 19.005278427s (witness: 2.52268ms, prove: 19.002755747s)
+[DEBUG] 17.3287s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #26/125 BlockTxChainCircuit::prove time: 17.328719278s
+
+[INFO] tx chunk #27/125 BlockTxCircuit::prove time: 19.046209827s (witness: 2.522508ms, prove: 19.043687319s)
+[DEBUG] 18.1717s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0310s to verify
+[INFO] tx chunk #27/125 BlockTxChainCircuit::prove time: 18.171734503s
+
+[INFO] tx chunk #28/125 BlockTxCircuit::prove time: 18.938877086s (witness: 2.60739ms, prove: 18.936269696s)
+[DEBUG] 18.5959s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #28/125 BlockTxChainCircuit::prove time: 18.595952729s
+
+[INFO] tx chunk #29/125 BlockTxCircuit::prove time: 19.033108659s (witness: 2.562575ms, prove: 19.030546084s)
+[DEBUG] 18.1041s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #29/125 BlockTxChainCircuit::prove time: 18.104155906s
+
+[INFO] tx chunk #30/125 BlockTxCircuit::prove time: 18.619448814s (witness: 2.440145ms, prove: 18.617008669s)
+[DEBUG] 11.0638s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #30/125 BlockTxChainCircuit::prove time: 11.063854295s
+
+[INFO] tx chunk #31/125 BlockTxCircuit::prove time: 19.177221509s (witness: 2.492691ms, prove: 19.174728818s)
+[DEBUG] 18.6718s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0252s to verify
+[INFO] tx chunk #31/125 BlockTxChainCircuit::prove time: 18.671837309s
+
+[INFO] tx chunk #32/125 BlockTxCircuit::prove time: 19.241140648s (witness: 2.568798ms, prove: 19.23857185s)
+[DEBUG] 18.7141s to BlockTxChainCircuit
+[DEBUG] | 0.0029s to witness
+[DEBUG] | 0.0189s to verify
+[INFO] tx chunk #32/125 BlockTxChainCircuit::prove time: 18.714096459s
+
+[INFO] tx chunk #33/125 BlockTxCircuit::prove time: 18.989607396s (witness: 2.526044ms, prove: 18.987081352s)
+[DEBUG] 17.5349s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #33/125 BlockTxChainCircuit::prove time: 17.534905472s
+
+[INFO] tx chunk #34/125 BlockTxCircuit::prove time: 19.056556213s (witness: 2.57993ms, prove: 19.053976283s)
+[DEBUG] 18.8488s to BlockTxChainCircuit
+[DEBUG] | 0.0029s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #34/125 BlockTxChainCircuit::prove time: 18.848762407s
+
+[INFO] tx chunk #35/125 BlockTxCircuit::prove time: 18.966779507s (witness: 2.435146ms, prove: 18.964344361s)
+[DEBUG] 18.8980s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #35/125 BlockTxChainCircuit::prove time: 18.898042867s
+
+[INFO] tx chunk #36/125 BlockTxCircuit::prove time: 19.175120091s (witness: 2.564399ms, prove: 19.172555692s)
+[DEBUG] 18.5858s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #36/125 BlockTxChainCircuit::prove time: 18.585819621s
+
+[INFO] tx chunk #37/125 BlockTxCircuit::prove time: 19.067433377s (witness: 2.653028ms, prove: 19.064780349s)
+[DEBUG] 18.8766s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #37/125 BlockTxChainCircuit::prove time: 18.876627294s
+
+[INFO] tx chunk #38/125 BlockTxCircuit::prove time: 19.33638108s (witness: 2.60215ms, prove: 19.33377893s)
+[DEBUG] 18.5184s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #38/125 BlockTxChainCircuit::prove time: 18.518450791s
+
+[INFO] tx chunk #39/125 BlockTxCircuit::prove time: 19.028253743s (witness: 2.520699ms, prove: 19.025733044s)
+[DEBUG] 17.2121s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0689s to verify
+[INFO] tx chunk #39/125 BlockTxChainCircuit::prove time: 17.212116123s
+
+[INFO] tx chunk #40/125 BlockTxCircuit::prove time: 18.896999479s (witness: 2.487453ms, prove: 18.894512026s)
+[DEBUG] 17.6068s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0288s to verify
+[INFO] tx chunk #40/125 BlockTxChainCircuit::prove time: 17.606857705s
+
+[INFO] tx chunk #41/125 BlockTxCircuit::prove time: 19.139280733s (witness: 2.622651ms, prove: 19.136658082s)
+[DEBUG] 9.5230s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #41/125 BlockTxChainCircuit::prove time: 9.52302758s
+
+[INFO] tx chunk #42/125 BlockTxCircuit::prove time: 19.001227892s (witness: 2.53118ms, prove: 18.998696712s)
+[DEBUG] 18.1924s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #42/125 BlockTxChainCircuit::prove time: 18.192433011s
+
+[INFO] tx chunk #43/125 BlockTxCircuit::prove time: 18.810707819s (witness: 2.488927ms, prove: 18.808218892s)
+[DEBUG] 18.4431s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0093s to verify
+[INFO] tx chunk #43/125 BlockTxChainCircuit::prove time: 18.443146057s
+
+[INFO] tx chunk #44/125 BlockTxCircuit::prove time: 19.065244518s (witness: 2.439695ms, prove: 19.062804823s)
+[DEBUG] 17.5973s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0208s to verify
+[INFO] tx chunk #44/125 BlockTxChainCircuit::prove time: 17.597306317s
+
+[INFO] tx chunk #45/125 BlockTxCircuit::prove time: 18.962589535s (witness: 2.523517ms, prove: 18.960066018s)
+[DEBUG] 17.4310s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #45/125 BlockTxChainCircuit::prove time: 17.431036847s
+
+[INFO] tx chunk #46/125 BlockTxCircuit::prove time: 19.227063704s (witness: 2.498145ms, prove: 19.224565559s)
+[DEBUG] 18.7071s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #46/125 BlockTxChainCircuit::prove time: 18.707080165s
+
+[INFO] tx chunk #47/125 BlockTxCircuit::prove time: 19.215948393s (witness: 2.51471ms, prove: 19.213433683s)
+[DEBUG] 17.4227s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #47/125 BlockTxChainCircuit::prove time: 17.422663583s
+
+[INFO] tx chunk #48/125 BlockTxCircuit::prove time: 18.954405087s (witness: 2.485751ms, prove: 18.951919336s)
+[DEBUG] 17.3849s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #48/125 BlockTxChainCircuit::prove time: 17.384923366s
+
+[INFO] tx chunk #49/125 BlockTxCircuit::prove time: 18.937791865s (witness: 2.49502ms, prove: 18.935296845s)
+[DEBUG] 17.2693s to BlockTxChainCircuit
+[DEBUG] | 0.0029s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #49/125 BlockTxChainCircuit::prove time: 17.269262173s
+
+[INFO] tx chunk #50/125 BlockTxCircuit::prove time: 18.824838705s (witness: 2.534774ms, prove: 18.822303931s)
+[DEBUG] 18.3252s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #50/125 BlockTxChainCircuit::prove time: 18.325224025s
+
+[INFO] tx chunk #51/125 BlockTxCircuit::prove time: 18.941429506s (witness: 2.679652ms, prove: 18.938749854s)
+[DEBUG] 17.3826s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0168s to verify
+[INFO] tx chunk #51/125 BlockTxChainCircuit::prove time: 17.382605841s
+
+[INFO] tx chunk #52/125 BlockTxCircuit::prove time: 18.884376029s (witness: 2.58827ms, prove: 18.881787759s)
+[DEBUG] 17.3923s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0368s to verify
+[INFO] tx chunk #52/125 BlockTxChainCircuit::prove time: 17.392315457s
+
+[INFO] tx chunk #53/125 BlockTxCircuit::prove time: 19.239240078s (witness: 2.671503ms, prove: 19.236568575s)
+[DEBUG] 18.2093s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #53/125 BlockTxChainCircuit::prove time: 18.209311273s
+
+[INFO] tx chunk #54/125 BlockTxCircuit::prove time: 18.689373307s (witness: 2.601897ms, prove: 18.68677141s)
+[DEBUG] 17.5731s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #54/125 BlockTxChainCircuit::prove time: 17.573099883s
+
+[INFO] tx chunk #55/125 BlockTxCircuit::prove time: 19.375276498s (witness: 2.556873ms, prove: 19.372719625s)
+[DEBUG] 18.6940s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #55/125 BlockTxChainCircuit::prove time: 18.693968835s
+
+[INFO] tx chunk #56/125 BlockTxCircuit::prove time: 19.30504654s (witness: 2.507871ms, prove: 19.302538669s)
+[DEBUG] 17.2924s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #56/125 BlockTxChainCircuit::prove time: 17.292410105s
+
+[INFO] tx chunk #57/125 BlockTxCircuit::prove time: 18.80181225s (witness: 2.543479ms, prove: 18.799268771s)
+[DEBUG] 17.4031s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #57/125 BlockTxChainCircuit::prove time: 17.403104677s
+
+[INFO] tx chunk #58/125 BlockTxCircuit::prove time: 18.625676012s (witness: 2.526319ms, prove: 18.623149693s)
+[DEBUG] 17.6016s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0368s to verify
+[INFO] tx chunk #58/125 BlockTxChainCircuit::prove time: 17.601640531s
+
+[INFO] tx chunk #59/125 BlockTxCircuit::prove time: 18.987541308s (witness: 2.433582ms, prove: 18.985107726s)
+[DEBUG] 18.8016s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0248s to verify
+[INFO] tx chunk #59/125 BlockTxChainCircuit::prove time: 18.801611217s
+
+[INFO] tx chunk #60/125 BlockTxCircuit::prove time: 19.310531757s (witness: 2.582891ms, prove: 19.307948866s)
+[DEBUG] 17.6761s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #60/125 BlockTxChainCircuit::prove time: 17.676080128s
+
+[INFO] tx chunk #61/125 BlockTxCircuit::prove time: 18.891646194s (witness: 2.590693ms, prove: 18.889055501s)
+[DEBUG] 18.2660s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0339s to verify
+[INFO] tx chunk #61/125 BlockTxChainCircuit::prove time: 18.266016132s
+
+[INFO] tx chunk #62/125 BlockTxCircuit::prove time: 18.832073342s (witness: 2.58024ms, prove: 18.829493102s)
+[DEBUG] 18.7046s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #62/125 BlockTxChainCircuit::prove time: 18.704597743s
+
+[INFO] tx chunk #63/125 BlockTxCircuit::prove time: 19.207875324s (witness: 2.701197ms, prove: 19.205174127s)
+[DEBUG] 18.6092s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #63/125 BlockTxChainCircuit::prove time: 18.609197768s
+
+[INFO] tx chunk #64/125 BlockTxCircuit::prove time: 19.112252213s (witness: 2.659603ms, prove: 19.10959261s)
+[DEBUG] 17.5488s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #64/125 BlockTxChainCircuit::prove time: 17.548769325s
+
+[INFO] tx chunk #65/125 BlockTxCircuit::prove time: 19.048664276s (witness: 2.542099ms, prove: 19.046122177s)
+[DEBUG] 18.6869s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0050s to verify
+[INFO] tx chunk #65/125 BlockTxChainCircuit::prove time: 18.68692482s
+
+[INFO] tx chunk #66/125 BlockTxCircuit::prove time: 18.914825368s (witness: 2.571991ms, prove: 18.912253377s)
+[DEBUG] 17.6853s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #66/125 BlockTxChainCircuit::prove time: 17.685268859s
+
+[INFO] tx chunk #67/125 BlockTxCircuit::prove time: 19.022011526s (witness: 2.522087ms, prove: 19.019489439s)
+[DEBUG] 17.8434s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #67/125 BlockTxChainCircuit::prove time: 17.843390814s
+
+[INFO] tx chunk #68/125 BlockTxCircuit::prove time: 19.126233873s (witness: 2.603491ms, prove: 19.123630382s)
+[DEBUG] 18.6082s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #68/125 BlockTxChainCircuit::prove time: 18.608243413s
+
+[INFO] tx chunk #69/125 BlockTxCircuit::prove time: 18.981689511s (witness: 2.619977ms, prove: 18.979069534s)
+[DEBUG] 18.5971s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #69/125 BlockTxChainCircuit::prove time: 18.597087568s
+
+[INFO] tx chunk #70/125 BlockTxCircuit::prove time: 19.10982863s (witness: 2.651792ms, prove: 19.107176838s)
+[DEBUG] 18.6949s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0089s to verify
+[INFO] tx chunk #70/125 BlockTxChainCircuit::prove time: 18.694931855s
+
+[INFO] tx chunk #71/125 BlockTxCircuit::prove time: 19.325359895s (witness: 2.613803ms, prove: 19.322746092s)
+[DEBUG] 18.6920s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0135s to verify
+[INFO] tx chunk #71/125 BlockTxChainCircuit::prove time: 18.692034304s
+
+[INFO] tx chunk #72/125 BlockTxCircuit::prove time: 19.328075502s (witness: 2.584742ms, prove: 19.32549076s)
+[DEBUG] 18.3993s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #72/125 BlockTxChainCircuit::prove time: 18.399261859s
+
+[INFO] tx chunk #73/125 BlockTxCircuit::prove time: 18.925307043s (witness: 2.504964ms, prove: 18.922802079s)
+[DEBUG] 9.5734s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #73/125 BlockTxChainCircuit::prove time: 9.573445887s
+
+[INFO] tx chunk #74/125 BlockTxCircuit::prove time: 18.985018113s (witness: 2.490774ms, prove: 18.982527339s)
+[DEBUG] 11.1039s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #74/125 BlockTxChainCircuit::prove time: 11.103923645s
+
+[INFO] tx chunk #75/125 BlockTxCircuit::prove time: 19.037174009s (witness: 2.770388ms, prove: 19.034403621s)
+[DEBUG] 18.4907s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #75/125 BlockTxChainCircuit::prove time: 18.490743772s
+
+[INFO] tx chunk #76/125 BlockTxCircuit::prove time: 18.936188259s (witness: 2.516498ms, prove: 18.933671761s)
+[DEBUG] 17.8647s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0368s to verify
+[INFO] tx chunk #76/125 BlockTxChainCircuit::prove time: 17.86474566s
+
+[INFO] tx chunk #77/125 BlockTxCircuit::prove time: 19.123565047s (witness: 2.456719ms, prove: 19.121108328s)
+[DEBUG] 17.3508s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #77/125 BlockTxChainCircuit::prove time: 17.35078136s
+
+[INFO] tx chunk #78/125 BlockTxCircuit::prove time: 19.066468218s (witness: 2.56774ms, prove: 19.063900478s)
+[DEBUG] 17.7378s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0288s to verify
+[INFO] tx chunk #78/125 BlockTxChainCircuit::prove time: 17.737825562s
+
+[INFO] tx chunk #79/125 BlockTxCircuit::prove time: 19.1440209s (witness: 6.537232ms, prove: 19.137483668s)
+[DEBUG] 18.5696s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #79/125 BlockTxChainCircuit::prove time: 18.569613015s
+
+[INFO] tx chunk #80/125 BlockTxCircuit::prove time: 19.02313457s (witness: 2.584747ms, prove: 19.020549823s)
+[DEBUG] 17.5272s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0249s to verify
+[INFO] tx chunk #80/125 BlockTxChainCircuit::prove time: 17.527247513s
+
+[INFO] tx chunk #81/125 BlockTxCircuit::prove time: 18.965679556s (witness: 2.530324ms, prove: 18.963149232s)
+[DEBUG] 18.4736s to BlockTxChainCircuit
+[DEBUG] | 0.0029s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #81/125 BlockTxChainCircuit::prove time: 18.473659086s
+
+[INFO] tx chunk #82/125 BlockTxCircuit::prove time: 18.924439798s (witness: 2.5472ms, prove: 18.921892598s)
+[DEBUG] 18.7558s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0248s to verify
+[INFO] tx chunk #82/125 BlockTxChainCircuit::prove time: 18.755774703s
+
+[INFO] tx chunk #83/125 BlockTxCircuit::prove time: 19.14158702s (witness: 2.521071ms, prove: 19.139065949s)
+[DEBUG] 18.4791s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0136s to verify
+[INFO] tx chunk #83/125 BlockTxChainCircuit::prove time: 18.479151784s
+
+[INFO] tx chunk #84/125 BlockTxCircuit::prove time: 19.167619109s (witness: 2.60899ms, prove: 19.165010119s)
+[DEBUG] 17.2205s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #84/125 BlockTxChainCircuit::prove time: 17.22047512s
+
+[INFO] tx chunk #85/125 BlockTxCircuit::prove time: 18.968491721s (witness: 2.485449ms, prove: 18.966006272s)
+[DEBUG] 18.5843s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #85/125 BlockTxChainCircuit::prove time: 18.584344918s
+
+[INFO] tx chunk #86/125 BlockTxCircuit::prove time: 19.066500547s (witness: 2.443804ms, prove: 19.064056743s)
+[DEBUG] 10.8307s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #86/125 BlockTxChainCircuit::prove time: 10.830738361s
+
+[INFO] tx chunk #87/125 BlockTxCircuit::prove time: 18.706875774s (witness: 2.473979ms, prove: 18.704401795s)
+[DEBUG] 11.1934s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0167s to verify
+[INFO] tx chunk #87/125 BlockTxChainCircuit::prove time: 11.193398171s
+
+[INFO] tx chunk #88/125 BlockTxCircuit::prove time: 19.033062113s (witness: 2.503433ms, prove: 19.03055868s)
+[DEBUG] 18.3540s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #88/125 BlockTxChainCircuit::prove time: 18.354058814s
+
+[INFO] tx chunk #89/125 BlockTxCircuit::prove time: 18.806683833s (witness: 2.475205ms, prove: 18.804208628s)
+[DEBUG] 18.4909s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #89/125 BlockTxChainCircuit::prove time: 18.490941636s
+
+[INFO] tx chunk #90/125 BlockTxCircuit::prove time: 19.012523291s (witness: 2.521752ms, prove: 19.010001539s)
+[DEBUG] 18.3392s to BlockTxChainCircuit
+[DEBUG] | 0.0026s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #90/125 BlockTxChainCircuit::prove time: 18.339250554s
+
+[INFO] tx chunk #91/125 BlockTxCircuit::prove time: 19.019219299s (witness: 2.492873ms, prove: 19.016726426s)
+[DEBUG] 17.5745s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #91/125 BlockTxChainCircuit::prove time: 17.574528347s
+
+[INFO] tx chunk #92/125 BlockTxCircuit::prove time: 19.021091676s (witness: 2.544107ms, prove: 19.018547569s)
+[DEBUG] 11.0868s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #92/125 BlockTxChainCircuit::prove time: 11.086845167s
+
+[INFO] tx chunk #93/125 BlockTxCircuit::prove time: 19.259125057s (witness: 2.638996ms, prove: 19.256486061s)
+[DEBUG] 18.4355s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0127s to verify
+[INFO] tx chunk #93/125 BlockTxChainCircuit::prove time: 18.435526411s
+
+[INFO] tx chunk #94/125 BlockTxCircuit::prove time: 18.98692203s (witness: 2.564027ms, prove: 18.984358003s)
+[DEBUG] 17.1038s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #94/125 BlockTxChainCircuit::prove time: 17.103859863s
+
+[INFO] tx chunk #95/125 BlockTxCircuit::prove time: 18.986542154s (witness: 2.626497ms, prove: 18.983915657s)
+[DEBUG] 17.0742s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #95/125 BlockTxChainCircuit::prove time: 17.074200383s
+
+[INFO] tx chunk #96/125 BlockTxCircuit::prove time: 19.005918753s (witness: 2.522643ms, prove: 19.00339611s)
+[DEBUG] 17.2109s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #96/125 BlockTxChainCircuit::prove time: 17.210942213s
+
+[INFO] tx chunk #97/125 BlockTxCircuit::prove time: 18.995151352s (witness: 2.522398ms, prove: 18.992628954s)
+[DEBUG] 18.6111s to BlockTxChainCircuit
+[DEBUG] | 0.0029s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #97/125 BlockTxChainCircuit::prove time: 18.611128888s
+
+[INFO] tx chunk #98/125 BlockTxCircuit::prove time: 19.11305421s (witness: 2.499665ms, prove: 19.110554545s)
+[DEBUG] 17.2163s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #98/125 BlockTxChainCircuit::prove time: 17.216278203s
+
+[INFO] tx chunk #99/125 BlockTxCircuit::prove time: 18.89180415s (witness: 2.576023ms, prove: 18.889228127s)
+[DEBUG] 18.6379s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0167s to verify
+[INFO] tx chunk #99/125 BlockTxChainCircuit::prove time: 18.637954843s
+
+[INFO] tx chunk #100/125 BlockTxCircuit::prove time: 18.92133809s (witness: 2.472954ms, prove: 18.918865136s)
+[DEBUG] 18.2568s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0409s to verify
+[INFO] tx chunk #100/125 BlockTxChainCircuit::prove time: 18.25676312s
+
+[INFO] tx chunk #101/125 BlockTxCircuit::prove time: 19.133233082s (witness: 2.63397ms, prove: 19.130599112s)
+[DEBUG] 18.7444s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0088s to verify
+[INFO] tx chunk #101/125 BlockTxChainCircuit::prove time: 18.744450797s
+
+[INFO] tx chunk #102/125 BlockTxCircuit::prove time: 19.197352071s (witness: 2.565732ms, prove: 19.194786339s)
+[DEBUG] 18.6631s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #102/125 BlockTxChainCircuit::prove time: 18.663110148s
+
+[INFO] tx chunk #103/125 BlockTxCircuit::prove time: 18.981826088s (witness: 2.648526ms, prove: 18.979177562s)
+[DEBUG] 18.4763s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #103/125 BlockTxChainCircuit::prove time: 18.476294305s
+
+[INFO] tx chunk #104/125 BlockTxCircuit::prove time: 19.180242649s (witness: 2.571183ms, prove: 19.177671466s)
+[DEBUG] 17.9823s to BlockTxChainCircuit
+[DEBUG] | 0.0029s to witness
+[DEBUG] | 0.0074s to verify
+[INFO] tx chunk #104/125 BlockTxChainCircuit::prove time: 17.982298948s
+
+[INFO] tx chunk #105/125 BlockTxCircuit::prove time: 18.666286302s (witness: 2.570351ms, prove: 18.663715951s)
+[DEBUG] 18.9305s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0108s to verify
+[INFO] tx chunk #105/125 BlockTxChainCircuit::prove time: 18.930472596s
+
+[INFO] tx chunk #106/125 BlockTxCircuit::prove time: 19.168917537s (witness: 2.515895ms, prove: 19.166401642s)
+[DEBUG] 10.7542s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #106/125 BlockTxChainCircuit::prove time: 10.75421881s
+
+[INFO] tx chunk #107/125 BlockTxCircuit::prove time: 19.069604325s (witness: 2.648447ms, prove: 19.066955878s)
+[DEBUG] 17.4623s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #107/125 BlockTxChainCircuit::prove time: 17.46231103s
+
+[INFO] tx chunk #108/125 BlockTxCircuit::prove time: 19.118605808s (witness: 2.660071ms, prove: 19.115945737s)
+[DEBUG] 18.3437s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #108/125 BlockTxChainCircuit::prove time: 18.343685345s
+
+[INFO] tx chunk #109/125 BlockTxCircuit::prove time: 19.181774678s (witness: 2.578852ms, prove: 19.179195826s)
+[DEBUG] 18.6623s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #109/125 BlockTxChainCircuit::prove time: 18.662265991s
+
+[INFO] tx chunk #110/125 BlockTxCircuit::prove time: 18.925053301s (witness: 2.513107ms, prove: 18.922540194s)
+[DEBUG] 18.4861s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #110/125 BlockTxChainCircuit::prove time: 18.486149684s
+
+[INFO] tx chunk #111/125 BlockTxCircuit::prove time: 19.062343597s (witness: 2.516616ms, prove: 19.059826981s)
+[DEBUG] 18.2974s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0128s to verify
+[INFO] tx chunk #111/125 BlockTxChainCircuit::prove time: 18.297408732s
+
+[INFO] tx chunk #112/125 BlockTxCircuit::prove time: 18.86724009s (witness: 2.530563ms, prove: 18.864709527s)
+[DEBUG] 17.4541s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0289s to verify
+[INFO] tx chunk #112/125 BlockTxChainCircuit::prove time: 17.454119765s
+
+[INFO] tx chunk #113/125 BlockTxCircuit::prove time: 19.24468834s (witness: 2.56641ms, prove: 19.24212193s)
+[DEBUG] 17.3386s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #113/125 BlockTxChainCircuit::prove time: 17.338623274s
+
+[INFO] tx chunk #114/125 BlockTxCircuit::prove time: 18.973414498s (witness: 2.508903ms, prove: 18.970905595s)
+[DEBUG] 18.5004s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #114/125 BlockTxChainCircuit::prove time: 18.500452804s
+
+[INFO] tx chunk #115/125 BlockTxCircuit::prove time: 18.941733354s (witness: 2.613636ms, prove: 18.939119718s)
+[DEBUG] 17.6052s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0368s to verify
+[INFO] tx chunk #115/125 BlockTxChainCircuit::prove time: 17.605205985s
+
+[INFO] tx chunk #116/125 BlockTxCircuit::prove time: 19.241497477s (witness: 2.590172ms, prove: 19.238907305s)
+[DEBUG] 17.1291s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0088s to verify
+[INFO] tx chunk #116/125 BlockTxChainCircuit::prove time: 17.129124588s
+
+[INFO] tx chunk #117/125 BlockTxCircuit::prove time: 18.791049777s (witness: 2.510319ms, prove: 18.788539458s)
+[DEBUG] 18.5484s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #117/125 BlockTxChainCircuit::prove time: 18.548447058s
+
+[INFO] tx chunk #118/125 BlockTxCircuit::prove time: 19.08882444s (witness: 2.62301ms, prove: 19.08620143s)
+[DEBUG] 18.4903s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #118/125 BlockTxChainCircuit::prove time: 18.490278453s
+
+[INFO] tx chunk #119/125 BlockTxCircuit::prove time: 19.109705079s (witness: 2.535611ms, prove: 19.107169468s)
+[DEBUG] 18.4651s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #119/125 BlockTxChainCircuit::prove time: 18.465075219s
+
+[INFO] tx chunk #120/125 BlockTxCircuit::prove time: 19.082837323s (witness: 2.502105ms, prove: 19.080335218s)
+[DEBUG] 17.4486s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0141s to verify
+[INFO] tx chunk #120/125 BlockTxChainCircuit::prove time: 17.448568139s
+
+[INFO] tx chunk #121/125 BlockTxCircuit::prove time: 19.222626284s (witness: 2.567347ms, prove: 19.220058937s)
+[DEBUG] 18.3509s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #121/125 BlockTxChainCircuit::prove time: 18.350954488s
+
+[INFO] tx chunk #122/125 BlockTxCircuit::prove time: 18.96035713s (witness: 2.514405ms, prove: 18.957842725s)
+[DEBUG] 18.7629s to BlockTxChainCircuit
+[DEBUG] | 0.0028s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #122/125 BlockTxChainCircuit::prove time: 18.76295967s
+
+[INFO] tx chunk #123/125 BlockTxCircuit::prove time: 18.95243728s (witness: 2.540759ms, prove: 18.949896521s)
+[DEBUG] 10.4831s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0048s to verify
+[INFO] tx chunk #123/125 BlockTxChainCircuit::prove time: 10.483074821s
+
+[INFO] tx chunk #124/125 BlockTxCircuit::prove time: 11.319148736s (witness: 2.479727ms, prove: 11.316669009s)
+[DEBUG] 1.5614s to BlockTxChainCircuit
+[DEBUG] | 0.0027s to witness
+[DEBUG] | 0.0047s to verify
+[INFO] tx chunk #124/125 BlockTxChainCircuit::prove time: 1.561413155s
+
+[INFO] TOTAL BlockPreExecutionCircuit::prove time: 6.815413505s
+
+[INFO] TOTAL BlockTxCircuit::prove time:   2413.933167058s
+[INFO] AVERAGE BlockTxCircuit::prove time: 19.311465336s
+
+[INFO] TOTAL BlockTxChainCircuit::prove time: 2211.976029567s
+[INFO] AVERAGE BlockTxChainCircuit::prove time: 17.695808236s

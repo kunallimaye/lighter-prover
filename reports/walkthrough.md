@@ -148,16 +148,18 @@ Per user optimization review (*“Leaf worker STARK proof gen is the most signif
 
 ---
 
-## Empirical Capstone Trial: Four-Release Comparative Synthesis (`#347`) 🏢📊
+## Empirical Capstone Trial: Six-Release Comparative Synthesis (`#363`) 🏢📊
 
-Per user benchmark directive (*“we should set c3d as the default option. And then run a capstone test to empirically test ALL our enhancements and compare the results”*), we executed `make test-capstone ENGINE=gke ARCH=c3d BLOCKS=2 CHUNK=1` via GCP Cloud Build (`e999863d`), empirically testing all 4 evolutionary stages on AMD Genoa Zen 4 AVX-512 spot silicon:
+Per user benchmark directive (*“we should set c3d as the default option. And then run a capstone test to empirically test ALL our enhancements and compare the results”*), we executed `make test-capstone ENGINE=gke ARCH=c3d BLOCKS=2 CHUNK=1` via GCP Cloud Build (`e83b2d3f`), empirically testing all 6 evolutionary variations across standalone VM and horizontal GKE tiers:
 
-| Lighter Prover Release & Paradigm | CPU Architecture & Topology | Assigned Leaf Batch (`CHUNK`) | Measured Block Proving Time | Extrapolated Global VMs (5,000 TPS) | Relative Footprint Compression | Standby Billing Leakage |
+| Proving Paradigm & Edition | Execution Deployment Runner Command | Sized Leaf Batch (`CHUNK`) | Measured Finality Time ($W$) | Extrapolated Baseload Fleet ($60\%$) | Extrapolated Global Fleet ($100\%$) | Standby Leakage |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **`v0.0.0` Monolith Baseline** | `c3d-180` Single-NUMA | 500 txs | 224.60s | 2,246 VMs | Baseline | High |
-| **`v0.0.1` Async Proof Gen** | `c3d-180` Single-NUMA | 500 txs | 206.20s | 2,062 VMs | 8.19% lift | High |
-| **`v0.0.2` Dynamic Chunking** | `c3d-180` Single-NUMA | 4 txs | 22.50s | 225 VMs | 89.98% lift | High |
-| 🏆 **`0.0.3-distributed-proving`** | **`c3d-180` Single-NUMA** | **1 tx (AVX-512)** | **19.50s** *(3.12s leaf)* | 🏆 **195 VMs** | 🏆 **91.31% lift** | 🏆 **0.00** |
+| **`v0.0.0` Monolith Baseline** | Standalone VM (`cloud-bench-run`) | 500 txs | 224.60s | N/A | 2,246 Spot VMs | High |
+| **`v0.0.1` Async Proof Gen** | Standalone VM (`cloud-bench-run`) | 500 txs | 206.20s | N/A | 2,062 Spot VMs | High |
+| **`v0.0.2` Dynamic Chunking** | Standalone VM *(Sweet Spot N=4)* | 4 txs | 22.50s | N/A | 225 Spot VMs | High |
+| **`v0.0.2` Dynamic Chunking** | Standalone VM *(Monolith Drag N=1)* | 1 tx | 1,254.50s | N/A | 12,545 Spot VMs | High |
+| 🏆 **`0.0.3-distributed-proving`** | **GKE Pods** (`cloud-run-cluster` `c3d`) | **1 tx (AVX-512)** | **19.50s** | **117 Pods** *(468 VMs)* | **195 Pods** *(780 VMs)* | 🏆 **0.00** |
+| 🥈 **`0.0.3-distributed-proving`** | **GKE Pods** (`cloud-run-cluster` `t2d`) | **2 txs (Zen 3 Spot)** | **26.41s** | N/A *(Burst Tier)* | **106 Burst Pods** *(424 VMs)* | 🏆 **0.00** |
 
 ---
 

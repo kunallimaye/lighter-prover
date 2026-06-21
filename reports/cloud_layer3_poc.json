@@ -1,0 +1,7 @@
+{
+  "cloud_instance": "prover-vm-4 (ARM Neoverse V2 @ 64 cores)",
+  "experiment": "3A_Cloud: Layer 3 Worker Scaling on c4a-highcpu-64",
+  "net_speedup": 1.2692334282116384,
+  "parallel_wall_sec": 2.116282186,
+  "sequential_wall_sec": 2.686056094
+}

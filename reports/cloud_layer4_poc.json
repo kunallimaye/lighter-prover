@@ -1,0 +1,7 @@
+{
+  "cloud_instance": "prover-vm-4 (ARM Neoverse V2 @ 64 cores)",
+  "experiment": "3B_Cloud: Layer 4 Tree Aggregation on c4a-highcpu-64",
+  "net_speedup": 1.413912162114591,
+  "parallel_tree_wall_sec": 0.405792123,
+  "sequential_wall_sec": 0.573754418
+}

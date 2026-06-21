@@ -1,0 +1,25 @@
+{
+  "batch_size_k": 4,
+  "block_number": 186974592,
+  "chunks_count": 125,
+  "circuit_metrics": {
+    "num_gate_constraints_tx": 136,
+    "num_public_inputs_chain": 1609,
+    "num_public_inputs_tx": 13273
+  },
+  "created_at_timestamp": 1772470922509,
+  "phase_durations_ms": {
+    "chain_circuit_prove_total": 155148,
+    "pre_execution_prove": 1288,
+    "tx_circuit_prove_total": 787658
+  },
+  "scraped_plonky2_stage_tree": [],
+  "system_telemetry": {
+    "avg_prove_latency_per_tx_ms": 1575.31606023,
+    "effective_tps": 0.529607496658507,
+    "final_rss_mb": 2800.3671875,
+    "peak_rss_mb": 4062.4921875,
+    "total_cpu_seconds": 14637.79
+  },
+  "total_transactions": 500
+}

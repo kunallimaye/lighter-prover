@@ -1,0 +1,66 @@
+{
+  "experiment": "capstone_six_release_empirical_observatory",
+  "silicon_standard": "c3d_highcpu_180_and_t2d_standard_60_spot",
+  "concurrency_blocks": 2,
+  "macro_extrapolation_target_load_bps": 10,
+  "macro_extrapolation_target_tps": 5000,
+  "empirical_verification_build_id": "8a72b192-35c6-4174-9969-529146291835",
+  "matrix": [
+    {
+      "release": "v0.0.0_monolith_baseline",
+      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=500",
+      "architecture": "single_thread_monolith_c3d_avx512",
+      "measured_block_proving_time_s": 224.60,
+      "projected_spot_vms_5000_tps": 2246,
+      "relative_latency_reduction_pct": 0.0
+    },
+    {
+      "release": "v0.0.1_async_pipelining",
+      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=500 JOBS=2",
+      "architecture": "multi_thread_stream_c3d_avx512",
+      "measured_block_proving_time_s": 206.20,
+      "projected_spot_vms_5000_tps": 2062,
+      "relative_latency_reduction_pct": 8.19
+    },
+    {
+      "release": "v0.0.2_dynamic_chunking_sweet_spot",
+      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=4",
+      "architecture": "chunk4_u_curve_optimum_c3d_avx512",
+      "measured_block_proving_time_s": 22.50,
+      "projected_spot_vms_5000_tps": 225,
+      "relative_latency_reduction_pct": 89.98
+    },
+    {
+      "release": "v0.0.2_dynamic_chunking_monolith_drag",
+      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=1",
+      "architecture": "chunk1_single_vm_thrashing_c3d_avx512",
+      "measured_block_proving_time_s": 1254.50,
+      "projected_spot_vms_5000_tps": 12545,
+      "relative_latency_reduction_pct": -458.54
+    },
+    {
+      "release": "0.0.3-distributed-proving_baseload",
+      "runner": "cloud-run-distributed-cluster --engine=gke --arch=c3d --blocks=2 --chunk=1",
+      "architecture": "dynamic_chunk1_avx512_single_numa_c3d_pods",
+      "measured_block_proving_time_s": 19.50,
+      "measured_leaf_proving_time_s": 3.12,
+      "projected_baseload_pods_3000_tps": 117,
+      "projected_total_pods_5000_tps": 195,
+      "projected_spot_vms_5000_tps": 780,
+      "relative_latency_reduction_pct": 91.31,
+      "standby_teardown_leakage": 0.0
+    },
+    {
+      "release": "0.0.3-distributed-proving_burst",
+      "runner": "cloud-run-distributed-cluster --engine=gke --arch=t2d --blocks=2 --chunk=2",
+      "architecture": "dynamic_chunk2_zen3_spot_t2d_pods",
+      "measured_block_proving_time_s": 26.41,
+      "measured_leaf_proving_time_s": 4.15,
+      "projected_burst_pods_2000_tps": 106,
+      "projected_total_pods_5000_tps": 264,
+      "projected_spot_vms_5000_tps": 1056,
+      "relative_latency_reduction_pct": 88.24,
+      "standby_teardown_leakage": 0.0
+    }
+  ]
+}
