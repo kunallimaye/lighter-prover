@@ -160,6 +160,16 @@ Per user benchmark directive (*“we should set c3d as the default option. And t
 | **`v0.0.3` Distributed Pods** | `c4a` + `t2d` Pods | 4 txs | 12.00s | 480 VMs | 93.3% lift | 0.00 |
 | 🏆 **`v0.1.0` Genoa AVX-512 Frontier** | **`c3d-180` Single-NUMA** | **1 tx (AVX-512)** | **19.50s** *(3.12s leaf)* | 🏆 **195 VMs** | 🏆 **97.2% lift** | 🏆 **0.00** |
 
+---
+
+## Official Publication: Release `0.0.3-distributed-proving` Shipped (`#349`) 🌟📦
+
+Per user publication directive, we authored formal release ledgers (`release_0_0_3_notes.md`), tagged repository commit `main` (`b3eee36`), and published official GitHub Release **`0.0.3-distributed-proving`** via `gh release create`.
+
+*   **GitHub Release Link**: [0.0.3-distributed-proving](https://github.com/kunallimaye/lighter-prover/releases/tag/0.0.3-distributed-proving)
+*   **Mandatory Attached Assets**: In strict compliance with persistent project agent rules (`AGENTS.md`), we attached `reports/proposal_phase2_async_pipelining.md` alongside empirical benchmark matrix CSVs (`axion_fleet_concurrency_matrix.csv` and `axion_dynamic_chunk_matrix.csv`).
+
+
 
 
 
