@@ -33,6 +33,12 @@ bucket = "kunal-scratch-tfstate"
 # GCS path template. Supports variables: {machine_type}, {instance_id}, {timestamp}, {build_id}.
 path_template = "benchmark-reports/{machine_type}/{instance_id}/{timestamp}"
 
+[gcp.pubsub]
+# Google Cloud Pub/Sub real-time gRPC backplane topic and subscription names.
+# Automatically provisioned by Terraform during `make cloud-deploy`.
+topic        = "stark-proofs-topic"
+subscription = "tree-aggregators-sub"
+
 # ─── Target Service Accounts & Role Allocations ────────────────────────
 # Identities and IAM permissions required by Cloud Build and runtime workloads.
 # Note: You may add ANY arbitrary Service Account entries below (e.g. [gcp.target.monitor_sa]).
@@ -72,36 +78,32 @@ roles = [
 [vms.default]
 machine_type    = "c4a-highcpu-16"
 zone            = "us-east4-b"
-disk_size_gb    = 100
+disk_size_gb    = 200
 disk_type       = "hyperdisk-balanced"
-# Default OS boot image (e.g. debian-cloud/debian-12, ubuntu-os-cloud/ubuntu-2204-lts)
 image           = "debian-cloud/debian-12-arm64"
-# Optional CPU Turbo Mode (e.g. ALL_CORE_MAX or empty). Keeps cores boosted during ZKP generation.
 turbo_mode      = ""
 service_account = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
 
-[vms.prover-vm-1]
-# Inherits machine_type, zone, disk_size_gb, disk_type, and service_account exactly from [vms.default]
-
-[vms.prover-vm-2]
-machine_type = "c4a-highcpu-32"
-zone         = "us-east4-b"
-disk_size_gb = 200
+[vms.prover-c4a-4]
+machine_type = "c4a-highcpu-4"
 
 [vms.prover-vm-3]
 machine_type = "c4a-highcpu-8"
 
-[vms.prover-vm-4]
-machine_type = "c4a-highcpu-64"
-disk_size_gb = 200
+[vms.prover-vm-1]
+machine_type = "c4a-highcpu-16"
 
-[vms.prover-vm-5]
-machine_type = "c4a-highcpu-72"
-disk_size_gb = 200
+[vms.prover-vm-2]
+machine_type = "c4a-highcpu-32"
 
 [vms.prover-vm-6]
 machine_type = "c4a-highcpu-48"
-disk_size_gb = 200
+
+[vms.prover-vm-4]
+machine_type = "c4a-highcpu-64"
+
+[vms.prover-vm-5]
+machine_type = "c4a-highcpu-72"
 
 # ─── Indivisible Proving Pod Taxonomy & Execution Profiles ─────────────
 # Defines collaborative Proving Pod specs (Leaf Workers + Tree Aggregators).
@@ -125,7 +127,7 @@ memory_requests = "128Gi"
 
 [proving_pod.c4a.aggregator]
 machine_type    = "c4a-highcpu-16"
-disk_type      = "hyperdisk-balanced"
+disk_type       = "hyperdisk-balanced"
 disk_size_gb    = 50
 cpu_requests    = "16"
 memory_requests = "32Gi"
@@ -167,3 +169,22 @@ disk_type       = "pd-balanced"
 disk_size_gb    = 50
 cpu_requests    = "16"
 memory_requests = "32Gi"
+
+[proving_pod.c4d]
+machine_family = "c4d"
+image          = "debian-cloud/debian-12"
+
+[proving_pod.c4d.leaf_worker]
+machine_type    = "c4d-highcpu-384"
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+chunk_size      = 1 # Turin Zen 5 AVX-512 Single-Cycle Vector Optimum
+cpu_requests    = "30"
+memory_requests = "60Gi"
+
+[proving_pod.c4d.aggregator]
+machine_type    = "c4d-highcpu-30"
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 50
+cpu_requests    = "30"
+memory_requests = "60Gi"
