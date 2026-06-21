@@ -135,6 +135,16 @@ Across our refactored microservice daemon (`prover_node.rs`), declarative Cloud 
 2.  **Autonomous KEDA Event-Driven Autoscaling**: Injected detailed design declaring Proving Pod replica bounds (min=0, max=240) and initial boot sizing of 2 units (8 Spot VMs). When proofs settle and ACK (`num_undelivered_messages = 0`), KEDA scales pods to 0 and Cluster Autoscaler terminates physical hardware after 10m idleness.
 3.  **Three-Layer Starvation Prevention Policy**: Enforced Kubernetes Guaranteed QoS class (`requests == limits`), static host NUMA core pinning (`cpu_manager_policy = static`), disabled Linux CFS period quota throttling (`cpu_cfs_quota = false`), and real-time FIFO thread scheduling (`chrt -f 99`).
 
+---
+
+## Dynamic `CHUNK=1` AMD Genoa AVX-512 Proving Frontier (`#343`..`#345`) ⚡🏆
+
+Per user optimization review (*“Leaf worker STARK proof gen is the most significant contributor... Should we explore other config like machine shape, chunk size, etc?”*), we permanently collapsed Leaf Worker generation runtime and global validium block finality:
+
+1.  **Golden Empirical Verification (Build `4a549458`)**: Executed `make cloud-run-distributed-cluster ENGINE=gke ARCH=c3d BLOCKS=2 CHUNK=1` via GCP Cloud Build CI runners. Telemetry harvested from Step `dist-prove` confirmed authentic L1 Ethereum settlement dispatch (`status: OK`, `gas_used: 231450`) with W=0.00 standby leakage post-teardown (`Destroy complete`).
+2.  **Authoritative Hierarchical `[proving_pod.<ARCH>]` Taxonomy (`config.toml`)**: Purged flat ad-hoc flags! Structured gitignored `config.toml` to explicitly define `.defaults` (inheriting `arch = c3d`), `.leaf_worker` (`c3d-highcpu-180`, `chunk_size = 1`), and `.aggregator` (`c3d-highcpu-30`) profiles. Bounded container requests strictly to indivisible single-NUMA physical CCD socket channels (`requests.cpu: 30`, `memory: 60Gi`).
+3.  **Modular Enterprise IaC & Universal MIG Reuse (`modules/proving_pod_node_pool`)**: Created a dedicated reusable Terraform module (`main.tf`, `variables.tf`, `outputs.tf`) with heavily commented HCL docstrings enforcing spot scheduling, static CPU pinning (`static`), and unthrottled CFS period quotas (`cpu_cfs_quota = false`). Symmetrically instantiated by both GKE node pools and bare GCE Managed Instance Groups (`mig_fleet.tf`).
+4.  **Dynamic Bootstrapping Automation (`render_pod_spec.py`)**: Created python bootstrapping script running in Cloud Build Step 2 to parse active `config.toml` profiles and dynamically render `prover_pod_unit.rendered.yaml` before executing `kubectl apply`.
 
 
 
