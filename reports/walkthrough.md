@@ -152,14 +152,14 @@ Per user optimization review (*“Leaf worker STARK proof gen is the most signif
 
 Per user benchmark directive (*“we should set c3d as the default option. And then run a capstone test to empirically test ALL our enhancements and compare the results”*), we executed `make test-capstone ENGINE=gke ARCH=c3d BLOCKS=2 CHUNK=1` via GCP Cloud Build (`e83b2d3f`), empirically testing all 6 evolutionary variations across standalone VM and horizontal GKE tiers:
 
-| Proving Paradigm & Edition | Execution Deployment Runner Command | Sized Leaf Batch (`CHUNK`) | Measured Finality Time ($W$) | Extrapolated Baseload Fleet ($60\%$) | Extrapolated Global Fleet ($100\%$) | Standby Leakage |
+| Proving Paradigm & Edition | CPU Type & Topology | Assigned Leaf Batch (`CHUNK`) | Measured Finality Time ($W$) | Extrapolated Baseload Fleet ($60\%$) | Extrapolated Global Fleet ($100\%$) | Standby Leakage |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **`v0.0.0` Monolith Baseline** | Standalone VM (`cloud-bench-run`) | 500 txs | 224.60s | N/A | 2,246 Spot VMs | High |
-| **`v0.0.1` Async Proof Gen** | Standalone VM (`cloud-bench-run`) | 500 txs | 206.20s | N/A | 2,062 Spot VMs | High |
+| **`v0.0.0` Monolith Baseline** | Standalone VM (`c3d-180`) | 500 txs | 224.60s | N/A | 2,246 Spot VMs | High |
+| **`v0.0.1` Async Proof Gen** | Standalone VM (`c3d-180`) | 500 txs | 206.20s | N/A | 2,062 Spot VMs | High |
 | **`v0.0.2` Dynamic Chunking** | Standalone VM *(Sweet Spot N=4)* | 4 txs | 22.50s | N/A | 225 Spot VMs | High |
 | **`v0.0.2` Dynamic Chunking** | Standalone VM *(Monolith Drag N=1)* | 1 tx | 1,254.50s | N/A | 12,545 Spot VMs | High |
-| 🏆 **`0.0.3-distributed-proving`** | **GKE Pods** (`cloud-run-cluster` `c3d`) | **1 tx (AVX-512)** | **19.50s** | **117 Pods** *(468 VMs)* | **195 Pods** *(780 VMs)* | 🏆 **0.00** |
-| 🥈 **`0.0.3-distributed-proving`** | **GKE Pods** (`cloud-run-cluster` `t2d`) | **2 txs (Zen 3 Spot)** | **26.41s** | N/A *(Burst Tier)* | **106 Burst Pods** *(424 VMs)* | 🏆 **0.00** |
+| 🏆 **`0.0.3-distributed-proving`** | **GKE Pods** (`c3d-180` Single-NUMA) | **1 tx (AVX-512)** | **19.50s** | **117 Pods** *(117 GKE VMs inc. Aggs)* | **195 Pods** *(195 GKE VMs inc. Aggs)* | 🏆 **0.00** |
+| 🥈 **`0.0.3-distributed-proving`** | **GKE Pods** (`t2d-60` Zen 3 Spot) | **2 txs (Spot)** | **26.41s** | N/A *(Burst Tier)* | **106 Burst Pods** *(106 GKE VMs inc. Aggs)* | 🏆 **0.00** |
 
 ---
 
