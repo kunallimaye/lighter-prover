@@ -48,13 +48,13 @@ def main():
 
   kube_arch = "arm64" if arch == "c4a" else "amd64"
 
-  leaf_cpu = str(leaf_cfg.get("cpu_requests", "30" if arch in ("c3d", "t2d") else "64"))
-  leaf_mem = str(leaf_cfg.get("memory_requests", "60Gi" if arch == "c3d" else "128Gi"))
-  leaf_chunk = int(leaf_cfg.get("chunk_size", 1 if arch == "c3d" else 4))
+  leaf_cpu = str(leaf_cfg.get("cpu_requests", "30" if arch in ("c3d", "t2d", "c4d") else "64"))
+  leaf_mem = str(leaf_cfg.get("memory_requests", "60Gi" if arch in ("c3d", "c4d") else "128Gi"))
+  leaf_chunk = int(leaf_cfg.get("chunk_size", 1 if arch in ("c3d", "c4d") else 4))
   leaf_replicas = 3 * args.blocks
 
-  agg_cpu = str(agg_cfg.get("cpu_requests", "30" if arch == "c3d" else "16"))
-  agg_mem = str(agg_cfg.get("memory_requests", "60Gi" if arch == "c3d" else "32Gi"))
+  agg_cpu = str(agg_cfg.get("cpu_requests", "30" if arch in ("c3d", "c4d") else "16"))
+  agg_mem = str(agg_cfg.get("memory_requests", "60Gi" if arch in ("c3d", "c4d") else "32Gi"))
   agg_replicas = 1 * args.blocks
 
   if not os.path.exists(args.input):
