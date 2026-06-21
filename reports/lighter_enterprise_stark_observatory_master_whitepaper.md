@@ -125,6 +125,14 @@ To reconcile absolute SLA finality guarantees with aggressive spot cost arbitrag
 1.  **Baseload Saturated Allocation (60% Dedicated CUD)**: Allocates exactly **60% of dedicated proving capacity** (6 blocks/sec @ 3,000 TPS) via **`c3d-highcpu-180` AMD Genoa Proving Pods** locked under 3-Year Committed Use Discounts (CUD). By Little's Law (Pods = load * W where W=19.50s), sustaining baseload traffic requires exactly **117 Dedicated `c3d` Proving Pods**.
 2.  **Elastic Volatility Burst (40%+ Spot Pricing)**: Any further market volume spikes above baseload (the remaining 40%+ capacity up to +4 blocks/sec) are absorbed dynamically via **`t2d-standard-60` AMD Milan Proving Pods utilizing Spot pricing**. By Little's Law (W=26.41s), absorbing peak burst requires exactly **106 Elastic `t2d` Spot Pods** (delivering a global bimodal fleet total of **223 Proving Pods**).
 
+#### Projected Bimodal Proving Infrastructure Matrix (10 Blocks/sec Target Saturation)
+
+| Proving Fleet Tier & Commercial Paradigm | Assigned GCP Machine Shape & Sizing | Assigned Leaf Batch (`CHUNK`) | Allocated Saturated Load | Bounded Finality Time ($W$) | Required Proving Pods | Total Provisioned Leaf Workers | Total Provisioned Tree Aggregators | Projected Total Cloud Cores |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Tier 1 Core Baseload** *(3-Year Dedicated CUD)* | `c3d-highcpu-180` *(Genoa Zen 4 AVX-512)* | `CHUNK = 1` | 6 blocks/sec *(3,000 TPS)* | 19.50s | **117 Pods** | 58,500 workers | 234 aggregators | 21,060 cores |
+| **Tier 2 Volatility Burst** *(Global Spot MIG)* | `t2d-standard-60` *(Milan Zen 3 Spot)* | `CHUNK = 2` | 4 blocks/sec *(2,000 TPS)* | 26.41s | **106 Pods** | 26,500 workers | 212 aggregators | 6,360 cores |
+| **Global Bimodal Total** | **Hybrid `c3d` $+$ `t2d` Fleet** | **Bimodal Mix** | **10 blocks/sec *(5,000 TPS)*** | **<= 26.41s** | **223 Pods** | **85,000 workers** | **446 aggregators** | **27,420 cores** |
+
 ### B. Horizontal Container Orchestration via Google Kubernetes Engine (GKE)
 While standalone virtual machines or rigid Managed Instance Groups (MIGs) introduce severe day-2 maintenance toil, Lighter standardizes its horizontal scaling architecture on **Google Kubernetes Engine (GKE)**. Using GKE instead of bare VMs or MIGs eliminates operational friction:
 *   **Sub-Second Autoscaling**: KEDA event-driven autoscalers monitor Pub/Sub backlog depth (`num_undelivered_messages`), scaling prover pods elastically (`min=0, max=240`) and scaling physical capacity to zero during idleness.
