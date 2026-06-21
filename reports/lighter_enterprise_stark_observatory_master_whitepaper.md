@@ -152,6 +152,11 @@ On large 180-core `c3d-highcpu-180` physical GKE node virtual machines, a single
 *   **Automated Spot Rescheduling**: On bare MIGs, spot preemption aborts active block proving runs. On GKE, eviction notices trigger sub-second container cordon and rescheduling (~400ms) while Pub/Sub transparently re-delivers unACKed trace tasks, maintaining zero block settlement failures.
 *   **Zero CNI Performance Tax**: Dataplane V2 (eBPF) overlay networking introduces <= 1.22% network interface latency while enabling 4-second rolling deployments (`kubectl apply`).
 
+### D. Roadmap Architectural Frontier (Radix-16 Hexadecimal Reduction Trees)
+While Release `0.0.3-distributed-proving` empirically validated horizontal sharding over Pub/Sub using standard Radix-2 binary trees ($k=2$, requiring 9 reduction hops for 500 leaves), binary folding accounts for $16.38\text{s}$ of the $19.50\text{s}$ finality time ($9 \times 1.82\text{s}$). 
+
+As documented in our Grand Master Proposal (`grand_master_summary_proposal_radix16_collapsed_fleet.md`), standardizing Release `v0.1.0` on **16-ary Hexadecimal Reduction Trees** ($k=16$) collapses recursive folding depth from 9 levels down to exactly $\lceil \log_{16}(500) \rceil = \mathbf{3 \text{ hops}}$. This $66.7\%$ reduction in network serialization hops is projected to compress reduction latency down to $\approx 5.46\text{s}$, driving global block finality toward $W \approx 8.58\text{ seconds}$. By Little's Law ($L = 10 \times 8.58$), this frontier advancement is projected to compress global physical cluster sizing from 184 nodes down to approximately **86 host machines**.
+
 ---
 
 ## 4. Empirical Verification & Teardown Ledgers
