@@ -129,13 +129,13 @@ To reconcile absolute SLA finality guarantees with aggressive spot cost arbitrag
 
 #### Split Bimodal Proving Infrastructure Matrix (Leaf Worker Tier vs. Aggregator Tier Sizing)
 
-| Proving Fleet Pool & Tier | Assigned K8s Container Config (Limits) | Sized Leaf Batch (`CHUNK`) | Assigned GCP Node Pool Machine Shape | Pod Packing Density per Host | Active Tasks in Flight (Little's Law) | Required Host Nodes | Provisioned Cloud Cores | Commercial Paradigm |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **1. Baseload Leaf Worker Pool** | `cpu: "30", mem: "60Gi"` *(Guaranteed)* | `CHUNK = 1` | `c3d-highcpu-180` *(Genoa AVX-512)* | 6 pods / node | 9,360 leaf tasks | **1,560 Nodes** | 280,800 vCPUs | 3-Yr Dedicated CUD ($60\%$) |
-| **2. Baseload Aggregator Pool** | `cpu: "30", mem: "60Gi"` *(Guaranteed)* | Recursive FRI | `c3d-highcpu-180` *(Genoa AVX-512)* | 6 pods / node | 234 agg tasks | **39 Nodes** | 7,020 vCPUs | 3-Yr Dedicated CUD ($60\%$) |
-| **3. Burst Leaf Worker Pool** | `cpu: "15", mem: "30Gi"` *(Guaranteed)* | `CHUNK = 2` | `t2d-standard-60` *(Milan Zen 3)* | 4 pods / node | 4,240 leaf tasks | **1,060 Nodes** | 63,600 vCPUs | Elastic Spot Pricing ($40\%+$) |
-| **4. Burst Aggregator Pool** | `cpu: "15", mem: "30Gi"` *(Guaranteed)* | Recursive FRI | `t2d-standard-60` *(Milan Zen 3)* | 4 pods / node | 212 agg tasks | **53 Nodes** | 3,180 vCPUs | Elastic Spot Pricing ($40\%+$) |
-| **Global Bimodal Total** | **Guaranteed Exclusive Core Pinning** | **Hybrid Mix** | **Dedicated `c3d` $+$ Spot `t2d` Fleet** | **High Density** | **14,046 total tasks** | **2,712 Total Nodes** | **354,600 vCPUs** | **10 blocks/sec Saturated** |
+| Proving Fleet Pool & Tier | Assigned K8s Container Config (Limits) | Assigned GCP Node Pool Machine Shape | Pod Packing Density per Host | Active Tasks in Flight (Little's Law) | Required Host Nodes | Provisioned Host Cores | Commercial Paradigm |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **1. Baseload Leaf Worker Pool** | `cpu: "30", mem: "60Gi"` *(Guaranteed)* | `c3d-highcpu-180` *(Genoa AVX-512)* | 6 pods / node | 351 leaf containers *(117 pods x 3)* | **58.5 Nodes** *(~59 VMs)* | 10,530 vCPUs | 3-Yr Dedicated CUD ($60\%$) |
+| **2. Baseload Aggregator Pool** | `cpu: "30", mem: "60Gi"` *(Guaranteed)* | `c3d-highcpu-180` *(Genoa AVX-512)* | 6 pods / node | 117 agg containers *(117 pods x 1)* | **19.5 Nodes** *(~20 VMs)* | 3,510 vCPUs | 3-Yr Dedicated CUD ($60\%$) |
+| **3. Burst Leaf Worker Pool** | `cpu: "15", mem: "30Gi"` *(Guaranteed)* | `t2d-standard-60` *(Milan Zen 3)* | 4 pods / node | 318 leaf containers *(106 pods x 3)* | **79.5 Nodes** *(~80 VMs)* | 4,770 vCPUs | Elastic Spot Pricing ($40\%+$) |
+| **4. Burst Aggregator Pool** | `cpu: "15", mem: "30Gi"` *(Guaranteed)* | `t2d-standard-60` *(Milan Zen 3)* | 4 pods / node | 106 agg containers *(106 pods x 1)* | **26.5 Nodes** *(~27 VMs)* | 1,590 vCPUs | Elastic Spot Pricing ($40\%+$) |
+| **Global Bimodal Total** | **Guaranteed Exclusive Core Pinning** | **Dedicated `c3d` $+$ Spot `t2d` Fleet** | **High Density** | **892 active container replicas** | **184.0 Host Nodes** | **20,400 vCPUs** | **10 blocks/sec Saturated** |
 
 ### B. Horizontal Container Orchestration via Google Kubernetes Engine (GKE)
 While standalone virtual machines or rigid Managed Instance Groups (MIGs) introduce severe day-2 maintenance toil, Lighter standardizes its horizontal scaling architecture on **Google Kubernetes Engine (GKE)**. Using GKE instead of bare VMs or MIGs eliminates operational friction:
