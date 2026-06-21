@@ -17,7 +17,7 @@ except ImportError:
 def main():
   parser = argparse.ArgumentParser(description="Render dynamic K8s Proving Pod manifest")
   parser.add_argument("--config", default="config.toml", help="Path to config.toml")
-  parser.add_argument("--arch", default="", help="Silicon architecture override (c4a, c3d, t2d)")
+  parser.add_argument("--arch", default="", help="Silicon architecture override (c4a, c3d, t2d, c4d)")
   parser.add_argument("--blocks", type=int, default=2, help="Parallel pipeline blocks")
   parser.add_argument("--input", default="infra-as-code/kubernetes/prover_pod_unit.yaml", help="Input YAML")
   parser.add_argument("--output", default="infra-as-code/kubernetes/prover_pod_unit.rendered.yaml", help="Output YAML")

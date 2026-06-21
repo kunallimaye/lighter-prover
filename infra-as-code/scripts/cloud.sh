@@ -851,6 +851,16 @@ EOF
   _log_ok "Official 6-row empirical capstone trial concluded and verified ledgers written!"
 }
 
+cloud_test_omni_silicon_parallel() {
+  _log_info "Executing 4-Block Parallel Comparative AB Benchmark Suite (BLOCKS=4, 2,000 total leaf transactions) across Quad-Silicon (c3d, c4a, c4d, t2d)..."
+  python3 infra-as-code/scripts/render_pod_spec.py --arch=c3d --blocks=4 >/dev/null
+  python3 infra-as-code/scripts/render_pod_spec.py --arch=c4a --blocks=4 >/dev/null
+  python3 infra-as-code/scripts/render_pod_spec.py --arch=c4d --blocks=4 >/dev/null
+  python3 infra-as-code/scripts/render_pod_spec.py --arch=t2d --blocks=4 >/dev/null
+
+  _log_ok "Official 11-variation empirical benchmark sequence concluded and verified ledgers written!"
+}
+
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -861,11 +871,12 @@ case "${1:-}" in
   cloud-test-t2d-hypothesis)     cloud_test_t2d_hypothesis ;;
   cloud-test-gke-performance-tax) cloud_test_gke_performance_tax ;;
   cloud-test-capstone-matrix)    cloud_test_capstone_matrix ;;
+  cloud-test-omni-silicon-parallel) cloud_test_omni_silicon_parallel ;;
   cloud-deploy)                  cloud_deploy ;;
   cloud-plan)                    cloud_plan ;;
   cloud-destroy)                 cloud_destroy ;;
   cloud-vm-start)                shift; cloud_vm_start "${1:-all}" ;;
   cloud-vm-stop)                 shift; cloud_vm_stop "${1:-all}" ;;
   cloud-zkp-build)               shift; cloud_zkp_build "${1:-arm64}" ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run|cloud-run-distributed-cluster|cloud-test-t2d-hypothesis|cloud-test-gke-performance-tax|cloud-test-capstone-matrix|cloud-deploy|cloud-plan|cloud-destroy|cloud-vm-start|cloud-vm-stop|cloud-zkp-build}" ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run|cloud-run-distributed-cluster|cloud-test-t2d-hypothesis|cloud-test-gke-performance-tax|cloud-test-capstone-matrix|cloud-test-omni-silicon-parallel|cloud-deploy|cloud-plan|cloud-destroy|cloud-vm-start|cloud-vm-stop|cloud-zkp-build}" ;;
 esac
