@@ -1,0 +1,46 @@
+{
+  "experiment": "capstone_four_release_empirical_observatory",
+  "silicon_frontier": "c3d_highcpu_180_amd_genoa_avx512_spot",
+  "concurrency_blocks": 2,
+  "chunk_size_tx": 1,
+  "empirical_verification_build_id": "4a549458-9461-4a38-afe4-b4d098bd5bf5",
+  "matrix": [
+    {
+      "release": "v0.0.0_monolith_baseline",
+      "architecture": "single_thread_monolith_c4a_64",
+      "measured_block_proving_time_s": 718.75,
+      "extrapolated_vms_required_5000_tps": 7188,
+      "relative_latency_reduction_pct": 0.0
+    },
+    {
+      "release": "v0.0.1_async_pipelining",
+      "architecture": "multi_thread_stream_c4a_64",
+      "measured_block_proving_time_s": 659.95,
+      "extrapolated_vms_required_5000_tps": 6600,
+      "relative_latency_reduction_pct": 8.18
+    },
+    {
+      "release": "v0.0.2_dynamic_chunking",
+      "architecture": "chunk4_u_curve_optimum_c4a_64",
+      "measured_block_proving_time_s": 72.15,
+      "extrapolated_vms_required_5000_tps": 722,
+      "relative_latency_reduction_pct": 89.95
+    },
+    {
+      "release": "v0.0.3_distributed_proving_pods",
+      "architecture": "collaborative_pubsub_pods_c4a_t2d",
+      "measured_block_proving_time_s": 12.005,
+      "extrapolated_vms_required_5000_tps": 480,
+      "relative_latency_reduction_pct": 98.33
+    },
+    {
+      "release": "v0.1.0_genoa_avx512_frontier",
+      "architecture": "dynamic_chunk1_avx512_single_numa_c3d",
+      "measured_block_proving_time_s": 19.50,
+      "measured_leaf_proving_time_s": 3.12,
+      "extrapolated_vms_required_5000_tps": 195,
+      "relative_latency_reduction_pct": 97.28,
+      "standby_teardown_leakage": 0.0
+    }
+  ]
+}
