@@ -16,13 +16,15 @@ cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via
 	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build $(ARCH)
 
 JOBS ?= 1
-CHUNK ?= 4
+CHUNK ?= 1
 BLOCKS ?= 2
+ENGINE ?= gke
+ARCH ?= c3d
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)"
 
-cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment on GKE Standard (defaults to BLOCKS=2, synonymous to JOBS)
-	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster --engine=$(ENGINE) --blocks=$(BLOCKS)
+cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment (accepts ENGINE=gke/mig ARCH=c4a/c3d/t2d BLOCKS=2 CHUNK=1)
+	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster --engine=$(ENGINE) --arch=$(ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK)
 
 test-t2d-hypothesis: ## Execute 4-pod concurrent multi-block AB race comparing AMD Milan Tau t2d vs ARM Axion c4a
 	@bash infra-as-code/scripts/cloud.sh cloud-test-t2d-hypothesis

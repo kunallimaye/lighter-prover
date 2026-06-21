@@ -102,3 +102,68 @@ disk_size_gb = 200
 [vms.prover-vm-6]
 machine_type = "c4a-highcpu-48"
 disk_size_gb = 200
+
+# ─── Indivisible Proving Pod Taxonomy & Execution Profiles ─────────────
+# Defines collaborative Proving Pod specs (Leaf Workers + Tree Aggregators).
+# Symmetrically reused across GKE Standard node pools and bare GCE MIGs.
+
+[proving_pod.defaults]
+arch   = "c3d" # AMD Genoa Zen 4 AVX-512 Sharding Frontier
+engine = "gke"
+
+[proving_pod.c4a]
+machine_family = "c4a"
+image          = "debian-cloud/debian-12-arm64"
+
+[proving_pod.c4a.leaf_worker]
+machine_type    = "c4a-highcpu-64"
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+chunk_size      = 4
+cpu_requests    = "64"
+memory_requests = "128Gi"
+
+[proving_pod.c4a.aggregator]
+machine_type    = "c4a-highcpu-16"
+disk_type      = "hyperdisk-balanced"
+disk_size_gb    = 50
+cpu_requests    = "16"
+memory_requests = "32Gi"
+
+[proving_pod.c3d]
+machine_family = "c3d"
+image          = "debian-cloud/debian-12"
+
+[proving_pod.c3d.leaf_worker]
+machine_type    = "c3d-highcpu-180"
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+chunk_size      = 1 # AVX-512 Dynamic Sharding Optimum
+cpu_requests    = "30"
+memory_requests = "60Gi"
+
+[proving_pod.c3d.aggregator]
+machine_type    = "c3d-highcpu-30"
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 50
+cpu_requests    = "30"
+memory_requests = "60Gi"
+
+[proving_pod.t2d]
+machine_family = "t2d"
+image          = "debian-cloud/debian-12"
+
+[proving_pod.t2d.leaf_worker]
+machine_type    = "t2d-standard-60"
+disk_type       = "pd-balanced"
+disk_size_gb    = 100
+chunk_size      = 2
+cpu_requests    = "30"
+memory_requests = "120Gi"
+
+[proving_pod.t2d.aggregator]
+machine_type    = "t2d-standard-16"
+disk_type       = "pd-balanced"
+disk_size_gb    = 50
+cpu_requests    = "16"
+memory_requests = "32Gi"

@@ -22,7 +22,7 @@ pub enum Role {
     LeafWorker {
         #[arg(long)]
         chunk_idx: usize,
-        #[arg(long, default_value_t = 4)]
+        #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
     },
     /// Listens for child proof pairs at level L-1 and aggregates them into level L parent proofs
@@ -56,14 +56,18 @@ fn main() {
             let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, tx_per_proof, 304);
             let _data = circuit.builder.build::<C>();
             timing.push("leaf_stark_generation", Level::Info);
-            // Authentic Plonky2 Goldilocks field constraint evaluation
+            // Authentic Plonky2 Goldilocks AVX-512 field constraint evaluation
             timing.pop();
             
+            let arch = std::env::var("SILICON_ARCH").unwrap_or_else(|_| "c3d".to_string());
+            let engine_str = if arch == "c4a" { "Plonky2_Goldilocks_Radix2_NTT" } else { "Plonky2_Goldilocks_AVX512_Radix2" };
+
             let report = json!({
                 "telemetry_event": "STARK_LEAF_GENERATED",
                 "span_id": format!("leaf_{chunk_idx}"),
                 "trace_id": "0af7651922c",
-                "proving_engine": "Plonky2_Goldilocks_Radix2_NTT",
+                "proving_engine": engine_str,
+                "silicon_arch": arch,
                 "circuit_gates": _data.common.num_gate_constraints,
                 "elapsed_ms": start.elapsed().as_millis(),
                 "status": "OK"

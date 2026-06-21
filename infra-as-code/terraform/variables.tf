@@ -49,6 +49,18 @@ variable "region" {
   default     = "us-central1"
 }
 
+variable "silicon_arch" {
+  description = "Target CPU silicon architecture ('c4a', 'c3d', 't2d')"
+  type        = string
+  default     = "c3d"
+}
+
+variable "orchestration_engine" {
+  description = "Orchestration execution engine ('gke' or 'mig')"
+  type        = string
+  default     = "gke"
+}
+
 # ─── Artifact Registry ───────────────────────────────────────────────
 
 variable "ar_repo" {

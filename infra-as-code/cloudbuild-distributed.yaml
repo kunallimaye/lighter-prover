@@ -25,7 +25,7 @@ steps:
     args:
       - '-c'
       - |
-        echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE})..."
+        echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
         terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
     env:
       - 'TF_IN_AUTOMATION=true'
@@ -38,6 +38,20 @@ steps:
       - 'TF_VAR_builder_sa_email=${_BUILDER_SA_EMAIL}'
       - 'TF_VAR_runtime_sa_email=${_RUNTIME_SA_EMAIL}'
       - 'TF_VAR_ar_repo=${_AR_REPO}'
+      - 'TF_VAR_silicon_arch=${_ARCH}'
+      - 'TF_VAR_orchestration_engine=${_ENGINE}'
+
+  # 2.5 Dynamic Deployment Spec Rendering
+  - id: k8s-render
+    name: 'python:3.11-slim'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Rendering dynamic K8s deployment manifests reading config.toml..."
+          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}"
+        fi
 
   # 3. Execute Authentic Unmocked Distributed Proving Assembly Line
   - id: dist-prove
@@ -47,7 +61,8 @@ steps:
       - '-c'
       - |
         set -eu
-        echo "[INFO] Dispatched authentic unmocked distributed proving benchmark (engine=${_ENGINE}, concurrency=${_BLOCK_CONCURRENCY})..."
+        export SILICON_ARCH="${_ARCH}"
+        echo "[INFO] Dispatched authentic unmocked distributed proving benchmark (engine=${_ENGINE}, arch=${_ARCH}, chunk=${_CHUNK_SIZE})..."
         cargo run --release --bin prover-node -- root-coordinator --block-number 1042
 
   # 4. Mandatory Post-Test Zero-Billing Teardown
@@ -70,9 +85,13 @@ steps:
       - 'TF_VAR_builder_sa_email=${_BUILDER_SA_EMAIL}'
       - 'TF_VAR_runtime_sa_email=${_RUNTIME_SA_EMAIL}'
       - 'TF_VAR_ar_repo=${_AR_REPO}'
+      - 'TF_VAR_silicon_arch=${_ARCH}'
+      - 'TF_VAR_orchestration_engine=${_ENGINE}'
 
 substitutions:
   _ENGINE: 'gke'
+  _ARCH: 'c3d'
+  _CHUNK_SIZE: '1'
   _TF_ACTION: 'apply'
   _BLOCK_CONCURRENCY: '2'
   _TF_STATE_BUCKET: ''

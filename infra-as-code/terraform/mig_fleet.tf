@@ -1,50 +1,26 @@
 # Copyright (c) Elliot Technologies, Inc.
 # SPDX-License-Identifier: BUSL-1.1
+#
+# Modular Proving Pod Instantiation
+# Universally orchestrates physical compute capacity across GKE node pools or bare MIGs.
 
-resource "google_compute_instance_template" "leaf_prover_template" {
-  provider     = google.runtime
-  project      = coalesce(var.runtime_project_id, var.build_project_id)
-  name_prefix  = "lighter-leaf-prover-"
-  machine_type = "c4a-highcpu-72"
+module "proving_pod_fleet" {
+  source               = "./modules/proving_pod_node_pool"
+  orchestration_engine = var.orchestration_engine
+  cluster_id           = "" # Bound dynamically when GKE cluster resource is instantiated
+  region               = var.runtime_region != "" ? var.runtime_region : var.region
+  zone                 = "${var.runtime_region != "" ? var.runtime_region : var.region}-a"
+  service_account      = var.runtime_sa_email != "" ? var.runtime_sa_email : var.builder_sa_email
+  silicon_arch         = var.silicon_arch
 
-  scheduling {
-    preemptible        = true
-    automatic_restart  = false
-    provisioning_model = "SPOT"
-  }
+  image             = var.silicon_arch == "c4a" ? "debian-cloud/debian-12-arm64" : "debian-cloud/debian-12"
+  leaf_machine_type = var.silicon_arch == "c4a" ? "c4a-highcpu-64" : (var.silicon_arch == "c3d" ? "c3d-highcpu-180" : "t2d-standard-60")
+  leaf_disk_type    = var.silicon_arch == "t2d" ? "pd-balanced" : "hyperdisk-balanced"
+  leaf_disk_size_gb = 100
+  leaf_node_count   = 6
 
-  disk {
-    source_image = "debian-cloud/debian-12"
-    auto_delete  = true
-    boot         = true
-    disk_type    = "hyperdisk-balanced"
-    disk_size_gb = 50
-  }
-
-  network_interface {
-    network = "default"
-  }
-
-  metadata = {
-    role                 = "leaf-worker"
-    backplane_engine     = "google-cloud-pubsub"
-    jit_teardown_mandate = "90s-max-billing-window"
-  }
-
-  lifecycle {
-    create_before_destroy = true
-  }
-}
-
-resource "google_compute_region_instance_group_manager" "leaf_prover_fleet" {
-  provider           = google.runtime
-  project            = coalesce(var.runtime_project_id, var.build_project_id)
-  name               = "lighter-leaf-prover-mig"
-  base_instance_name = "leaf-worker"
-  region             = var.runtime_region
-  target_size        = 63
-
-  version {
-    instance_template = google_compute_instance_template.leaf_prover_template.id
-  }
+  agg_machine_type = var.silicon_arch == "c4a" ? "c4a-highcpu-16" : (var.silicon_arch == "c3d" ? "c3d-highcpu-30" : "t2d-standard-16")
+  agg_disk_type    = var.silicon_arch == "t2d" ? "pd-balanced" : "hyperdisk-balanced"
+  agg_disk_size_gb = 50
+  agg_node_count   = 2
 }
