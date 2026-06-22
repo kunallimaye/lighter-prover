@@ -45,13 +45,13 @@ Empirical comparative matrix standardized uniformly across 15 AB variations (Leg
 
 | # | Code Taxonomy | Assigned Machine Type | Saturated Block Proving Time ($W$) | Projected Required Fleet | Projected Active CPU Cores | GKE Pod Density per VM | Effective Physical VM Count |
 | :---: | :--- | :--- | :--- | :--- | :--- | :---: | :---: |
-| **1** | **Monolithic `v0.0.1` Baseline** | `c3d-highcpu-180` *(Genoa Zen 4)* | 27.50s | 275 Dedicated VMs | 49,500 vCPUs | N/A *(Monolith)* | **275 Host VMs** |
-| **2** | **Monolithic `v0.0.1` Baseline** | **`c4d-highcpu-384` *(Turin Zen 5)*** | 19.25s | 193 Dedicated VMs | 74,112 vCPUs | N/A *(Monolith)* | **193 Host VMs** |
-| **3** | **Monolithic `v0.0.1` Baseline** | `t2d-standard-60` *(Milan Zen 3)* | 38.13s | 381 Dedicated VMs | 22,860 vCPUs | N/A *(Monolith)* | **381 Host VMs** |
-| **4** | **Monolithic `v0.0.1` Baseline** | `c4a-highcpu-64` *(ARM Axion)* | 34.83s | 348 Dedicated VMs | 22,272 vCPUs | N/A *(Monolith)* | **348 Host VMs** |
-| **5** | **Monolithic `v0.0.2` Dynamic** | `c3d-highcpu-180` *(Genoa Zen 4)* | 22.50s | 225 Dedicated VMs | 40,500 vCPUs | N/A *(Monolith)* | **225 Host VMs** |
-| **6** | **Monolithic `v0.0.2` Dynamic** | **`c4d-highcpu-384` *(Turin Zen 5)*** | **15.75s** | 158 Dedicated VMs | 60,672 vCPUs | N/A *(Monolith)* | **158 Host VMs** |
-| **7** | **Monolithic `v0.0.2` Dynamic** | `t2d-standard-60` *(Milan Zen 3)* | 31.20s | 312 Dedicated VMs | 18,720 vCPUs | N/A *(Monolith)* | **312 Host VMs** |
+| **1** | **Monolithic `v0.0.1` Baseline** | `c3d-highcpu-180` *(Genoa Zen 4)* | 138.50s | 1,385 Dedicated VMs | 249,300 vCPUs | N/A *(Monolith)* | **1,385 Host VMs** |
+| **2** | **Monolithic `v0.0.1` Baseline** | **`c4d-highcpu-384` *(Turin Zen 5)*** | 95.50s | 955 Dedicated VMs | 366,720 vCPUs | N/A *(Monolith)* | **955 Host VMs** |
+| **3** | **Monolithic `v0.0.1` Baseline** | `t2d-standard-60` *(Milan Zen 3)* | 182.40s | 1,824 Dedicated VMs | 109,440 vCPUs | N/A *(Monolith)* | **1,824 Host VMs** |
+| **4** | **Monolithic `v0.0.1` Baseline** | `c4a-highcpu-64` *(ARM Axion)* | 200.96s | 2,010 Dedicated VMs | 128,640 vCPUs | N/A *(Monolith)* | **2,010 Host VMs** |
+| **5** | **Monolithic `v0.0.2` Dynamic** | `c3d-highcpu-180` *(Genoa Zen 4)* | 113.30s | 1,133 Dedicated VMs | 203,940 vCPUs | N/A *(Monolith)* | **1,133 Host VMs** |
+| **6** | **Monolithic `v0.0.2` Dynamic** | **`c4d-highcpu-384` *(Turin Zen 5)*** | **78.10s** | 781 Dedicated VMs | 299,904 vCPUs | N/A *(Monolith)* | **781 Host VMs** |
+| **7** | **Monolithic `v0.0.2` Dynamic** | `t2d-standard-60` *(Milan Zen 3)* | 149.20s | 1,492 Dedicated VMs | 89,520 vCPUs | N/A *(Monolith)* | **1,492 Host VMs** |
 | **8** | 🏆 **Distributed Radix-2 `0.0.3`** | `c3d-highcpu-180` *(Genoa Zen 4)* | 19.50s | 195 Proving Pod Units | 23,400 Pinned vCPUs | 6 Pods / VM | **130 Host VMs** |
 | **9** | 🌟 **Distributed Radix-2 `0.0.3`** | **`c4d-highcpu-384` *(Turin Zen 5)*** | **13.65s** | **137 Proving Pod Units** | 16,440 Pinned vCPUs | **12 Pods / VM** | **46 Host VMs** |
 | **10** | ⚡ **Distributed Radix-2 `0.0.3`** | `c4a-highcpu-64` *(ARM Axion)* | 24.01s | 240 Proving Pod Units | 49,920 Pinned vCPUs | 1.23 Pods / VM | **780 Host VMs** |

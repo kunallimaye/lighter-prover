@@ -1,11 +1,11 @@
 Index,Code Taxonomy,Assigned Machine Type,Saturated Block Proving Time (W),Projected Required Fleet,Projected Active CPU Cores,GKE Pod Density per VM,Effective Physical VM Count
-1,Monolithic v0.0.1 Baseline,c3d-highcpu-180 (Genoa Zen 4),27.50s,275 Dedicated VMs,49500 vCPUs,N/A (Monolith),275 Host VMs
-2,Monolithic v0.0.1 Baseline,c4d-highcpu-384 (Turin Zen 5),19.25s,193 Dedicated VMs,74112 vCPUs,N/A (Monolith),193 Host VMs
-3,Monolithic v0.0.1 Baseline,t2d-standard-60 (Milan Zen 3),38.13s,381 Dedicated VMs,22860 vCPUs,N/A (Monolith),381 Host VMs
-4,Monolithic v0.0.1 Baseline,c4a-highcpu-64 (ARM Axion),34.83s,348 Dedicated VMs,22272 vCPUs,N/A (Monolith),348 Host VMs
-5,Monolithic v0.0.2 Dynamic,c3d-highcpu-180 (Genoa Zen 4),22.50s,225 Dedicated VMs,40500 vCPUs,N/A (Monolith),225 Host VMs
-6,Monolithic v0.0.2 Dynamic,c4d-highcpu-384 (Turin Zen 5),15.75s,158 Dedicated VMs,60672 vCPUs,N/A (Monolith),158 Host VMs
-7,Monolithic v0.0.2 Dynamic,t2d-standard-60 (Milan Zen 3),31.20s,312 Dedicated VMs,18720 vCPUs,N/A (Monolith),312 Host VMs
+1,Monolithic v0.0.1 Baseline,c3d-highcpu-180 (Genoa Zen 4),138.50s,1385 Dedicated VMs,249300 vCPUs,N/A (Monolith),1385 Host VMs
+2,Monolithic v0.0.1 Baseline,c4d-highcpu-384 (Turin Zen 5),95.50s,955 Dedicated VMs,366720 vCPUs,N/A (Monolith),955 Host VMs
+3,Monolithic v0.0.1 Baseline,t2d-standard-60 (Milan Zen 3),182.40s,1824 Dedicated VMs,109440 vCPUs,N/A (Monolith),1824 Host VMs
+4,Monolithic v0.0.1 Baseline,c4a-highcpu-64 (ARM Axion),200.96s,2010 Dedicated VMs,128640 vCPUs,N/A (Monolith),2010 Host VMs
+5,Monolithic v0.0.2 Dynamic,c3d-highcpu-180 (Genoa Zen 4),113.30s,1133 Dedicated VMs,203940 vCPUs,N/A (Monolith),1133 Host VMs
+6,Monolithic v0.0.2 Dynamic,c4d-highcpu-384 (Turin Zen 5),78.10s,781 Dedicated VMs,299904 vCPUs,N/A (Monolith),781 Host VMs
+7,Monolithic v0.0.2 Dynamic,t2d-standard-60 (Milan Zen 3),149.20s,1492 Dedicated VMs,89520 vCPUs,N/A (Monolith),1492 Host VMs
 8,Distributed Radix-2 0.0.3,c3d-highcpu-180 (Genoa Zen 4),19.50s,195 Proving Pod Units,23400 Pinned vCPUs,6 Pods / VM,130 Host VMs
 9,Distributed Radix-2 0.0.3,c4d-highcpu-384 (Turin Zen 5),13.65s,137 Proving Pod Units,16440 Pinned vCPUs,12 Pods / VM,46 Host VMs
 10,Distributed Radix-2 0.0.3,c4a-highcpu-64 (ARM Axion),24.01s,240 Proving Pod Units,49920 Pinned vCPUs,1.23 Pods / VM,780 Host VMs

@@ -9,77 +9,77 @@
       "taxonomy": "Monolithic v0.0.1 Baseline",
       "machine_type": "c3d-highcpu-180",
       "silicon": "Genoa Zen 4",
-      "saturated_block_proving_time_s": 27.5,
-      "projected_required_fleet": "275 Dedicated VMs",
-      "projected_active_cpu_cores": "49,500 vCPUs",
+      "saturated_block_proving_time_s": 138.5,
+      "projected_required_fleet": "1,385 Dedicated VMs",
+      "projected_active_cpu_cores": "249,300 vCPUs",
       "pod_density_per_vm": "N/A (Monolith)",
-      "effective_physical_vm_count": 275
+      "effective_physical_vm_count": 1385
     },
     {
       "variation_id": 2,
       "taxonomy": "Monolithic v0.0.1 Baseline",
       "machine_type": "c4d-highcpu-384",
       "silicon": "Turin Zen 5",
-      "saturated_block_proving_time_s": 19.25,
-      "projected_required_fleet": "193 Dedicated VMs",
-      "projected_active_cpu_cores": "74,112 vCPUs",
+      "saturated_block_proving_time_s": 95.5,
+      "projected_required_fleet": "955 Dedicated VMs",
+      "projected_active_cpu_cores": "366,720 vCPUs",
       "pod_density_per_vm": "N/A (Monolith)",
-      "effective_physical_vm_count": 193
+      "effective_physical_vm_count": 955
     },
     {
       "variation_id": 3,
       "taxonomy": "Monolithic v0.0.1 Baseline",
       "machine_type": "t2d-standard-60",
       "silicon": "Milan Zen 3",
-      "saturated_block_proving_time_s": 38.13,
-      "projected_required_fleet": "381 Dedicated VMs",
-      "projected_active_cpu_cores": "22,860 vCPUs",
+      "saturated_block_proving_time_s": 182.4,
+      "projected_required_fleet": "1,824 Dedicated VMs",
+      "projected_active_cpu_cores": "109,440 vCPUs",
       "pod_density_per_vm": "N/A (Monolith)",
-      "effective_physical_vm_count": 381
+      "effective_physical_vm_count": 1824
     },
     {
       "variation_id": 4,
       "taxonomy": "Monolithic v0.0.1 Baseline",
       "machine_type": "c4a-highcpu-64",
       "silicon": "ARM Axion",
-      "saturated_block_proving_time_s": 34.83,
-      "projected_required_fleet": "348 Dedicated VMs",
-      "projected_active_cpu_cores": "22,272 vCPUs",
+      "saturated_block_proving_time_s": 200.96,
+      "projected_required_fleet": "2,010 Dedicated VMs",
+      "projected_active_cpu_cores": "128,640 vCPUs",
       "pod_density_per_vm": "N/A (Monolith)",
-      "effective_physical_vm_count": 348
+      "effective_physical_vm_count": 2010
     },
     {
       "variation_id": 5,
       "taxonomy": "Monolithic v0.0.2 Dynamic",
       "machine_type": "c3d-highcpu-180",
       "silicon": "Genoa Zen 4",
-      "saturated_block_proving_time_s": 22.5,
-      "projected_required_fleet": "225 Dedicated VMs",
-      "projected_active_cpu_cores": "40,500 vCPUs",
+      "saturated_block_proving_time_s": 113.3,
+      "projected_required_fleet": "1,133 Dedicated VMs",
+      "projected_active_cpu_cores": "203,940 vCPUs",
       "pod_density_per_vm": "N/A (Monolith)",
-      "effective_physical_vm_count": 225
+      "effective_physical_vm_count": 1133
     },
     {
       "variation_id": 6,
       "taxonomy": "Monolithic v0.0.2 Dynamic",
       "machine_type": "c4d-highcpu-384",
       "silicon": "Turin Zen 5",
-      "saturated_block_proving_time_s": 15.75,
-      "projected_required_fleet": "158 Dedicated VMs",
-      "projected_active_cpu_cores": "60,672 vCPUs",
+      "saturated_block_proving_time_s": 78.1,
+      "projected_required_fleet": "781 Dedicated VMs",
+      "projected_active_cpu_cores": "299,904 vCPUs",
       "pod_density_per_vm": "N/A (Monolith)",
-      "effective_physical_vm_count": 158
+      "effective_physical_vm_count": 781
     },
     {
       "variation_id": 7,
       "taxonomy": "Monolithic v0.0.2 Dynamic",
       "machine_type": "t2d-standard-60",
       "silicon": "Milan Zen 3",
-      "saturated_block_proving_time_s": 31.2,
-      "projected_required_fleet": "312 Dedicated VMs",
-      "projected_active_cpu_cores": "18,720 vCPUs",
+      "saturated_block_proving_time_s": 149.2,
+      "projected_required_fleet": "1,492 Dedicated VMs",
+      "projected_active_cpu_cores": "89,520 vCPUs",
       "pod_density_per_vm": "N/A (Monolith)",
-      "effective_physical_vm_count": 312
+      "effective_physical_vm_count": 1492
     },
     {
       "variation_id": 8,
