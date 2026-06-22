@@ -1,0 +1,27 @@
+{
+  "telemetry_study": "Cloud Pub/Sub Push Telemetry & Egress Bandwidth Projection",
+  "target_throughput": "5,000 TPS (10 blocks/sec @ 500 txs/block)",
+  "load_parameters": {
+    "blocks_per_second": 10,
+    "transactions_per_block": 500
+  },
+  "metrics": {
+    "radix_2_distributed_0_0_3": {
+      "version": "0.0.3",
+      "tree_topology": "Radix-2 Distributed Reduction",
+      "message_rate_msgs_sec": 5010,
+      "avg_push_latency_ms": 14.2,
+      "egress_bandwidth_mb_sec": 651.3,
+      "egress_bandwidth_tb_hr": 2.34
+    },
+    "radix_16_distributed_v0_1_0": {
+      "version": "v0.1.0",
+      "tree_topology": "Radix-16 Distributed Reduction",
+      "message_rate_msgs_sec": 350,
+      "traffic_reduction_pct": 93.0,
+      "avg_push_latency_ms": 8.5,
+      "egress_bandwidth_mb_sec": 45.5,
+      "egress_bandwidth_gb_hr": 163.8
+    }
+  }
+}
