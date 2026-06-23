@@ -474,46 +474,59 @@ cloud_bench_run() {
   _log_info "Ensuring VM instance '${target_vm}' (${zone}) is started before SSH connection..."
   gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
 
-  gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
-    set -euo pipefail
-    if ! command -v docker >/dev/null 2>&1; then
-      sudo apt-get update && sudo apt-get install -y docker.io
+  for _ in {1..15}; do
+    if gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="echo ready" --quiet 2>/dev/null; then
+      break
     fi
-    sudo gcloud auth configure-docker ${ar_region}-docker.pkg.dev --quiet
-    sudo rm -rf /tmp/reports && mkdir -p /tmp/reports
+    sleep 3
+  done
 
-    # Note: CFS vs. hard core pinning via --cpuset-cpus is a critical performance knob/option worth trialing in future benchmarking.
-    if [[ ${jobs} -eq 1 ]]; then
-      sudo nice -n -20 docker run --rm --pull=always \
-        --pids-limit=-1 \
-        --ulimit nofile=1048576:1048576 \
-        -v /tmp/reports:/data/reports:rw \
-        ${image_uri} --tx-per-proof ${tx_per_proof}
-    else
-      threads_per_job=\$(( \$(nproc) / ${jobs} ))
-      for j in \$(seq 1 ${jobs}); do
-        mkdir -p /tmp/reports/job_\${j}
+  gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
+    nohup bash -c '
+      set -euo pipefail
+      if ! command -v docker >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y docker.io
+      fi
+      sudo gcloud auth configure-docker ${ar_region}-docker.pkg.dev --quiet
+      sudo rm -rf /tmp/reports /tmp/bench.done && mkdir -p /tmp/reports
+
+      if [[ ${jobs} -eq 1 ]]; then
         sudo nice -n -20 docker run --rm --pull=always \
           --pids-limit=-1 \
           --ulimit nofile=1048576:1048576 \
-          -e RAYON_NUM_THREADS=\${threads_per_job} \
-          -v /tmp/reports/job_\${j}:/data/reports:rw \
-          ${image_uri} &
-      done
-      wait
-    fi
-
-    if [[ -n '${bench_bucket}' ]]; then
-      machine_type=\$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/machine-type | awk -F/ '{print \$NF}')
-      instance_id=\$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id)
-      ts=\$(date +%Y%m%d-%H%M%S)
-      dest=\$(echo '${bench_template}' | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
-      if [[ -n '${benchmark_id}' ]]; then
-        dest=\"benchmark-reports/${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
+          -v /tmp/reports:/data/reports:rw \
+          ${image_uri} --tx-per-proof ${tx_per_proof}
+      else
+        threads_per_job=\$(( \$(nproc) / ${jobs} ))
+        for j in \$(seq 1 ${jobs}); do
+          mkdir -p /tmp/reports/job_\${j}
+          sudo nice -n -20 docker run --rm --pull=always \
+            --pids-limit=-1 \
+            --ulimit nofile=1048576:1048576 \
+            -e RAYON_NUM_THREADS=\${threads_per_job} \
+            -v /tmp/reports/job_\${j}:/data/reports:rw \
+            ${image_uri} &
+        done
+        wait
       fi
-      gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
-    fi
-  "
+
+      if [[ -n \"${bench_bucket}\" ]]; then
+        machine_type=\$(curl -s -H \"Metadata-Flavor: Google\" http://metadata.google.internal/computeMetadata/v1/instance/machine-type | awk -F/ \"{print \\\$NF}\")
+        instance_id=\$(curl -s -H \"Metadata-Flavor: Google\" http://metadata.google.internal/computeMetadata/v1/instance/id)
+        ts=\$(date +%Y%m%d-%H%M%S)
+        dest=\$(echo \"${bench_template}\" | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
+        if [[ -n \"${benchmark_id}\" ]]; then
+          dest=\"benchmark-reports/${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
+        fi
+        gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
+      fi
+      touch /tmp/bench.done
+    ' > /tmp/bench.log 2>&1 &
+  " --quiet
+
+  while ! gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="[[ -f /tmp/bench.done ]]" --quiet 2>/dev/null; do
+    sleep 10
+  done
 
   _log_ok "Remote benchmark completed successfully on '${target_vm}'."
 }
