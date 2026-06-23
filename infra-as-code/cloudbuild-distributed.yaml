@@ -58,6 +58,8 @@ substitutions:
   _BUILDER_SA_EMAIL: ''
   _RUNTIME_SA_EMAIL: ''
   _AR_REPO: 'lighter-prover'
+  _BENCHMARK_ID: ''
+  _IMAGE: 'default'
 
 options:
   logging: CLOUD_LOGGING_ONLY
