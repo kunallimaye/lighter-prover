@@ -74,9 +74,9 @@ def main():
   groups = {}
   for p in gcs_paths:
     parts = p.split("/")
-    if len(parts) >= 7:
-      bench_id = parts[3]
-      mtype = parts[4]
+    if len(parts) >= 6:
+      bench_id = parts[4] if parts[3] == "benchmark-reports" else parts[3]
+      mtype = parts[5] if parts[3] == "benchmark-reports" else parts[4]
       key = (bench_id, mtype)
       groups.setdefault(key, []).append(p)
 
