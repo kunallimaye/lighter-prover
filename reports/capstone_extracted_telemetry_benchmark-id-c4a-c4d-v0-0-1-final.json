@@ -1,0 +1,20 @@
+[
+  {
+    "benchmark_id": "benchmark-id-c4a-c4d-v0-0-1-final",
+    "machine_type": "c4a-highcpu-48",
+    "total_block_count": 4,
+    "min_wall_time_sec": 318.199,
+    "max_wall_time_sec": 319.162,
+    "avg_wall_time_sec": 318.689,
+    "avg_wall_time_min": 5.311
+  },
+  {
+    "benchmark_id": "benchmark-id-c4a-c4d-v0-0-1-final",
+    "machine_type": "c4d-highcpu-48",
+    "total_block_count": 4,
+    "min_wall_time_sec": 363.868,
+    "max_wall_time_sec": 438.99,
+    "avg_wall_time_sec": 401.416,
+    "avg_wall_time_min": 6.69
+  }
+]
