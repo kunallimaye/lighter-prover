@@ -498,6 +498,7 @@ cloud_bench_run() {
           ${image_uri} --tx-per-proof ${tx_per_proof}
       else
         threads_per_job=\$(( \$(nproc) / ${jobs} ))
+        pids=()
         for j in \$(seq 1 ${jobs}); do
           mkdir -p /tmp/reports/job_\${j}
           sudo nice -n -20 docker run --rm --pull=always \
@@ -506,8 +507,11 @@ cloud_bench_run() {
             -e RAYON_NUM_THREADS=\${threads_per_job} \
             -v /tmp/reports/job_\${j}:/data/reports:rw \
             ${image_uri} &
+          pids+=(\$!)
         done
-        wait
+        for pid in \"\${pids[@]}\"; do
+          wait \"\$pid\" || true
+        done
       fi
 
       if [[ -n \"${bench_bucket}\" ]]; then
