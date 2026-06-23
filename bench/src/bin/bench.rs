@@ -165,7 +165,7 @@ fn main() {
             let mut account_pub_data_tree_root = block_ref.old_account_pub_data_tree_root;
             let mut market_tree_root = block_ref.old_market_tree_root;
 
-            for (index, tx) in tx_chunks_ref.iter().enumerate() {
+            for (index, tx) in tx_chunks_ref.iter().take(10).enumerate() {
                 let block_tx = BlockTx {
                     created_at,
                     old_system_config: system_config,
@@ -193,8 +193,8 @@ fn main() {
                 let tx_witness = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs.clone());
                 all_assets = tx_witness.all_assets_after.clone();
                 all_market_details = tx_witness.all_market_details_after.clone();
-                register_stack = tx_witness.register_stack_after;
                 system_config = tx_witness.new_system_config;
+                register_stack = tx_witness.register_stack_after;
                 account_tree_root = tx_witness.new_account_tree_root;
                 account_pub_data_tree_root = tx_witness.new_account_pub_data_tree_root;
                 account_delta_tree_root = tx_witness.new_account_delta_tree_root;
@@ -206,7 +206,8 @@ fn main() {
             }
         });
 
-        for _ in 0..chunks_count {
+        let max_chunks = std::cmp::min(chunks_count, 10);
+        for _ in 0..max_chunks {
             let item = tx_receiver.recv().expect("Producer pipeline disconnected");
             witness_total += item.w_dt;
             stark_prove_total += item.p_dt;

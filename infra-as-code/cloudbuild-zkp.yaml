@@ -11,15 +11,20 @@ steps:
       - 'buildx'
       - 'build'
       - '--platform'
-      - 'linux/amd64,linux/arm64'
+      - '${_PLATFORM}'
       - '--build-arg'
       - 'RUSTFLAGS=-C target-cpu=znver3'
       - '-f'
       - '${_DOCKERFILE}'
       - '-t'
-      - '${_IMAGE_URI}:multiarch'
+      - '${_IMAGE_URI}'
       - '--push'
       - '.'
+
+substitutions:
+  _PLATFORM: 'linux/amd64'
+  _DOCKERFILE: 'Dockerfile.zkp'
+  _IMAGE_URI: 'zkp-prover:amd64'
 
 options:
   logging: CLOUD_LOGGING_ONLY

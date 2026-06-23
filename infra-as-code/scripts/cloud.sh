@@ -20,7 +20,9 @@ _generate_tfvars() {
 }
 
 _resolve_build_project() {
-  _generate_tfvars
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   local project=""
   if [[ -f "${target_sa}" ]]; then
@@ -329,9 +331,13 @@ cloud_zkp_build() {
   local arch="${1:-arm64}"
 
   if [[ "${arch}" == "all" ]]; then
-    _log_info "Submitting Cloud Build pipelines for both ARM64 and AMD64 images..."
-    cloud_zkp_build arm64
-    cloud_zkp_build amd64
+    _log_info "Submitting concurrent Cloud Build pipelines for ARM64 and AMD64 images in parallel..."
+    cloud_zkp_build arm64 &
+    local p1=$!
+    cloud_zkp_build amd64 &
+    local p2=$!
+    wait "$p1" "$p2"
+    _log_ok "Both ARM64 and AMD64 ZKP container images built and pushed successfully in parallel."
     return
   fi
 
@@ -355,9 +361,11 @@ cloud_zkp_build() {
 
   local dockerfile="Dockerfile.zkp-arm64"
   local image_tag="arm64"
+  local platform="linux/arm64"
   if [[ "${arch}" == "amd64" ]]; then
     dockerfile="Dockerfile.zkp"
     image_tag="amd64"
+    platform="linux/amd64"
   fi
 
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
@@ -367,6 +375,7 @@ cloud_zkp_build() {
   _log_info "  Builder SA:    ${builder_sa}"
   _log_info "  Target Image:  ${image_uri}"
   _log_info "  Dockerfile:    ${dockerfile}"
+  _log_info "  Platform:      ${platform}"
   _log_info "  Machine Type:  ${build_machine}"
 
   local cb_args=()
@@ -381,7 +390,7 @@ cloud_zkp_build() {
     --project="${build_project}" \
     "${cb_args[@]}" \
     --config="infra-as-code/cloudbuild-zkp.yaml" \
-    --substitutions="_IMAGE_URI=${image_uri},_DOCKERFILE=${dockerfile}" \
+    --substitutions="_IMAGE_URI=${image_uri},_DOCKERFILE=${dockerfile},_PLATFORM=${platform}" \
     --quiet
 
   _log_ok "ZKP container image built and pushed successfully to ${image_uri}."
@@ -394,7 +403,9 @@ cloud_bench_run() {
   local build_project
   build_project="$(_resolve_build_project)"
 
-  _generate_tfvars
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
 
   local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
@@ -581,7 +592,9 @@ cloud_run_distributed_cluster() {
   done
 
   local build_project="$(_resolve_build_project)"
-  _generate_tfvars
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   local builder_sa="" runtime_sa="" build_machine=""
