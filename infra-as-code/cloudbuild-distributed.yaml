@@ -25,8 +25,12 @@ steps:
     args:
       - '-c'
       - |
-        echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
-        terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
+        if [ "${_ENGINE}" != "gke" ]; then
+          echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
+          terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
+        else
+          echo "[INFO] Engine is GKE: Skipping bare-metal GCE VM terraform apply..."
+        fi
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
@@ -68,12 +72,16 @@ steps:
   # 4. Mandatory Post-Test Zero-Billing Teardown
   - id: tf-destroy
     name: 'hashicorp/terraform:1.14'
+    entrypoint: 'sh'
     dir: 'infra-as-code/terraform'
     args:
-      - 'destroy'
-      - '-auto-approve'
-      - '-no-color'
-      - '-input=false'
+      - '-c'
+      - |
+        if [ "${_ENGINE}" != "gke" ]; then
+          terraform destroy -auto-approve -no-color -input=false
+        else
+          echo "[INFO] Engine is GKE: Skipping bare-metal GCE VM terraform destroy..."
+        fi
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
