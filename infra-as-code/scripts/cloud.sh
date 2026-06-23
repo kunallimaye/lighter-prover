@@ -368,8 +368,7 @@ cloud_zkp_build() {
     platform="linux/amd64"
   fi
 
-  local git_tag
-  git_tag="$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")"
+  local git_tag="${TAG:-$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")}"
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
   local extra_tag_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${git_tag}"
 
