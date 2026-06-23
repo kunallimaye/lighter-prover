@@ -455,7 +455,11 @@ cloud_bench_run() {
   fi
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
   if [[ "${image_arg}" != "default" && -n "${image_arg}" ]]; then
-    image_uri="${image_arg}"
+    if [[ "${image_arg}" != *"/"* ]]; then
+      image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_arg}"
+    else
+      image_uri="${image_arg}"
+    fi
   fi
 
   _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone}, jobs=${jobs}, tx_per_proof=${tx_per_proof})..."
