@@ -18,6 +18,8 @@ steps:
       - '${_DOCKERFILE}'
       - '-t'
       - '${_IMAGE_URI}'
+      - '-t'
+      - '${_EXTRA_TAG_URI}'
       - '--push'
       - '.'
 
@@ -25,6 +27,7 @@ substitutions:
   _PLATFORM: 'linux/amd64'
   _DOCKERFILE: 'Dockerfile.zkp'
   _IMAGE_URI: 'zkp-prover:amd64'
+  _EXTRA_TAG_URI: 'zkp-prover:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY

@@ -368,12 +368,15 @@ cloud_zkp_build() {
     platform="linux/amd64"
   fi
 
+  local git_tag
+  git_tag="$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")"
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
+  local extra_tag_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${git_tag}"
 
   _log_info "Submitting isolated ZKP container image build (${arch}) to Cloud Build..."
   _log_info "  Build Project: ${build_project}"
   _log_info "  Builder SA:    ${builder_sa}"
-  _log_info "  Target Image:  ${image_uri}"
+  _log_info "  Target Image:  ${image_uri} (and ${extra_tag_uri})"
   _log_info "  Dockerfile:    ${dockerfile}"
   _log_info "  Platform:      ${platform}"
   _log_info "  Machine Type:  ${build_machine}"
@@ -390,7 +393,7 @@ cloud_zkp_build() {
     --project="${build_project}" \
     "${cb_args[@]}" \
     --config="infra-as-code/cloudbuild-zkp.yaml" \
-    --substitutions="_IMAGE_URI=${image_uri},_DOCKERFILE=${dockerfile},_PLATFORM=${platform}" \
+    --substitutions="_IMAGE_URI=${image_uri},_EXTRA_TAG_URI=${extra_tag_uri},_DOCKERFILE=${dockerfile},_PLATFORM=${platform}" \
     --quiet
 
   _log_ok "ZKP container image built and pushed successfully to ${image_uri}."
@@ -507,7 +510,7 @@ cloud_bench_run() {
       ts=\$(date +%Y%m%d-%H%M%S)
       dest=\$(echo '${bench_template}' | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
       if [[ -n '${benchmark_id}' ]]; then
-        dest=\"${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
+        dest=\"benchmark-reports/${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
       fi
       gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
     fi
