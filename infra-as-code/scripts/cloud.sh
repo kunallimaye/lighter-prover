@@ -400,6 +400,8 @@ cloud_bench_run() {
   local target_vm="${1:-all}"
   local jobs="${2:-1}"
   local tx_per_proof="${3:-4}"
+  local image_arg="${4:-default}"
+  local benchmark_id="${5:-}"
   local build_project
   build_project="$(_resolve_build_project)"
 
@@ -425,14 +427,17 @@ cloud_bench_run() {
     fi
 
     for vm in "${vm_list[@]}"; do
-      cloud_bench_run "${vm}" "${jobs}" "${tx_per_proof}" &
+      cloud_bench_run "${vm}" "${jobs}" "${tx_per_proof}" "${image_arg}" "${benchmark_id}" &
     done
     wait
     return
   fi
 
   local zone cfg_repo="" cfg_region="" cfg_ar_region="" bench_bucket="" bench_template=""
-  zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('zone', 'us-central1-a'))" 2>/dev/null || true)"
+  zone="$(gcloud compute instances list --filter="name=${target_vm}" --format="value(zone)" 2>/dev/null | head -n 1)"
+  if [[ -z "${zone}" ]]; then
+    zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('zone', 'us-central1-c'))" 2>/dev/null || true)"
+  fi
   cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', 'lighter-prover-iac'))" 2>/dev/null || true)"
   cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', 'us-central1'))" 2>/dev/null || true)"
   cfg_ar_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_region', 'us'))" 2>/dev/null || true)"
@@ -449,6 +454,9 @@ cloud_bench_run() {
     image_tag="arm64"
   fi
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
+  if [[ "${image_arg}" != "default" && -n "${image_arg}" ]]; then
+    image_uri="${image_arg}"
+  fi
 
   _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone}, jobs=${jobs}, tx_per_proof=${tx_per_proof})..."
   _log_info "  Target VM:      ${target_vm} (${zone})"
@@ -456,6 +464,9 @@ cloud_bench_run() {
   _log_info "  Concurrency:    ${jobs} simultaneous job(s)"
   _log_info "  Batch Size:     ${tx_per_proof} txs / proof"
   _log_info "  Prioritization: nice -n -20, --pids-limit=-1"
+
+  _log_info "Ensuring VM instance '${target_vm}' (${zone}) is started before SSH connection..."
+  gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
 
   gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
     set -euo pipefail
@@ -481,7 +492,7 @@ cloud_bench_run() {
           --ulimit nofile=1048576:1048576 \
           -e RAYON_NUM_THREADS=\${threads_per_job} \
           -v /tmp/reports/job_\${j}:/data/reports:rw \
-          ${image_uri} --tx-per-proof ${tx_per_proof} &
+          ${image_uri} &
       done
       wait
     fi
@@ -491,6 +502,9 @@ cloud_bench_run() {
       instance_id=\$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id)
       ts=\$(date +%Y%m%d-%H%M%S)
       dest=\$(echo '${bench_template}' | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
+      if [[ -n '${benchmark_id}' ]]; then
+        dest=\"${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
+      fi
       gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
     fi
   "
@@ -581,12 +595,16 @@ cloud_run_distributed_cluster() {
   local arch="${ARCH:-c3d}"
   local blocks="${BLOCKS:-2}"
   local chunk="${CHUNK:-1}"
+  local image="${IMAGE:-default}"
+  local benchmark_id="${BENCHMARK_ID:-}"
   for arg in "$@"; do
     case "$arg" in
       --engine=*) engine="${arg#*=}" ;;
       --arch=*)   arch="${arg#*=}" ;;
       --blocks=*) blocks="${arg#*=}" ;;
       --chunk=*)  chunk="${arg#*=}" ;;
+      --image=*)  image="${arg#*=}" ;;
+      --benchmark-id=*) benchmark_id="${arg#*=}" ;;
       [0-9]*)     blocks="$arg" ;;
     esac
   done
@@ -607,7 +625,7 @@ cloud_run_distributed_cluster() {
   _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine}, arch=${arch}, blocks=${blocks}, chunk=${chunk})..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk}"
+  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id}"
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
@@ -879,7 +897,7 @@ cloud_test_omni_silicon_parallel() {
 case "${1:-}" in
   cloud-admin-init)              cloud_admin_init ;;
   cloud-admin-undo)              cloud_admin_undo ;;
-  cloud-bench-run)               shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" ;;
+  cloud-bench-run)               shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" "${4:-default}" "${5:-}" ;;
   cloud-run-distributed-cluster) cloud_run_distributed_cluster ;;
   cloud-test-t2d-hypothesis)     cloud_test_t2d_hypothesis ;;
   cloud-test-gke-performance-tax) cloud_test_gke_performance_tax ;;

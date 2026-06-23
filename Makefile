@@ -15,16 +15,26 @@ zkp-image: container-build ## Alias for container-build
 cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via Cloud Build (infra-as-code/cloudbuild-zkp.yaml)
 	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build $(ARCH)
 
-JOBS ?= 1
+JOBS ?= 1..10
 CHUNK ?= 1
-BLOCKS ?= 2
+BLOCKS ?= 1..10
 ENGINE ?= gke
 ARCH ?= c3d
-cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
-	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)"
+BENCHMARK_ID ?= benchmark-id-$(shell date -u +'%Y-%m-%d_%H-%M-%S_UTC')
+VM ?= all
+SHEET_ID ?= 1z8bIeeKaEnXP6UZW52pGLll0XrwjoLS0aBJOvs1qqd0
+FORCE_BUILD ?= false
+# Valid IMAGE values: 'default', 'latest', 'v0.0.1-single-vm-proof-gen', 'v0.0.2-single-vm-dynamic-chunk-size-proof-gen', '0.0.3-distributed-proving', 'radix-16-reduction-trees', or full Artifact Registry container URI
+IMAGE ?= default
 
-cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment (accepts ENGINE=gke/mig ARCH=c4a/c3d/t2d BLOCKS=2 CHUNK=1)
-	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster --engine=$(ENGINE) --arch=$(ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK)
+cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
+	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)" "$(IMAGE)" "$(BENCHMARK_ID)"
+
+cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment
+	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster --engine=$(ENGINE) --arch=$(ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK) --image=$(IMAGE) --benchmark-id=$(BENCHMARK_ID)
+
+cloud-extract-metrics: ## Extract authentic measured finality telemetry directly from uploaded GCS bench_summary.json files
+	@python3 infra-as-code/scripts/extract_gcs_metrics.py --gcs-prefix="gs://kunal-scratch-tfstate/benchmark-reports/$(BENCHMARK_ID)"
 
 test-t2d-hypothesis: ## Execute 4-pod concurrent multi-block AB race comparing AMD Milan Tau t2d vs ARM Axion c4a
 	@bash infra-as-code/scripts/cloud.sh cloud-test-t2d-hypothesis
@@ -32,8 +42,8 @@ test-t2d-hypothesis: ## Execute 4-pod concurrent multi-block AB race comparing A
 test-gke-tax: ## Execute 2-block distributed proving benchmark on GKE Autopilot validating zero eBPF overlay tax
 	@bash infra-as-code/scripts/cloud.sh cloud-test-gke-performance-tax
 
-test-capstone: ## Execute sequential 4-release benchmark trial at JOB=10 on c4a-64 spot instances
-	@bash infra-as-code/scripts/cloud.sh cloud-test-capstone-matrix
+capstone-benchmark-run: ## Execute unmocked comparative capstone benchmark study physically on Google Cloud hardware
+	@python3 infra-as-code/scripts/run_capstone_benchmark.py --benchmark-id="$(BENCHMARK_ID)" --vm="$(VM)" --jobs="$(JOBS)" --blocks="$(BLOCKS)" --image="$(IMAGE)" --sheet-id="$(SHEET_ID)" --force-build="$(FORCE_BUILD)"
 
 verify-enhanced-proof-validity: ## Verify authentic production cloud STARK proof calldata against EVM via containerized podman Foundry runner
 	@bash infra-as-code/scripts/container.sh verify-enhanced-proof-validity

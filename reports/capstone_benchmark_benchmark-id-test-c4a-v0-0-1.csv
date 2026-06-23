@@ -1,0 +1,5 @@
+Benchmark ID,Machine Type,Total Block/Job Count,Minimum Elapsed Wall Time (sec),Maximum Elapsed Wall Time (sec),Average Elapsed Wall Time (sec),Average Elapsed Wall Time (min)
+c4a-highcpu-64,6187020544627952299,2,268.263,269.231,268.747,4.479
+c4a-highcpu-64,7396168398115058666,39,578.397,828.415,715.912,11.932
+c4a-highcpu-64,8253790448487732327,15,200.956,506.75,404.121,6.735
+c4a-highcpu-64,894120487915332389,156,13.483,215.563,44.789,0.746

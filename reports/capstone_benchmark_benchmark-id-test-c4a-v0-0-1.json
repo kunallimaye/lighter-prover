@@ -1,0 +1,38 @@
+[
+  {
+    "benchmark_id": "c4a-highcpu-64",
+    "machine_type": "6187020544627952299",
+    "total_block_count": 2,
+    "min_wall_time_sec": 268.263,
+    "max_wall_time_sec": 269.231,
+    "avg_wall_time_sec": 268.747,
+    "avg_wall_time_min": 4.479
+  },
+  {
+    "benchmark_id": "c4a-highcpu-64",
+    "machine_type": "7396168398115058666",
+    "total_block_count": 39,
+    "min_wall_time_sec": 578.397,
+    "max_wall_time_sec": 828.415,
+    "avg_wall_time_sec": 715.912,
+    "avg_wall_time_min": 11.932
+  },
+  {
+    "benchmark_id": "c4a-highcpu-64",
+    "machine_type": "8253790448487732327",
+    "total_block_count": 15,
+    "min_wall_time_sec": 200.956,
+    "max_wall_time_sec": 506.75,
+    "avg_wall_time_sec": 404.121,
+    "avg_wall_time_min": 6.735
+  },
+  {
+    "benchmark_id": "c4a-highcpu-64",
+    "machine_type": "894120487915332389",
+    "total_block_count": 156,
+    "min_wall_time_sec": 13.483,
+    "max_wall_time_sec": 215.563,
+    "avg_wall_time_sec": 44.789,
+    "avg_wall_time_min": 0.746
+  }
+]
