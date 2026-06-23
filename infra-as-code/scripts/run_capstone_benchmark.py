@@ -79,11 +79,14 @@ def main():
     subprocess.run(["make", "cloud-bench-run", f"VM={args.vm}", f"JOBS={args.jobs}", f"IMAGE={image_arg}", f"BENCHMARK_ID={bench_id}"], env=env_mon, check=False)
 
   # Execute Distributed Runs via cloud-run-distributed-cluster
-  print(f"  [RUNNER] Executing cloud-run-distributed-cluster across GKE pod profiles (blocks={args.blocks})...")
-  env_dist = os.environ.copy()
-  env_dist["BENCHMARK_ID"] = bench_id
-  env_dist["IMAGE"] = image_arg
-  subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", "ARCH=c3d", f"BLOCKS={args.blocks}", f"IMAGE={image_arg}", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
+  if args.blocks not in ("none", "0", "false", ""):
+    print(f"  [RUNNER] Executing cloud-run-distributed-cluster across GKE pod profiles (blocks={args.blocks})...")
+    env_dist = os.environ.copy()
+    env_dist["BENCHMARK_ID"] = bench_id
+    env_dist["IMAGE"] = image_arg
+    subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", "ARCH=c3d", f"BLOCKS={args.blocks}", f"IMAGE={image_arg}", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
+  else:
+    print("  [RUNNER] Skipping GKE distributed cluster runs (blocks=none).")
 
   # Phase 4: Extract Telemetry via cloud-extract-metrics logic
   gcs_prefix = f"gs://kunal-scratch-tfstate/benchmark-reports/{bench_id}"
