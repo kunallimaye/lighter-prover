@@ -92,8 +92,8 @@ def main():
 
   # Phase 5: Copy / partition master output reports
   print("\n[Phase 5] Finalizing master comparative output reports...")
-  extracted_json = "reports/capstone_extracted_telemetry.json"
-  extracted_csv = "reports/capstone_extracted_telemetry.csv"
+  extracted_json = f"reports/capstone_extracted_telemetry_{bench_id}.json"
+  extracted_csv = f"reports/capstone_extracted_telemetry_{bench_id}.csv"
   
   dest_json = f"reports/capstone_benchmark_{bench_id}.json"
   dest_csv = f"reports/capstone_benchmark_{bench_id}.csv"

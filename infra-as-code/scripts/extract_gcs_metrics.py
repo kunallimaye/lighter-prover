@@ -105,11 +105,15 @@ def main():
         "avg_wall_time_min": avg_min,
     })
 
-  json_path = "reports/capstone_extracted_telemetry.json"
+  bench_id_suffix = ""
+  if extracted_records:
+    bench_id_suffix = "_" + str(extracted_records[0]["benchmark_id"])
+
+  json_path = f"reports/capstone_extracted_telemetry{bench_id_suffix}.json"
   with open(json_path, "w", encoding="utf-8") as f:
     json.dump(extracted_records, f, indent=2)
 
-  csv_path = "reports/capstone_extracted_telemetry.csv"
+  csv_path = f"reports/capstone_extracted_telemetry{bench_id_suffix}.csv"
   headers = [
       "Benchmark ID",
       "Machine Type",
