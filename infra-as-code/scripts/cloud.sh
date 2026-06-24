@@ -371,7 +371,7 @@ cloud_zkp_build() {
 
   local git_tag="${TAG:-$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")}"
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
-  local extra_tag_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${git_tag}-${image_tag}"
+  local extra_tag_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${git_tag}"
 
   _log_info "Submitting isolated ZKP container image build (${arch}) to Cloud Build..."
   _log_info "  Build Project: ${build_project}"
