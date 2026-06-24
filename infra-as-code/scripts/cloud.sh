@@ -20,7 +20,9 @@ _generate_tfvars() {
 }
 
 _resolve_build_project() {
-  _generate_tfvars
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   local project=""
   if [[ -f "${target_sa}" ]]; then
@@ -237,6 +239,7 @@ _execute_cloudbuild() {
 # ─── Operator Verbs ───────────────────────────────────────────────────
 
 cloud_admin_init() {
+  _generate_tfvars
   local build_project
   build_project="$(_resolve_build_project)"
 
@@ -329,9 +332,13 @@ cloud_zkp_build() {
   local arch="${1:-arm64}"
 
   if [[ "${arch}" == "all" ]]; then
-    _log_info "Submitting Cloud Build pipelines for both ARM64 and AMD64 images..."
-    cloud_zkp_build arm64
-    cloud_zkp_build amd64
+    _log_info "Submitting concurrent Cloud Build pipelines for ARM64 and AMD64 images in parallel..."
+    cloud_zkp_build arm64 &
+    local p1=$!
+    cloud_zkp_build amd64 &
+    local p2=$!
+    wait "$p1" "$p2"
+    _log_ok "Both ARM64 and AMD64 ZKP container images built and pushed successfully in parallel."
     return
   fi
 
@@ -355,18 +362,23 @@ cloud_zkp_build() {
 
   local dockerfile="Dockerfile.zkp-arm64"
   local image_tag="arm64"
+  local platform="linux/arm64"
   if [[ "${arch}" == "amd64" ]]; then
     dockerfile="Dockerfile.zkp"
     image_tag="amd64"
+    platform="linux/amd64"
   fi
 
+  local git_tag="${TAG:-$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")}"
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
+  local extra_tag_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${git_tag}-${image_tag}"
 
   _log_info "Submitting isolated ZKP container image build (${arch}) to Cloud Build..."
   _log_info "  Build Project: ${build_project}"
   _log_info "  Builder SA:    ${builder_sa}"
-  _log_info "  Target Image:  ${image_uri}"
+  _log_info "  Target Image:  ${image_uri} (and ${extra_tag_uri})"
   _log_info "  Dockerfile:    ${dockerfile}"
+  _log_info "  Platform:      ${platform}"
   _log_info "  Machine Type:  ${build_machine}"
 
   local cb_args=()
@@ -381,7 +393,7 @@ cloud_zkp_build() {
     --project="${build_project}" \
     "${cb_args[@]}" \
     --config="infra-as-code/cloudbuild-zkp.yaml" \
-    --substitutions="_IMAGE_URI=${image_uri},_DOCKERFILE=${dockerfile}" \
+    --substitutions="_IMAGE_URI=${image_uri},_EXTRA_TAG_URI=${extra_tag_uri},_DOCKERFILE=${dockerfile},_PLATFORM=${platform}" \
     --quiet
 
   _log_ok "ZKP container image built and pushed successfully to ${image_uri}."
@@ -391,10 +403,14 @@ cloud_bench_run() {
   local target_vm="${1:-all}"
   local jobs="${2:-1}"
   local tx_per_proof="${3:-4}"
+  local image_arg="${4:-default}"
+  local benchmark_id="${5:-}"
   local build_project
   build_project="$(_resolve_build_project)"
 
-  _generate_tfvars
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
 
   local target_vms="infra-as-code/terraform/vms.auto.tfvars.json"
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
@@ -414,14 +430,17 @@ cloud_bench_run() {
     fi
 
     for vm in "${vm_list[@]}"; do
-      cloud_bench_run "${vm}" "${jobs}" "${tx_per_proof}" &
+      cloud_bench_run "${vm}" "${jobs}" "${tx_per_proof}" "${image_arg}" "${benchmark_id}" &
     done
     wait
     return
   fi
 
   local zone cfg_repo="" cfg_region="" cfg_ar_region="" bench_bucket="" bench_template=""
-  zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('zone', 'us-central1-a'))" 2>/dev/null || true)"
+  zone="$(gcloud compute instances list --filter="name=${target_vm}" --format="value(zone)" 2>/dev/null | head -n 1)"
+  if [[ -z "${zone}" ]]; then
+    zone="$(python3 -c "import json; print(json.load(open('${target_vms}')).get('vms', {}).get('${target_vm}', {}).get('zone', 'us-central1-c'))" 2>/dev/null || true)"
+  fi
   cfg_repo="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_repo', 'lighter-prover-iac'))" 2>/dev/null || true)"
   cfg_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('region', 'us-central1'))" 2>/dev/null || true)"
   cfg_ar_region="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('ar_region', 'us'))" 2>/dev/null || true)"
@@ -438,6 +457,14 @@ cloud_bench_run() {
     image_tag="arm64"
   fi
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
+  if [[ "${image_arg}" != "default" && -n "${image_arg}" ]]; then
+    if [[ "${image_arg}" != *"/"* ]]; then
+      local tag_suffix="${image_arg#zkp-prover:}"
+      image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${tag_suffix}-${image_tag}"
+    else
+      image_uri="${image_arg}"
+    fi
+  fi
 
   _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone}, jobs=${jobs}, tx_per_proof=${tx_per_proof})..."
   _log_info "  Target VM:      ${target_vm} (${zone})"
@@ -446,43 +473,71 @@ cloud_bench_run() {
   _log_info "  Batch Size:     ${tx_per_proof} txs / proof"
   _log_info "  Prioritization: nice -n -20, --pids-limit=-1"
 
-  gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
-    set -euo pipefail
-    if ! command -v docker >/dev/null 2>&1; then
-      sudo apt-get update && sudo apt-get install -y docker.io
-    fi
-    sudo gcloud auth configure-docker ${ar_region}-docker.pkg.dev --quiet
-    sudo rm -rf /tmp/reports && mkdir -p /tmp/reports
+  if ! gcloud compute instances describe "${target_vm}" --zone="${zone}" --project="${build_project}" &>/dev/null; then
+    _log_info "  [WARNING] Instance '${target_vm}' (${zone}) not found in project '${build_project}'. Skipping benchmark..."
+    return 0
+  fi
 
-    # Note: CFS vs. hard core pinning via --cpuset-cpus is a critical performance knob/option worth trialing in future benchmarking.
-    if [[ ${jobs} -eq 1 ]]; then
-      sudo nice -n -20 docker run --rm --pull=always \
-        --pids-limit=-1 \
-        --ulimit nofile=1048576:1048576 \
-        -v /tmp/reports:/data/reports:rw \
-        ${image_uri} --tx-per-proof ${tx_per_proof}
-    else
-      threads_per_job=\$(( \$(nproc) / ${jobs} ))
-      for j in \$(seq 1 ${jobs}); do
-        mkdir -p /tmp/reports/job_\${j}
+  _log_info "Ensuring VM instance '${target_vm}' (${zone}) is started before SSH connection..."
+  gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
+
+  for _ in {1..15}; do
+    if gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="echo ready" --quiet 2>/dev/null; then
+      break
+    fi
+    sleep 3
+  done
+
+  gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
+    nohup bash -c '
+      set -euo pipefail
+      if ! command -v docker >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y docker.io
+      fi
+      sudo gcloud auth configure-docker ${ar_region}-docker.pkg.dev --quiet
+      sudo rm -rf /tmp/reports /tmp/bench.done && mkdir -p /tmp/reports
+
+      if [[ ${jobs} -eq 1 ]]; then
         sudo nice -n -20 docker run --rm --pull=always \
           --pids-limit=-1 \
           --ulimit nofile=1048576:1048576 \
-          -e RAYON_NUM_THREADS=\${threads_per_job} \
-          -v /tmp/reports/job_\${j}:/data/reports:rw \
-          ${image_uri} --tx-per-proof ${tx_per_proof} &
-      done
-      wait
-    fi
+          -v /tmp/reports:/data/reports:rw \
+          ${image_uri} --tx-per-proof ${tx_per_proof}
+      else
+        threads_per_job=\$(( \$(nproc) / ${jobs} ))
+        pids=()
+        for j in \$(seq 1 ${jobs}); do
+          mkdir -p /tmp/reports/job_\${j}
+          sudo nice -n -20 docker run --rm --pull=always \
+            --pids-limit=-1 \
+            --ulimit nofile=1048576:1048576 \
+            -e RAYON_NUM_THREADS=\${threads_per_job} \
+            -v /tmp/reports/job_\${j}:/data/reports:rw \
+            ${image_uri} &
+          pids+=(\$!)
+        done
+        for pid in \"\${pids[@]}\"; do
+          wait \"\$pid\" || true
+        done
+      fi
 
-    if [[ -n '${bench_bucket}' ]]; then
-      machine_type=\$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/machine-type | awk -F/ '{print \$NF}')
-      instance_id=\$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/id)
-      ts=\$(date +%Y%m%d-%H%M%S)
-      dest=\$(echo '${bench_template}' | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
-      gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
-    fi
-  "
+      if [[ -n \"${bench_bucket}\" ]]; then
+        machine_type=\$(curl -s -H \"Metadata-Flavor: Google\" http://metadata.google.internal/computeMetadata/v1/instance/machine-type | awk -F/ \"{print \\\$NF}\")
+        instance_id=\$(curl -s -H \"Metadata-Flavor: Google\" http://metadata.google.internal/computeMetadata/v1/instance/id)
+        ts=\$(date +%Y%m%d-%H%M%S)
+        dest=\$(echo \"${bench_template}\" | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
+        if [[ -n \"${benchmark_id}\" ]]; then
+          dest=\"benchmark-reports/${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
+        fi
+        gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
+      fi
+      touch /tmp/bench.done
+    ' > /tmp/bench.log 2>&1 &
+  " --quiet
+
+  while ! gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="[[ -f /tmp/bench.done ]]" --quiet 2>/dev/null; do
+    sleep 10
+  done
 
   _log_ok "Remote benchmark completed successfully on '${target_vm}'."
 }
@@ -570,18 +625,24 @@ cloud_run_distributed_cluster() {
   local arch="${ARCH:-c3d}"
   local blocks="${BLOCKS:-2}"
   local chunk="${CHUNK:-1}"
+  local image="${IMAGE:-default}"
+  local benchmark_id="${BENCHMARK_ID:-}"
   for arg in "$@"; do
     case "$arg" in
       --engine=*) engine="${arg#*=}" ;;
       --arch=*)   arch="${arg#*=}" ;;
       --blocks=*) blocks="${arg#*=}" ;;
       --chunk=*)  chunk="${arg#*=}" ;;
+      --image=*)  image="${arg#*=}" ;;
+      --benchmark-id=*) benchmark_id="${arg#*=}" ;;
       [0-9]*)     blocks="$arg" ;;
     esac
   done
 
   local build_project="$(_resolve_build_project)"
-  _generate_tfvars
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
   local builder_sa="" runtime_sa="" build_machine=""
@@ -594,7 +655,7 @@ cloud_run_distributed_cluster() {
   _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine}, arch=${arch}, blocks=${blocks}, chunk=${chunk})..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk}"
+  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id}"
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
@@ -866,7 +927,7 @@ cloud_test_omni_silicon_parallel() {
 case "${1:-}" in
   cloud-admin-init)              cloud_admin_init ;;
   cloud-admin-undo)              cloud_admin_undo ;;
-  cloud-bench-run)               shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" ;;
+  cloud-bench-run)               shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" "${4:-default}" "${5:-}" ;;
   cloud-run-distributed-cluster) cloud_run_distributed_cluster ;;
   cloud-test-t2d-hypothesis)     cloud_test_t2d_hypothesis ;;
   cloud-test-gke-performance-tax) cloud_test_gke_performance_tax ;;
