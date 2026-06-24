@@ -523,6 +523,7 @@ cloud_bench_run() {
         sudo nice -n -20 docker run --rm --pull=always \
           --pids-limit=-1 \
           --ulimit nofile=1048576:1048576 \
+          -e IMAGE=\"${image_uri}\" \
           -v /tmp/reports:/data/reports:rw \
           ${image_uri}
       else
@@ -533,6 +534,7 @@ cloud_bench_run() {
           sudo nice -n -20 docker run --rm --pull=always \
             --pids-limit=-1 \
             --ulimit nofile=1048576:1048576 \
+            -e IMAGE=\"${image_uri}\" \
             -e RAYON_NUM_THREADS=\${threads_per_job} \
             -v /tmp/reports/job_\${j}:/data/reports:rw \
             ${image_uri} &
