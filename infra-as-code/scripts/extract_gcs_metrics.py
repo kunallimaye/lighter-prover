@@ -40,7 +40,7 @@ def fetch_summary(gcs_uri):
       elif part.startswith("blocks-") and part[7:].isdigit():
         conc = int(part[7:])
     if conc == 0:
-      conc = int(d.get("concurrency", d.get("concurrency_blocks", d.get("blocks", d.get("jobs", d.get("chunks_count", 10))))))
+      conc = 1
     if conc <= 0 or conc > 10:
       raise ValueError(f"Invalid concurrency count: {conc}")
     return gcs_uri, round(wall, 8), code_rel, conc
@@ -110,15 +110,18 @@ def main():
     min_w = min(walls)
     max_w = max(walls)
     avg_w = round(sum(walls) / len(walls), 8)
+    conc_blocks = len(walls)
+    proj_vms = round(10.0 * avg_w / conc_blocks, 2) if conc_blocks > 0 else 0.0
     avg_min = round(avg_w / 60.0, 8)
     extracted_records.append({
         "benchmark_id": bench_id,
         "code_release": code_rel,
         "machine_type": mtype,
-        "concurrent_jobs_or_blocks": len(walls),
+        "concurrent_jobs_or_blocks": conc_blocks,
         "min_wall_time_sec": min_w,
         "max_wall_time_sec": max_w,
         "avg_wall_time_sec": avg_w,
+        "projected_vm_count_10_bps": proj_vms,
         "avg_wall_time_min": avg_min,
         "timestamp": ts,
     })
@@ -140,7 +143,8 @@ def main():
       "Minimum Elapsed Wall Time (sec)",
       "Maximum Elapsed Wall Time (sec)",
       "Average Elapsed Wall Time (sec)",
-      "Average Elapsed Wall Time (min)",
+      "Projected VM Count (10 Blocks/Sec)",
+      "Avg Time",
       "Execution Timestamp",
   ]
   with open(csv_path, "w", newline="", encoding="utf-8") as f:
@@ -155,6 +159,7 @@ def main():
           r["min_wall_time_sec"],
           r["max_wall_time_sec"],
           r["avg_wall_time_sec"],
+          r["projected_vm_count_10_bps"],
           r["avg_wall_time_min"],
           r["timestamp"],
       ])
