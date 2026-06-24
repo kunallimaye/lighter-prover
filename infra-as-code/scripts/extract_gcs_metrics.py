@@ -32,9 +32,10 @@ def fetch_summary(gcs_uri):
         wall = txs / tps
     if wall == 0.0:
       wall = 180.0
-    return gcs_uri, round(wall, 3)
+    code_rel = d.get("code_release", d.get("version", "v0.0.1"))
+    return gcs_uri, round(wall, 8), code_rel
   except Exception:
-    return gcs_uri, 180.0
+    return gcs_uri, 180.0, "v0.0.1"
 
 
 def parse_args():
@@ -70,33 +71,34 @@ def main():
     print("[WARNING] No GCS summary files found matching prefix.")
     return
 
-  # Group by Benchmark ID and Machine Type
+  print(f"[Phase 2] Fetching {len(gcs_paths)} summary objects...")
+  cache = {}
+  with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
+    for u, wall, code_rel in ex.map(fetch_summary, gcs_paths):
+      cache[u] = (wall, code_rel)
+
+  # Group by Benchmark ID, Code Release, and Machine Type
   groups = {}
   for p in gcs_paths:
     parts = p.split("/")
     if len(parts) >= 6:
       bench_id = parts[4] if parts[3] == "benchmark-reports" else parts[3]
       mtype = parts[5] if parts[3] == "benchmark-reports" else parts[4]
-      key = (bench_id, mtype)
+      code_rel = cache.get(p, (180.0, "v0.0.1"))[1]
+      key = (bench_id, code_rel, mtype)
       groups.setdefault(key, []).append(p)
-
-  all_files = set(p for lst in groups.values() for p in lst)
-  print(f"[Phase 2] Fetching {len(all_files)} summary objects...")
-  cache = {}
-  with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
-    for u, wall in ex.map(fetch_summary, all_files):
-      cache[u] = wall
 
   print("[Phase 3] Reconciling streamlined elapsed wall times...")
   extracted_records = []
-  for (bench_id, mtype), files in sorted(groups.items()):
-    walls = [cache.get(u, 180.0) for u in files]
+  for (bench_id, code_rel, mtype), files in sorted(groups.items()):
+    walls = [cache.get(u, (180.0, "v0.0.1"))[0] for u in files]
     min_w = min(walls)
     max_w = max(walls)
-    avg_w = round(sum(walls) / len(walls), 3)
-    avg_min = round(avg_w / 60.0, 3)
+    avg_w = round(sum(walls) / len(walls), 8)
+    avg_min = round(avg_w / 60.0, 8)
     extracted_records.append({
         "benchmark_id": bench_id,
+        "code_release": code_rel,
         "machine_type": mtype,
         "total_block_count": len(files),
         "min_wall_time_sec": min_w,
@@ -116,6 +118,7 @@ def main():
   csv_path = f"reports/capstone_extracted_telemetry{bench_id_suffix}.csv"
   headers = [
       "Benchmark ID",
+      "Code Release",
       "Machine Type",
       "Total Block/Job Count",
       "Minimum Elapsed Wall Time (sec)",
@@ -129,6 +132,7 @@ def main():
     for r in extracted_records:
       w.writerow([
           r["benchmark_id"],
+          r["code_release"],
           r["machine_type"],
           r["total_block_count"],
           r["min_wall_time_sec"],
