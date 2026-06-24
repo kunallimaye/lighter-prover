@@ -67,7 +67,8 @@ steps:
         set -eu
         export SILICON_ARCH="${_ARCH}"
         export IMAGE="${_IMAGE}"
-        echo "[INFO] Dispatched authentic unmocked distributed proving benchmark (engine=${_ENGINE}, arch=${_ARCH}, chunk=${_CHUNK_SIZE}, bench_id=${_BENCHMARK_ID}, image=${_IMAGE})..."
+        export BLOCK_CONCURRENCY="${_BLOCK_CONCURRENCY}"
+        echo "[INFO] Dispatched authentic unmocked distributed proving benchmark (engine=${_ENGINE}, arch=${_ARCH}, chunk=${_CHUNK_SIZE}, bench_id=${_BENCHMARK_ID}, image=${_IMAGE}, blocks=${_BLOCK_CONCURRENCY})..."
         cargo run --release --bin prover-node -- root-coordinator --block-number 1042
 
   # 3b. Upload Distributed Proving Telemetry Summary to GCS
@@ -82,7 +83,7 @@ steps:
         ls -la reports/job_1/ || true
         if [ -f "reports/job_1/bench_summary.json" ] && [ -n "${_TF_STATE_BUCKET:-}" ]; then
           TS=$(date +%Y%m%d-%H%M%S)
-          DEST="benchmark-reports/${_BENCHMARK_ID}/gke-${_ARCH}/gke-pod-1/$${TS}"
+          DEST="benchmark-reports/${_BENCHMARK_ID}/gke-${_ARCH}/blocks-${_BLOCK_CONCURRENCY}/gke-pod-1/$${TS}"
           echo "[INFO] Uploading GKE telemetry reports to gs://${_TF_STATE_BUCKET}/$${DEST}/..."
           gsutil -m cp -r reports/* "gs://${_TF_STATE_BUCKET}/$${DEST}/"
         fi
