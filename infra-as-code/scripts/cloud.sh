@@ -239,6 +239,7 @@ _execute_cloudbuild() {
 # ─── Operator Verbs ───────────────────────────────────────────────────
 
 cloud_admin_init() {
+  _generate_tfvars
   local build_project
   build_project="$(_resolve_build_project)"
 
@@ -435,6 +436,25 @@ cloud_bench_run() {
     return
   fi
 
+  if [[ "${jobs}" == *".."* || "${jobs}" == *" "* ]]; then
+    local j_list=()
+    if [[ "${jobs}" == *".."* ]]; then
+      local start_j="${jobs%%..*}"
+      local end_j="${jobs##*..}"
+      for (( j=start_j; j<=end_j; j++ )); do
+        j_list+=("$j")
+      done
+    else
+      for j in ${jobs}; do
+        j_list+=("$j")
+      done
+    fi
+    for j in "${j_list[@]}"; do
+      cloud_bench_run "${target_vm}" "${j}" "${tx_per_proof}" "${image_arg}" "${benchmark_id}"
+    done
+    return 0
+  fi
+
   local zone cfg_repo="" cfg_region="" cfg_ar_region="" bench_bucket="" bench_template=""
   zone="$(gcloud compute instances list --filter="name=${target_vm}" --format="value(zone)" 2>/dev/null | head -n 1)"
   if [[ -z "${zone}" ]]; then
@@ -458,7 +478,8 @@ cloud_bench_run() {
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
   if [[ "${image_arg}" != "default" && -n "${image_arg}" ]]; then
     if [[ "${image_arg}" != *"/"* ]]; then
-      image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_arg}-${image_tag}"
+      local tag_suffix="${image_arg#zkp-prover:}"
+      image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${tag_suffix}-${image_tag}"
     else
       image_uri="${image_arg}"
     fi
@@ -470,6 +491,11 @@ cloud_bench_run() {
   _log_info "  Concurrency:    ${jobs} simultaneous job(s)"
   _log_info "  Batch Size:     ${tx_per_proof} txs / proof"
   _log_info "  Prioritization: nice -n -20, --pids-limit=-1"
+
+  if ! gcloud compute instances describe "${target_vm}" --zone="${zone}" --project="${build_project}" &>/dev/null; then
+    _log_info "  [WARNING] Instance '${target_vm}' (${zone}) not found in project '${build_project}'. Skipping benchmark..."
+    return 0
+  fi
 
   _log_info "Ensuring VM instance '${target_vm}' (${zone}) is started before SSH connection..."
   gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
