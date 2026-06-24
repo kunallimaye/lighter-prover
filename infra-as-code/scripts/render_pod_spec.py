@@ -27,8 +27,8 @@ def main():
   if not args.image or args.image.strip() == "":
     sys.exit("ERROR: --image argument is required for Kubernetes deployment manifest rendering.")
   image_tag = args.image.strip()
-  if image_tag == "default":
-    image_tag = "0.0.3-distributed-proving"
+  if image_tag in ("default", "v0.0.3", "0.0.3", "v0.0.3-distributed-proving"):
+    image_tag = "v0.0.3-distributed-proving"
   image_uri = f"us-docker.pkg.dev/kunal-scratch/lighter-prover-iac/zkp-prover:{image_tag}"
 
   if not os.path.exists(args.config):

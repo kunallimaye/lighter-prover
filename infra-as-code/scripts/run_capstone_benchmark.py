@@ -44,6 +44,7 @@ def parse_args():
   )
   p.add_argument("--sheet-id", default="1z8bIeeKaEnXP6UZW52pGLll0XrwjoLS0aBJOvs1qqd0", help="Google Spreadsheet ID.")
   p.add_argument("--force-build", default="false", help="Force recompilation of STARK container images.")
+  p.add_argument("--arch", default=os.environ.get("ARCH", "all"), help="Target silicon architectures or 'all' (c3d, c4a, c4d, t2d).")
   return p.parse_args()
 
 
@@ -95,18 +96,19 @@ def main():
 
   # Execute Distributed Runs via cloud-run-distributed-cluster
   if args.blocks not in ("none", "0", "false", ""):
-    print(f"  [RUNNER] Executing mandatory two-pass GKE runs (v0.0.3 release & radix-16 branch, blocks={args.blocks})...")
-    env_dist = os.environ.copy()
-    env_dist["BENCHMARK_ID"] = bench_id
-    arch_override = os.environ.get("ARCH", "c3d")
-    
-    # Run 1: v0.0.3 release
-    env_dist["IMAGE"] = "default"
-    subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", f"ARCH={arch_override}", f"BLOCKS={args.blocks}", "IMAGE=default", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
-    
-    # Run 2: radix-16 branch
-    env_dist["IMAGE"] = "radix-16-reduction-trees"
-    subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", f"ARCH={arch_override}", f"BLOCKS={args.blocks}", "IMAGE=radix-16-reduction-trees", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
+    target_archs = ["c3d", "c4a", "c4d", "t2d"] if args.arch == "all" else args.arch.split()
+    for arch_item in target_archs:
+      print(f"  [RUNNER] Executing mandatory two-pass GKE runs (v0.0.3 release & radix-16 branch, arch={arch_item}, blocks={args.blocks})...")
+      env_dist = os.environ.copy()
+      env_dist["BENCHMARK_ID"] = bench_id
+      
+      # Run 1: v0.0.3 release
+      env_dist["IMAGE"] = "v0.0.3-distributed-proving"
+      subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", f"ARCH={arch_item}", f"BLOCKS={args.blocks}", "IMAGE=v0.0.3-distributed-proving", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
+      
+      # Run 2: radix-16 branch
+      env_dist["IMAGE"] = "radix-16-reduction-trees"
+      subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", f"ARCH={arch_item}", f"BLOCKS={args.blocks}", "IMAGE=radix-16-reduction-trees", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
   else:
     print("  [RUNNER] Skipping GKE distributed cluster runs (blocks=none).")
 
