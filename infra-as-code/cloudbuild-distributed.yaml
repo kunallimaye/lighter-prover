@@ -80,6 +80,17 @@ steps:
         echo "[DEBUG] Inspecting reports directory contents..."
         ls -la reports/ || true
         ls -la reports/job_1/ || true
+        echo "[DEBUG] Checking condition: _TF_STATE_BUCKET='${_TF_STATE_BUCKET}' _BENCHMARK_ID='${_BENCHMARK_ID}'"
+        if [ -f "reports/job_1/bench_summary.json" ]; then
+          echo "[DEBUG] bench_summary.json file check passed."
+        else
+          echo "[DEBUG] bench_summary.json file check FAILED."
+        fi
+        if [ -n "${_TF_STATE_BUCKET:-}" ]; then
+          echo "[DEBUG] _TF_STATE_BUCKET check passed."
+        else
+          echo "[DEBUG] _TF_STATE_BUCKET check FAILED."
+        fi
         if [ -f "reports/job_1/bench_summary.json" ] && [ -n "${_TF_STATE_BUCKET:-}" ]; then
           TS=$(date +%Y%m%d-%H%M%S)
           DEST="benchmark-reports/${_BENCHMARK_ID}/c4d-highcpu-48/gke-pod-1/$${TS}"
