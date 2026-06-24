@@ -19,7 +19,7 @@ def verify_manifest_rendering():
   archs = ["c3d", "c4a", "c4d", "t2d"]
   print("[Phase 1] Verifying Dry-Run K8s Manifest Rendering across architectures...")
   for arch in archs:
-    cmd = [sys.executable, "infra-as-code/scripts/render_pod_spec.py", "--arch=" + arch]
+    cmd = [sys.executable, "infra-as-code/scripts/render_pod_spec.py", "--arch=" + arch, "--image=default"]
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
       print(f"Error rendering manifest for {arch}: {res.stderr}", file=sys.stderr)
