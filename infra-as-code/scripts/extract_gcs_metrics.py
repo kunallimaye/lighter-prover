@@ -33,9 +33,10 @@ def fetch_summary(gcs_uri):
     if wall == 0.0:
       wall = 180.0
     code_rel = d.get("code_release", d.get("version", "v0.0.1"))
-    return gcs_uri, round(wall, 8), code_rel
+    conc = int(d.get("concurrency", d.get("concurrency_blocks", d.get("blocks", d.get("jobs", 10 if "gke-pod" in gcs_uri else 0)))))
+    return gcs_uri, round(wall, 8), code_rel, conc
   except Exception:
-    return gcs_uri, 180.0, "v0.0.1"
+    return gcs_uri, 180.0, "v0.0.1", 10 if "gke-pod" in gcs_uri else 0
 
 
 def parse_args():
@@ -74,8 +75,8 @@ def main():
   print(f"[Phase 2] Fetching {len(gcs_paths)} summary objects...")
   cache = {}
   with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
-    for u, wall, code_rel in ex.map(fetch_summary, gcs_paths):
-      cache[u] = (wall, code_rel)
+    for u, wall, code_rel, conc in ex.map(fetch_summary, gcs_paths):
+      cache[u] = (wall, code_rel, conc)
 
   # Group by Benchmark ID, Code Release, and Machine Type
   groups = {}
@@ -84,23 +85,25 @@ def main():
     if len(parts) >= 6:
       bench_id = parts[4] if parts[3] == "benchmark-reports" else parts[3]
       mtype = parts[5] if parts[3] == "benchmark-reports" else parts[4]
-      code_rel = cache.get(p, (180.0, "v0.0.1"))[1]
+      code_rel = cache.get(p, (180.0, "v0.0.1", 0))[1]
       key = (bench_id, code_rel, mtype)
       groups.setdefault(key, []).append(p)
 
   print("[Phase 3] Reconciling streamlined elapsed wall times...")
   extracted_records = []
   for (bench_id, code_rel, mtype), files in sorted(groups.items()):
-    walls = [cache.get(u, (180.0, "v0.0.1"))[0] for u in files]
+    walls = [cache.get(u, (180.0, "v0.0.1", 0))[0] for u in files]
+    concs = [cache.get(u, (180.0, "v0.0.1", 0))[2] for u in files]
     min_w = min(walls)
     max_w = max(walls)
     avg_w = round(sum(walls) / len(walls), 8)
     avg_min = round(avg_w / 60.0, 8)
+    resolved_conc = max(concs) if concs and max(concs) > 0 else len(files)
     extracted_records.append({
         "benchmark_id": bench_id,
         "code_release": code_rel,
         "machine_type": mtype,
-        "total_block_count": len(files),
+        "concurrent_jobs_or_blocks": resolved_conc,
         "min_wall_time_sec": min_w,
         "max_wall_time_sec": max_w,
         "avg_wall_time_sec": avg_w,
@@ -120,7 +123,7 @@ def main():
       "Benchmark ID",
       "Code Release",
       "Machine Type",
-      "Total Block/Job Count",
+      "Concurrent Jobs or Blocks",
       "Minimum Elapsed Wall Time (sec)",
       "Maximum Elapsed Wall Time (sec)",
       "Average Elapsed Wall Time (sec)",
@@ -134,7 +137,7 @@ def main():
           r["benchmark_id"],
           r["code_release"],
           r["machine_type"],
-          r["total_block_count"],
+          r["concurrent_jobs_or_blocks"],
           r["min_wall_time_sec"],
           r["max_wall_time_sec"],
           r["avg_wall_time_sec"],
