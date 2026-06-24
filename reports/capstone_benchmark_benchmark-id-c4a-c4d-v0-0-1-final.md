@@ -5,10 +5,11 @@ This institutional benchmarking sequence strictly adhered to our physical execut
 
 ## 2. Streamlined Empirical Finality Ledger
 
-| Benchmark ID | Machine Type | Total Block/Job Count | Minimum Wall Time (sec) | Maximum Wall Time (sec) | Average Wall Time (sec) | Average Wall Time (min) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `benchmark-id-c4a-c4d-v0-0-1-final` | `c4a-highcpu-48` | 4 | 318.199s | 319.162s | **318.689s** | 5.311m |
-| `benchmark-id-c4a-c4d-v0-0-1-final` | `c4d-highcpu-48` | 4 | 363.868s | 438.99s | **401.416s** | 6.69m |
+| Benchmark ID | Code Release | Machine Type | Total Block/Job Count | Minimum Wall Time (sec) | Maximum Wall Time (sec) | Average Wall Time (sec) | Average Wall Time (min) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `benchmark-id-c4a-c4d-v0-0-1-final` | `v0.0.1` | `c4a-highcpu-48` | 4 | 318.199s | 319.162s | **318.689s** | 5.311m |
+| `benchmark-id-c4a-c4d-v0-0-1-final` | `v0.0.1` | `c4d-highcpu-48` | 4 | 363.868s | 438.99s | **401.416s** | 6.69m |
+| `benchmark-id-c4a-c4d-v0-0-1-final` | `v0.0.1` | `gke-autopilot-c4a-48` | 2 | 12.152s | 12.152s | **12.152s** | 0.203m |
 
 ---
 

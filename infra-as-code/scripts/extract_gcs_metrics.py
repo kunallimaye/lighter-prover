@@ -31,12 +31,13 @@ def fetch_summary(gcs_uri):
       if tps > 0:
         wall = txs / tps
     if wall == 0.0:
-      wall = 180.0
+      raise ValueError("Computed wall time is 0.0")
     code_rel = d.get("code_release", d.get("version", "v0.0.1"))
     conc = int(d.get("concurrency", d.get("concurrency_blocks", d.get("blocks", d.get("jobs", 10 if "gke-pod" in gcs_uri else 0)))))
     return gcs_uri, round(wall, 8), code_rel, conc
-  except Exception:
-    return gcs_uri, 180.0, "v0.0.1", 10 if "gke-pod" in gcs_uri else 0
+  except Exception as e:
+    print(f"[ERROR] Corrupted or missing telemetry artifact {gcs_uri}: {e}", file=sys.stderr)
+    return gcs_uri, None, None, None
 
 
 def parse_args():
@@ -76,24 +77,29 @@ def main():
   cache = {}
   with concurrent.futures.ThreadPoolExecutor(max_workers=32) as ex:
     for u, wall, code_rel, conc in ex.map(fetch_summary, gcs_paths):
-      cache[u] = (wall, code_rel, conc)
+      if wall is not None:
+        cache[u] = (wall, code_rel, conc)
 
   # Group by Benchmark ID, Code Release, and Machine Type
   groups = {}
   for p in gcs_paths:
+    if p not in cache:
+      continue
     parts = p.split("/")
     if len(parts) >= 6:
       bench_id = parts[4] if parts[3] == "benchmark-reports" else parts[3]
       mtype = parts[5] if parts[3] == "benchmark-reports" else parts[4]
-      code_rel = cache.get(p, (180.0, "v0.0.1", 0))[1]
+      code_rel = cache[p][1]
       key = (bench_id, code_rel, mtype)
       groups.setdefault(key, []).append(p)
 
   print("[Phase 3] Reconciling streamlined elapsed wall times...")
   extracted_records = []
   for (bench_id, code_rel, mtype), files in sorted(groups.items()):
-    walls = [cache.get(u, (180.0, "v0.0.1", 0))[0] for u in files]
-    concs = [cache.get(u, (180.0, "v0.0.1", 0))[2] for u in files]
+    walls = [cache[u][0] for u in files if u in cache]
+    concs = [cache[u][2] for u in files if u in cache]
+    if not walls:
+      continue
     min_w = min(walls)
     max_w = max(walls)
     avg_w = round(sum(walls) / len(walls), 8)

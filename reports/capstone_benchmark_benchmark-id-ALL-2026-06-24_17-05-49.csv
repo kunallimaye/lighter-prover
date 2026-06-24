@@ -1,0 +1,3 @@
+Benchmark ID,Code Release,Machine Type,Total Block/Job Count,Minimum Elapsed Wall Time (sec),Maximum Elapsed Wall Time (sec),Average Elapsed Wall Time (sec),Average Elapsed Wall Time (min)
+benchmark-id-ALL-2026-06-24_17-05-49,default,c4d-highcpu-48,1,8.203e-05,8.203e-05,8.203e-05,1.37e-06
+benchmark-id-ALL-2026-06-24_17-05-49,radix-16-reduction-trees,c4d-highcpu-48,1,5.282e-05,5.282e-05,5.282e-05,8.8e-07

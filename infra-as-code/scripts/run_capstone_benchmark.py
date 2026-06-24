@@ -144,10 +144,10 @@ def main():
     f.write("## 1. Study Methodology & Governance Compliance\n")
     f.write("This institutional benchmarking sequence strictly adhered to our physical execution mandate: Zero simulation, zero mock dictionaries, and zero reused historical ledgers. Every container ran unconstrained on physical bare-metal processors and GKE proving pods.\n\n")
     f.write("## 2. Streamlined Empirical Finality Ledger\n\n")
-    f.write("| Benchmark ID | Machine Type | Total Block/Job Count | Minimum Wall Time (sec) | Maximum Wall Time (sec) | Average Wall Time (sec) | Average Wall Time (min) |\n")
-    f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+    f.write("| Benchmark ID | Code Release | Machine Type | Concurrent Jobs or Blocks | Minimum Wall Time (sec) | Maximum Wall Time (sec) | Average Wall Time (sec) | Average Wall Time (min) |\n")
+    f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
     for r in records:
-      f.write(f"| `{r['benchmark_id']}` | `{r['machine_type']}` | {r['total_block_count']} | {r['min_wall_time_sec']}s | {r['max_wall_time_sec']}s | **{r['avg_wall_time_sec']}s** | {r['avg_wall_time_min']}m |\n")
+      f.write(f"| `{r['benchmark_id']}` | `{r['code_release']}` | `{r['machine_type']}` | {r['concurrent_jobs_or_blocks']} | {r['min_wall_time_sec']}s | {r['max_wall_time_sec']}s | **{r['avg_wall_time_sec']}s** | {r['avg_wall_time_min']}m |\n")
     f.write("\n---\n\n")
     f.write("## 3. Financial & Architectural Conclusions\n")
     f.write("Across multi-block loads, distributed proof generation over Cloud Pub/Sub horizontally decouples trace witness generation, compressing Time-to-Finality ($W$) and lowering required Compute Engine Spot pod allocations significantly.\n")

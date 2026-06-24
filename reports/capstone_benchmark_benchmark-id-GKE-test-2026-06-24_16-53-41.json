@@ -1,0 +1,22 @@
+[
+  {
+    "benchmark_id": "benchmark-id-GKE-test-2026-06-24_16-53-41",
+    "code_release": "default",
+    "machine_type": "c4d-highcpu-48",
+    "total_block_count": 1,
+    "min_wall_time_sec": 0.0,
+    "max_wall_time_sec": 0.0,
+    "avg_wall_time_sec": 0.0,
+    "avg_wall_time_min": 0.0
+  },
+  {
+    "benchmark_id": "benchmark-id-GKE-test-2026-06-24_16-53-41",
+    "code_release": "radix-16-reduction-trees",
+    "machine_type": "c4d-highcpu-48",
+    "total_block_count": 1,
+    "min_wall_time_sec": 0.0,
+    "max_wall_time_sec": 0.0,
+    "avg_wall_time_sec": 0.0,
+    "avg_wall_time_min": 0.0
+  }
+]
