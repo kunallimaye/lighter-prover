@@ -2,11 +2,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 use std::time::Instant;
+use std::fs;
+use std::path::Path;
 use clap::{Parser, Subcommand};
 use log::{info, Level, LevelFilter};
 use serde_json::json;
+use circuit::block::Block;
+use circuit::block_tx::BlockTx;
 use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
-use circuit::types::config::{C, CIRCUIT_CONFIG};
+use circuit::types::config::{C, CIRCUIT_CONFIG, D, F};
+use plonky2::plonk::prover::prove;
 use plonky2::util::timing::TimingTree;
 
 #[derive(Parser)]
@@ -54,9 +59,36 @@ fn main() {
             info!("Connecting to serverless backplane topic: projects/lighter-prod/topics/stark-proofs");
             
             let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, tx_per_proof, 304);
-            let _data = circuit.builder.build::<C>();
+            let bt = circuit.target;
+            let data = circuit.builder.build::<C>();
+            
+            let block_path = if Path::new("/data/bench_test.json").exists() {
+                "/data/bench_test.json"
+            } else if Path::new("bench/bench_test.json").exists() {
+                "bench/bench_test.json"
+            } else {
+                "bench_test.json"
+            };
+            let block_json = fs::read_to_string(block_path).expect("Failed to read test block JSON file");
+            let block: Block<F> = serde_json::from_str(&block_json).expect("Invalid block JSON structure");
+            let tx_chunks: Vec<_> = block.txs.chunks(tx_per_proof).collect();
+            let chunk_txs = tx_chunks.get(chunk_idx).cloned().unwrap_or_default();
+            let block_tx = BlockTx {
+                created_at: block.created_at,
+                old_system_config: block.old_system_config,
+                register_stack_before: block.register_stack_before,
+                all_assets_before: block.all_assets.clone(),
+                all_market_details_before: core::array::from_fn(|_| circuit::types::market_details::MarketDetails::default()),
+                old_account_tree_root: block.old_account_tree_root,
+                old_account_pub_data_tree_root: block.old_account_pub_data_tree_root,
+                old_account_delta_tree_root: block.old_account_delta_tree_root,
+                old_market_tree_root: block.old_market_tree_root,
+                txs: chunk_txs.to_vec(),
+            };
+            
+            let pw = BlockTxCircuit::generate_witness(&block_tx, &bt).expect("Failed to generate witness");
             timing.push("leaf_stark_generation", Level::Info);
-            // Authentic Plonky2 Goldilocks AVX-512 field constraint evaluation
+            let _tx_proof = prove::<F, C, D>(&data.prover_only, &data.common, pw, &mut timing).expect("Failed to prove");
             timing.pop();
             
             let arch = std::env::var("SILICON_ARCH").unwrap_or_else(|_| "c3d".to_string());
@@ -68,7 +100,7 @@ fn main() {
                 "trace_id": "0af7651922c",
                 "proving_engine": engine_str,
                 "silicon_arch": arch,
-                "circuit_gates": _data.common.num_gate_constraints,
+                "circuit_gates": data.common.num_gate_constraints,
                 "elapsed_ms": start.elapsed().as_millis(),
                 "status": "OK"
             });
