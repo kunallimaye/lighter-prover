@@ -1,0 +1,242 @@
+[
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "radix-16-reduction-trees",
+    "machine_type": "c4d-highcpu-48",
+    "concurrent_jobs_or_blocks": 10,
+    "min_wall_time_sec": 6.335e-05,
+    "max_wall_time_sec": 0.00013949,
+    "avg_wall_time_sec": 0.00010142,
+    "avg_wall_time_min": 1.69e-06
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "radix-16-reduction-trees",
+    "machine_type": "gke-c4d",
+    "concurrent_jobs_or_blocks": 10,
+    "min_wall_time_sec": 5.03e-05,
+    "max_wall_time_sec": 5.03e-05,
+    "avg_wall_time_sec": 5.03e-05,
+    "avg_wall_time_min": 8.4e-07
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "radix-16-reduction-trees",
+    "machine_type": "gke-t2d",
+    "concurrent_jobs_or_blocks": 10,
+    "min_wall_time_sec": 4.665e-05,
+    "max_wall_time_sec": 4.665e-05,
+    "avg_wall_time_sec": 4.665e-05,
+    "avg_wall_time_min": 7.8e-07
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 705.85178729,
+    "max_wall_time_sec": 705.85178729,
+    "avg_wall_time_sec": 705.85178729,
+    "avg_wall_time_min": 11.76419645
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-180",
+    "concurrent_jobs_or_blocks": 6,
+    "min_wall_time_sec": 211.39126539,
+    "max_wall_time_sec": 278.97499915,
+    "avg_wall_time_sec": 255.0376764,
+    "avg_wall_time_min": 4.25062794
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-30",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 442.44196168,
+    "max_wall_time_sec": 442.44196168,
+    "avg_wall_time_sec": 442.44196168,
+    "avg_wall_time_min": 7.37403269
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-60",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 304.02031459,
+    "max_wall_time_sec": 421.96515227,
+    "avg_wall_time_sec": 382.60523794,
+    "avg_wall_time_min": 6.37675397
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-90",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 257.52631156,
+    "max_wall_time_sec": 326.89013002,
+    "avg_wall_time_sec": 303.71567701,
+    "avg_wall_time_min": 5.06192795
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 416.31078942,
+    "max_wall_time_sec": 416.31078942,
+    "avg_wall_time_sec": 416.31078942,
+    "avg_wall_time_min": 6.93851316
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-32",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 267.8444455,
+    "max_wall_time_sec": 420.31381928,
+    "avg_wall_time_sec": 369.28153713,
+    "avg_wall_time_min": 6.15469229
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-48",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 222.4906817,
+    "max_wall_time_sec": 326.81907537,
+    "avg_wall_time_sec": 291.61680719,
+    "avg_wall_time_min": 4.86028012
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-64",
+    "concurrent_jobs_or_blocks": 6,
+    "min_wall_time_sec": 202.37466332,
+    "max_wall_time_sec": 342.94993548,
+    "avg_wall_time_sec": 295.33887628,
+    "avg_wall_time_min": 4.9223146
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-72",
+    "concurrent_jobs_or_blocks": 6,
+    "min_wall_time_sec": 193.04177898,
+    "max_wall_time_sec": 318.07856146,
+    "avg_wall_time_sec": 275.16792954,
+    "avg_wall_time_min": 4.58613216
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 511.13503011,
+    "max_wall_time_sec": 511.13503011,
+    "avg_wall_time_sec": 511.13503011,
+    "avg_wall_time_min": 8.51891717
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-32",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 317.98516876,
+    "max_wall_time_sec": 502.62872762,
+    "avg_wall_time_sec": 441.03358469,
+    "avg_wall_time_min": 7.35055974
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-48",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 253.38495593,
+    "max_wall_time_sec": 352.3668388,
+    "avg_wall_time_sec": 319.34008874,
+    "avg_wall_time_min": 5.32233481
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-64",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 219.83701794,
+    "max_wall_time_sec": 301.69617995,
+    "avg_wall_time_sec": 274.37947053,
+    "avg_wall_time_min": 4.57299118
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-96",
+    "concurrent_jobs_or_blocks": 6,
+    "min_wall_time_sec": 192.79413447,
+    "max_wall_time_sec": 298.86309909,
+    "avg_wall_time_sec": 261.24557111,
+    "avg_wall_time_min": 4.35409285
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 506.380385,
+    "max_wall_time_sec": 506.380385,
+    "avg_wall_time_sec": 506.380385,
+    "avg_wall_time_min": 8.43967308
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-32",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 346.36670014,
+    "max_wall_time_sec": 514.22369694,
+    "avg_wall_time_sec": 458.16328252,
+    "avg_wall_time_min": 7.63605471
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-48",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 320.79840297,
+    "max_wall_time_sec": 446.96004418,
+    "avg_wall_time_sec": 404.7849011,
+    "avg_wall_time_min": 6.74641502
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-60",
+    "concurrent_jobs_or_blocks": 3,
+    "min_wall_time_sec": 284.85084801,
+    "max_wall_time_sec": 378.2142809,
+    "avg_wall_time_sec": 346.64773337,
+    "avg_wall_time_min": 5.77746222
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.3-distributed-proving",
+    "machine_type": "c4d-highcpu-48",
+    "concurrent_jobs_or_blocks": 10,
+    "min_wall_time_sec": 4.754e-05,
+    "max_wall_time_sec": 0.00020534,
+    "avg_wall_time_sec": 0.00010253,
+    "avg_wall_time_min": 1.71e-06
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.3-distributed-proving",
+    "machine_type": "gke-t2d",
+    "concurrent_jobs_or_blocks": 10,
+    "min_wall_time_sec": 4.512e-05,
+    "max_wall_time_sec": 4.512e-05,
+    "avg_wall_time_sec": 4.512e-05,
+    "avg_wall_time_min": 7.5e-07
+  }
+]

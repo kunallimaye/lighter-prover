@@ -1,0 +1,3 @@
+Benchmark ID,Code Release,Machine Type,Total Block/Job Count,Minimum Elapsed Wall Time (sec),Maximum Elapsed Wall Time (sec),Average Elapsed Wall Time (sec),Average Elapsed Wall Time (min)
+benchmark-id-c4a-c4d-v0-0-1-capstone-20260623_235600_UTC,v0.0.1,c4a-highcpu-48,4,21.715,22.095,21.93,0.365
+benchmark-id-c4a-c4d-v0-0-1-capstone-20260623_235600_UTC,v0.0.1,c4d-highcpu-48,4,25.776,26.128,25.948,0.432

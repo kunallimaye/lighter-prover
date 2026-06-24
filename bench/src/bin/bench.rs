@@ -273,6 +273,7 @@ fn main() {
 
     let summary = serde_json::json!({
         "block_number": block.block_number,
+        "code_release": std::env::var("IMAGE").unwrap_or_else(|_| "v0.0.1".to_string()),
         "created_at_timestamp": created_at,
         "batch_size_k": tx_per_proof,
         "total_transactions": total_txs,

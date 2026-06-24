@@ -1,0 +1,22 @@
+[
+  {
+    "benchmark_id": "benchmark-id-c4a-c4d-v0-0-1-capstone-20260624_001603_UTC",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-48",
+    "total_block_count": 4,
+    "min_wall_time_sec": 21.959,
+    "max_wall_time_sec": 22.579,
+    "avg_wall_time_sec": 22.371,
+    "avg_wall_time_min": 0.373
+  },
+  {
+    "benchmark_id": "benchmark-id-c4a-c4d-v0-0-1-capstone-20260624_001603_UTC",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-48",
+    "total_block_count": 4,
+    "min_wall_time_sec": 25.533,
+    "max_wall_time_sec": 26.52,
+    "avg_wall_time_sec": 26.007,
+    "avg_wall_time_min": 0.433
+  }
+]

@@ -13,7 +13,7 @@ container-run: ## Run local STARK performance benchmark container against test f
 zkp-image: container-build ## Alias for container-build
 
 cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via Cloud Build (infra-as-code/cloudbuild-zkp.yaml)
-	@bash infra-as-code/scripts/cloud.sh cloud-zkp-build $(ARCH)
+	@TAG="$(TAG)" bash infra-as-code/scripts/cloud.sh cloud-zkp-build $(ARCH)
 
 JOBS ?= 1
 CHUNK ?= 1

@@ -1,0 +1,22 @@
+[
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-16-18",
+    "code_release": "radix-16-reduction-trees",
+    "machine_type": "c4d-highcpu-48",
+    "total_block_count": 2,
+    "min_wall_time_sec": 7.166e-05,
+    "max_wall_time_sec": 0.0001526,
+    "avg_wall_time_sec": 0.00011213,
+    "avg_wall_time_min": 1.87e-06
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-16-18",
+    "code_release": "v0.0.3-distributed-proving",
+    "machine_type": "c4d-highcpu-48",
+    "total_block_count": 2,
+    "min_wall_time_sec": 4.34e-05,
+    "max_wall_time_sec": 0.00015363,
+    "avg_wall_time_sec": 9.852e-05,
+    "avg_wall_time_min": 1.64e-06
+  }
+]
