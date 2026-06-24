@@ -21,7 +21,15 @@ def main():
   parser.add_argument("--blocks", type=int, default=2, help="Parallel pipeline blocks")
   parser.add_argument("--input", default="infra-as-code/kubernetes/prover_pod_unit.yaml", help="Input YAML")
   parser.add_argument("--output", default="infra-as-code/kubernetes/prover_pod_unit.rendered.yaml", help="Output YAML")
+  parser.add_argument("--image", required=True, help="Container release tag or 'default'")
   args = parser.parse_args()
+
+  if not args.image or args.image.strip() == "":
+    sys.exit("ERROR: --image argument is required for Kubernetes deployment manifest rendering.")
+  image_tag = args.image.strip()
+  if image_tag == "default":
+    image_tag = "0.0.3-distributed-proving"
+  image_uri = f"us-docker.pkg.dev/kunal-scratch/lighter-prover-iac/zkp-prover:{image_tag}"
 
   if not os.path.exists(args.config):
     print(f"Error: Config file {args.config} not found.", file=sys.stderr)
@@ -90,7 +98,7 @@ spec:
         kubernetes.io/arch: {kube_arch}
       containers:
       - name: prover
-        image: us-docker.pkg.dev/lighter-prover/zkp-prover:multiarch
+        image: {image_uri}
         command: ["prover-node", "leaf-worker", "--tx-per-proof", "{leaf_chunk}"]
         resources:
           limits:
@@ -125,7 +133,7 @@ spec:
         kubernetes.io/arch: {kube_arch}
       containers:
       - name: aggregator
-        image: us-docker.pkg.dev/lighter-prover/zkp-prover:multiarch
+        image: {image_uri}
         command: ["prover-node", "tree-node"]
         resources:
           limits:

@@ -54,7 +54,7 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Rendering dynamic K8s deployment manifests reading config.toml..."
-          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}"
+          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}"
         fi
 
   # 3. Execute Authentic Unmocked Distributed Proving Assembly Line
@@ -66,8 +66,26 @@ steps:
       - |
         set -eu
         export SILICON_ARCH="${_ARCH}"
+        export IMAGE="${_IMAGE}"
         echo "[INFO] Dispatched authentic unmocked distributed proving benchmark (engine=${_ENGINE}, arch=${_ARCH}, chunk=${_CHUNK_SIZE}, bench_id=${_BENCHMARK_ID}, image=${_IMAGE})..."
         cargo run --release --bin prover-node -- root-coordinator --block-number 1042
+
+  # 3b. Upload Distributed Proving Telemetry Summary to GCS
+  - id: upload-reports
+    name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        echo "[DEBUG] Inspecting reports directory contents..."
+        ls -la reports/ || true
+        ls -la reports/job_1/ || true
+        if [ -f "reports/job_1/bench_summary.json" ] && [ -n "${_TF_STATE_BUCKET:-}" ]; then
+          TS=$(date +%Y%m%d-%H%M%S)
+          DEST="benchmark-reports/${_BENCHMARK_ID}/c4d-highcpu-48/gke-pod-1/$${TS}"
+          echo "[INFO] Uploading GKE telemetry reports to gs://${_TF_STATE_BUCKET}/$${DEST}/..."
+          gsutil -m cp -r reports/* "gs://${_TF_STATE_BUCKET}/$${DEST}/"
+        fi
 
   # 4. Mandatory Post-Test Zero-Billing Teardown
   - id: tf-destroy

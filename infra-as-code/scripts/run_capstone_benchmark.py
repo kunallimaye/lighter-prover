@@ -29,14 +29,19 @@ def verify_manifest_rendering():
 
 def parse_args():
   p = argparse.ArgumentParser(description="Unmocked Capstone Benchmark Runner.")
-  default_bench_id = "benchmark-id-" + datetime.datetime.now(
-      datetime.timezone.utc
-  ).strftime("%Y-%m-%d_%H-%M-%S_UTC")
+  default_bench_id = "benchmark-id-ALL-" + datetime.datetime.now().strftime(
+      "%Y-%m-%d_%H-%M-%S"
+  )
   p.add_argument("--benchmark-id", default=default_bench_id, help="Unique storage partition ID.")
   p.add_argument("--vm", default="all", help="Target VM instances or 'all' (default config.toml).")
   p.add_argument("--jobs", default="1..10", help="Concurrency sweep range for GCE VMs.")
   p.add_argument("--blocks", default="1..10", help="Concurrency sweep range for GKE pods.")
-  p.add_argument("--image", default="default", help="Target release container image URI or tag.")
+  p.add_argument(
+      "--images",
+      nargs="+",
+      default=["v0.0.1-single-vm-proof-gen", "v0.0.2-single-vm-dynamic-chunk-size-proof-gen"],
+      help="Target release container images or tags (defaults to v0.0.1 and v0.0.2 releases).",
+  )
   p.add_argument("--sheet-id", default="1z8bIeeKaEnXP6UZW52pGLll0XrwjoLS0aBJOvs1qqd0", help="Google Spreadsheet ID.")
   p.add_argument("--force-build", default="false", help="Force recompilation of STARK container images.")
   return p.parse_args()
@@ -49,10 +54,16 @@ def main():
 
   verify_manifest_rendering()
 
-  image_arg = args.image
-  if image_arg != "default" and image_arg:
-    release_tag = image_arg.split(":")[-1] if ":" in image_arg else image_arg
-    print(f"  [IMAGE] Resolved target release container tag: '{release_tag}' (IMAGE={image_arg})")
+  raw_images = args.images
+  images_list = []
+  for img in raw_images:
+    images_list.extend([x.strip() for x in img.replace(",", " ").split() if x.strip()])
+  if not images_list or images_list == ["default"]:
+    images_list = [
+        "v0.0.1-single-vm-proof-gen",
+        "v0.0.2-single-vm-dynamic-chunk-size-proof-gen",
+    ]
+  print(f"  [IMAGES] Resolved target release container tag array ({len(images_list)} releases): {images_list}")
 
   # Phase 2: Conditional Compilation
   force_b = str(args.force_build).lower() in ("true", "1", "yes")
@@ -63,7 +74,10 @@ def main():
 
   if force_b or uncommitted_changes:
     print("[Phase 2] Compiling & Pushing multi-arch STARK container images (make cloud-zkp-build ARCH=all)...")
-    subprocess.run(["make", "cloud-zkp-build", "ARCH=all"], check=True)
+    for img_tag in images_list:
+      build_cmd = ["make", "cloud-zkp-build", "ARCH=all", f"TAG={img_tag}"]
+      print(f"  [BUILD] Compiling container release: {img_tag}...")
+      subprocess.run(build_cmd, check=True)
   else:
     print("[Phase 2] Conditional compilation skipped (reusing existing remote container binaries).")
 
@@ -72,19 +86,27 @@ def main():
   
   # Execute Monolithic Runs via cloud-bench-run
   if args.vm != "none":
-    print(f"  [RUNNER] Executing cloud-bench-run across target VMs={args.vm} (jobs={args.jobs})...")
-    env_mon = os.environ.copy()
-    env_mon["BENCHMARK_ID"] = bench_id
-    env_mon["IMAGE"] = image_arg
-    subprocess.run(["make", "cloud-bench-run", f"VM={args.vm}", f"JOBS={args.jobs}", f"IMAGE={image_arg}", f"BENCHMARK_ID={bench_id}"], env=env_mon, check=False)
+    for img_tag in images_list:
+      print(f"  [RUNNER] Executing cloud-bench-run across target VMs={args.vm} (jobs={args.jobs}, image={img_tag})...")
+      env_mon = os.environ.copy()
+      env_mon["BENCHMARK_ID"] = bench_id
+      env_mon["IMAGE"] = img_tag
+      subprocess.run(["make", "cloud-bench-run", f"VM={args.vm}", f"JOBS={args.jobs}", f"IMAGE={img_tag}", f"BENCHMARK_ID={bench_id}"], env=env_mon, check=False)
 
   # Execute Distributed Runs via cloud-run-distributed-cluster
   if args.blocks not in ("none", "0", "false", ""):
-    print(f"  [RUNNER] Executing cloud-run-distributed-cluster across GKE pod profiles (blocks={args.blocks})...")
+    print(f"  [RUNNER] Executing mandatory two-pass GKE runs (v0.0.3 release & radix-16 branch, blocks={args.blocks})...")
     env_dist = os.environ.copy()
     env_dist["BENCHMARK_ID"] = bench_id
-    env_dist["IMAGE"] = image_arg
-    subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", "ARCH=c3d", f"BLOCKS={args.blocks}", f"IMAGE={image_arg}", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
+    arch_override = os.environ.get("ARCH", "c3d")
+    
+    # Run 1: v0.0.3 release
+    env_dist["IMAGE"] = "default"
+    subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", f"ARCH={arch_override}", f"BLOCKS={args.blocks}", "IMAGE=default", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
+    
+    # Run 2: radix-16 branch
+    env_dist["IMAGE"] = "radix-16-reduction-trees"
+    subprocess.run(["make", "cloud-run-distributed-cluster", "ENGINE=gke", f"ARCH={arch_override}", f"BLOCKS={args.blocks}", "IMAGE=radix-16-reduction-trees", f"BENCHMARK_ID={bench_id}"], env=env_dist, check=False)
   else:
     print("  [RUNNER] Skipping GKE distributed cluster runs (blocks=none).")
 
@@ -131,9 +153,11 @@ def main():
   print(f"  [OK] Saved master reports: {dest_json}, {dest_csv}, and {dest_md}")
 
   # Phase 6: Non-Destructive VM Halt
-  print("\n[Phase 6] Executing non-destructive make cloud-vm-stop VM=all to halt VM CPU/RAM billing...")
-  subprocess.run(["make", "cloud-vm-stop", "VM=all"], check=False)
-  print("[OK] All Compute Engine VM instances stopped ($0.00/hr billing leakage).")
+  target_to_stop = args.vm if args.vm != "none" else "none"
+  if target_to_stop != "none":
+    print(f"\n[Phase 6] Executing non-destructive make cloud-vm-stop VM={target_to_stop} to halt VM CPU/RAM billing...")
+    subprocess.run(["make", "cloud-vm-stop", f"VM={target_to_stop}"], check=False)
+    print(f"[OK] Target Compute Engine VM instances stopped ({target_to_stop}, $0.00/hr billing leakage).")
 
   print(f"\n=== Capstone Benchmark Run Successfully Concluded ({bench_id}) ===")
 
