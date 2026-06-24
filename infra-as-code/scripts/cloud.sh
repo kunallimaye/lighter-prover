@@ -498,7 +498,10 @@ cloud_bench_run() {
   fi
 
   _log_info "Ensuring VM instance '${target_vm}' (${zone}) is started before SSH connection..."
-  gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
+  if ! gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet 2>/dev/null; then
+    _log_info "  [WARNING] Failed to start instance '${target_vm}' (${zone}) due to zone stockout or quota. Skipping benchmark on this VM..."
+    return 0
+  fi
 
   for _ in {1..40}; do
     if gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="echo ready" --quiet 2>/dev/null; then
