@@ -33,7 +33,16 @@ def fetch_summary(gcs_uri):
     if wall == 0.0:
       raise ValueError("Computed wall time is 0.0")
     code_rel = d.get("code_release", d.get("version", "v0.0.1"))
-    conc = int(d.get("concurrency", d.get("concurrency_blocks", d.get("blocks", d.get("jobs", 10 if "gke-pod" in gcs_uri else 0)))))
+    conc = 0
+    for part in gcs_uri.split("/"):
+      if part.startswith("job_") and part[4:].isdigit():
+        conc = int(part[4:])
+      elif part.startswith("blocks-") and part[7:].isdigit():
+        conc = int(part[7:])
+    if conc == 0:
+      conc = int(d.get("concurrency", d.get("concurrency_blocks", d.get("blocks", d.get("jobs", d.get("chunks_count", 10))))))
+    if conc <= 0 or conc > 10:
+      raise ValueError(f"Invalid concurrency count: {conc}")
     return gcs_uri, round(wall, 8), code_rel, conc
   except Exception as e:
     print(f"[ERROR] Corrupted or missing telemetry artifact {gcs_uri}: {e}", file=sys.stderr)
@@ -80,40 +89,38 @@ def main():
       if wall is not None:
         cache[u] = (wall, code_rel, conc)
 
-  # Group by Benchmark ID, Code Release, and Machine Type
+  print("[Phase 3] Grouping records by Benchmark ID, Code Release, Machine Type, and Timestamp...")
+  import re
   groups = {}
-  for p in gcs_paths:
+  for p in sorted(gcs_paths):
     if p not in cache:
       continue
     parts = p.split("/")
     if len(parts) >= 6:
       bench_id = parts[4] if parts[3] == "benchmark-reports" else parts[3]
       mtype = parts[5] if parts[3] == "benchmark-reports" else parts[4]
-      code_rel = cache[p][1]
-      key = (bench_id, code_rel, mtype)
-      groups.setdefault(key, []).append(p)
+      wall, code_rel, _ = cache[p]
+      ts_m = re.findall(r"\d{8}-\d{6}", p)
+      ts = ts_m[-1] if ts_m else "default_ts"
+      key = (bench_id, code_rel, mtype, ts)
+      groups.setdefault(key, []).append(wall)
 
-  print("[Phase 3] Reconciling streamlined elapsed wall times...")
   extracted_records = []
-  for (bench_id, code_rel, mtype), files in sorted(groups.items()):
-    walls = [cache[u][0] for u in files if u in cache]
-    concs = [cache[u][2] for u in files if u in cache]
-    if not walls:
-      continue
+  for (bench_id, code_rel, mtype, ts), walls in sorted(groups.items()):
     min_w = min(walls)
     max_w = max(walls)
     avg_w = round(sum(walls) / len(walls), 8)
     avg_min = round(avg_w / 60.0, 8)
-    resolved_conc = max(concs) if concs and max(concs) > 0 else len(files)
     extracted_records.append({
         "benchmark_id": bench_id,
         "code_release": code_rel,
         "machine_type": mtype,
-        "concurrent_jobs_or_blocks": resolved_conc,
+        "concurrent_jobs_or_blocks": len(walls),
         "min_wall_time_sec": min_w,
         "max_wall_time_sec": max_w,
         "avg_wall_time_sec": avg_w,
         "avg_wall_time_min": avg_min,
+        "timestamp": ts,
     })
 
   bench_id_suffix = ""
@@ -134,6 +141,7 @@ def main():
       "Maximum Elapsed Wall Time (sec)",
       "Average Elapsed Wall Time (sec)",
       "Average Elapsed Wall Time (min)",
+      "Execution Timestamp",
   ]
   with open(csv_path, "w", newline="", encoding="utf-8") as f:
     w = csv.writer(f)
@@ -148,6 +156,7 @@ def main():
           r["max_wall_time_sec"],
           r["avg_wall_time_sec"],
           r["avg_wall_time_min"],
+          r["timestamp"],
       ])
   print(f"[OK] Saved extracted telemetry JSON {json_path} and CSV {csv_path}")
 

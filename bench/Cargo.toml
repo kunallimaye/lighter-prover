@@ -42,6 +42,8 @@ clap_derive = { workspace = true }
 tiny-keccak =  { workspace = true }
 paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
+ureq = "2.9"
+base64 = "0.21"
 
 [dev-dependencies]
 flate2 = "1.0"
