@@ -3,10 +3,23 @@
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
     "code_release": "v0.0.1",
     "machine_type": "c3d-highcpu-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 705.85178729,
+    "max_wall_time_sec": 705.85178729,
+    "avg_wall_time_sec": 705.85178729,
+    "projected_vm_count_10_bps": 7058.52,
+    "avg_wall_time_min": 11.76419645,
+    "timestamp": "20260624-192025"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-16",
     "concurrent_jobs_or_blocks": 2,
     "min_wall_time_sec": 1239.09049532,
     "max_wall_time_sec": 1239.1433469,
     "avg_wall_time_sec": 1239.11692111,
+    "projected_vm_count_10_bps": 6195.58,
     "avg_wall_time_min": 20.65194869,
     "timestamp": "20260624-194158"
   },
@@ -18,6 +31,7 @@
     "min_wall_time_sec": 1712.4748176,
     "max_wall_time_sec": 1722.45146908,
     "avg_wall_time_sec": 1716.8235118,
+    "projected_vm_count_10_bps": 5722.75,
     "avg_wall_time_min": 28.6137252,
     "timestamp": "20260624-201154"
   },
@@ -29,6 +43,7 @@
     "min_wall_time_sec": 2212.21506797,
     "max_wall_time_sec": 2227.25650836,
     "avg_wall_time_sec": 2221.0883207,
+    "projected_vm_count_10_bps": 5552.72,
     "avg_wall_time_min": 37.01813868,
     "timestamp": "20260624-205024"
   },
@@ -40,6 +55,7 @@
     "min_wall_time_sec": 2357.67506635,
     "max_wall_time_sec": 2380.9175108,
     "avg_wall_time_sec": 2364.15897592,
+    "projected_vm_count_10_bps": 5910.4,
     "avg_wall_time_min": 39.4026496,
     "timestamp": "20260624-213137"
   },
@@ -51,8 +67,21 @@
     "min_wall_time_sec": 3510.19895388,
     "max_wall_time_sec": 3546.52426494,
     "avg_wall_time_sec": 3529.28988251,
+    "projected_vm_count_10_bps": 5882.15,
     "avg_wall_time_min": 58.82149804,
     "timestamp": "20260624-223221"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-180",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 211.39126539,
+    "max_wall_time_sec": 211.39126539,
+    "avg_wall_time_sec": 211.39126539,
+    "projected_vm_count_10_bps": 2113.91,
+    "avg_wall_time_min": 3.52318776,
+    "timestamp": "20260624-191209"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -62,6 +91,7 @@
     "min_wall_time_sec": 243.16943051,
     "max_wall_time_sec": 243.21319313,
     "avg_wall_time_sec": 243.19131182,
+    "projected_vm_count_10_bps": 1215.96,
     "avg_wall_time_min": 4.05318853,
     "timestamp": "20260624-191716"
   },
@@ -73,6 +103,7 @@
     "min_wall_time_sec": 276.1501347,
     "max_wall_time_sec": 278.97499915,
     "avg_wall_time_sec": 277.48405646,
+    "projected_vm_count_10_bps": 924.95,
     "avg_wall_time_min": 4.62473427,
     "timestamp": "20260624-192300"
   },
@@ -84,6 +115,7 @@
     "min_wall_time_sec": 317.71274771,
     "max_wall_time_sec": 320.97616191,
     "avg_wall_time_sec": 319.28890358,
+    "projected_vm_count_10_bps": 798.22,
     "avg_wall_time_min": 5.32148173,
     "timestamp": "20260624-192923"
   },
@@ -95,6 +127,7 @@
     "min_wall_time_sec": 353.05102431,
     "max_wall_time_sec": 356.11540985,
     "avg_wall_time_sec": 354.76477962,
+    "projected_vm_count_10_bps": 709.53,
     "avg_wall_time_min": 5.91274633,
     "timestamp": "20260624-193635"
   },
@@ -106,6 +139,7 @@
     "min_wall_time_sec": 393.73084692,
     "max_wall_time_sec": 396.87681483,
     "avg_wall_time_sec": 394.99999098,
+    "projected_vm_count_10_bps": 658.33,
     "avg_wall_time_min": 6.58333318,
     "timestamp": "20260624-194422"
   },
@@ -117,6 +151,7 @@
     "min_wall_time_sec": 439.24036969,
     "max_wall_time_sec": 442.84668414,
     "avg_wall_time_sec": 440.78886493,
+    "projected_vm_count_10_bps": 629.7,
     "avg_wall_time_min": 7.34648108,
     "timestamp": "20260624-195256"
   },
@@ -128,6 +163,7 @@
     "min_wall_time_sec": 446.51828384,
     "max_wall_time_sec": 455.19761326,
     "avg_wall_time_sec": 449.28488903,
+    "projected_vm_count_10_bps": 641.84,
     "avg_wall_time_min": 7.48808148,
     "timestamp": "20260624-200202"
   },
@@ -139,6 +175,7 @@
     "min_wall_time_sec": 525.55095578,
     "max_wall_time_sec": 529.4590838,
     "avg_wall_time_sec": 527.86645991,
+    "projected_vm_count_10_bps": 586.52,
     "avg_wall_time_min": 8.79777433,
     "timestamp": "20260624-201226"
   },
@@ -150,8 +187,21 @@
     "min_wall_time_sec": 573.32959537,
     "max_wall_time_sec": 575.93473651,
     "avg_wall_time_sec": 574.76544848,
+    "projected_vm_count_10_bps": 574.77,
     "avg_wall_time_min": 9.57942414,
     "timestamp": "20260624-202331"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-30",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 442.44196168,
+    "max_wall_time_sec": 442.44196168,
+    "avg_wall_time_sec": 442.44196168,
+    "projected_vm_count_10_bps": 4424.42,
+    "avg_wall_time_min": 7.37403269,
+    "timestamp": "20260624-191600"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -161,6 +211,7 @@
     "min_wall_time_sec": 713.92559963,
     "max_wall_time_sec": 713.9445852,
     "avg_wall_time_sec": 713.93509241,
+    "projected_vm_count_10_bps": 3569.68,
     "avg_wall_time_min": 11.89891821,
     "timestamp": "20260624-192901"
   },
@@ -172,6 +223,7 @@
     "min_wall_time_sec": 940.89024127,
     "max_wall_time_sec": 942.38821948,
     "avg_wall_time_sec": 941.56991956,
+    "projected_vm_count_10_bps": 3138.57,
     "avg_wall_time_min": 15.69283199,
     "timestamp": "20260624-194546"
   },
@@ -183,6 +235,7 @@
     "min_wall_time_sec": 1222.4716042,
     "max_wall_time_sec": 1231.07257557,
     "avg_wall_time_sec": 1227.61933096,
+    "projected_vm_count_10_bps": 3069.05,
     "avg_wall_time_min": 20.46032218,
     "timestamp": "20260624-200725"
   },
@@ -194,6 +247,7 @@
     "min_wall_time_sec": 1489.16667173,
     "max_wall_time_sec": 1499.72235911,
     "avg_wall_time_sec": 1494.53922192,
+    "projected_vm_count_10_bps": 2989.08,
     "avg_wall_time_min": 24.90898703,
     "timestamp": "20260624-203334"
   },
@@ -205,6 +259,7 @@
     "min_wall_time_sec": 1779.0328402,
     "max_wall_time_sec": 1795.67819042,
     "avg_wall_time_sec": 1789.01440486,
+    "projected_vm_count_10_bps": 2981.69,
     "avg_wall_time_min": 29.81690675,
     "timestamp": "20260624-210454"
   },
@@ -216,6 +271,7 @@
     "min_wall_time_sec": 2104.17778701,
     "max_wall_time_sec": 2128.68764651,
     "avg_wall_time_sec": 2116.73374406,
+    "projected_vm_count_10_bps": 3023.91,
     "avg_wall_time_min": 35.27889573,
     "timestamp": "20260624-214141"
   },
@@ -227,8 +283,21 @@
     "min_wall_time_sec": 2434.32580361,
     "max_wall_time_sec": 2500.06745004,
     "avg_wall_time_sec": 2472.07902374,
+    "projected_vm_count_10_bps": 3090.1,
     "avg_wall_time_min": 41.20131706,
     "timestamp": "20260624-222453"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-60",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 304.02031459,
+    "max_wall_time_sec": 304.02031459,
+    "avg_wall_time_sec": 304.02031459,
+    "projected_vm_count_10_bps": 3040.2,
+    "avg_wall_time_min": 5.06700524,
+    "timestamp": "20260624-191337"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -238,6 +307,7 @@
     "min_wall_time_sec": 421.83024697,
     "max_wall_time_sec": 421.96515227,
     "avg_wall_time_sec": 421.89769962,
+    "projected_vm_count_10_bps": 2109.49,
     "avg_wall_time_min": 7.03162833,
     "timestamp": "20260624-192135"
   },
@@ -249,6 +319,7 @@
     "min_wall_time_sec": 539.42461043,
     "max_wall_time_sec": 540.17292273,
     "avg_wall_time_sec": 539.76587075,
+    "projected_vm_count_10_bps": 1799.22,
     "avg_wall_time_min": 8.99609785,
     "timestamp": "20260624-193140"
   },
@@ -260,6 +331,7 @@
     "min_wall_time_sec": 667.79414075,
     "max_wall_time_sec": 671.61776789,
     "avg_wall_time_sec": 670.18816827,
+    "projected_vm_count_10_bps": 1675.47,
     "avg_wall_time_min": 11.1698028,
     "timestamp": "20260624-194354"
   },
@@ -271,6 +343,7 @@
     "min_wall_time_sec": 794.11829522,
     "max_wall_time_sec": 799.75984466,
     "avg_wall_time_sec": 798.15360034,
+    "projected_vm_count_10_bps": 1596.31,
     "avg_wall_time_min": 13.30256001,
     "timestamp": "20260624-195818"
   },
@@ -282,6 +355,7 @@
     "min_wall_time_sec": 927.15340346,
     "max_wall_time_sec": 934.6671205,
     "avg_wall_time_sec": 930.38311112,
+    "projected_vm_count_10_bps": 1550.64,
     "avg_wall_time_min": 15.50638519,
     "timestamp": "20260624-201511"
   },
@@ -293,6 +367,7 @@
     "min_wall_time_sec": 975.87370257,
     "max_wall_time_sec": 989.15701831,
     "avg_wall_time_sec": 982.94052101,
+    "projected_vm_count_10_bps": 1638.23,
     "avg_wall_time_min": 16.38234202,
     "timestamp": "20260624-203258"
   },
@@ -304,6 +379,7 @@
     "min_wall_time_sec": 1223.03734108,
     "max_wall_time_sec": 1234.46378418,
     "avg_wall_time_sec": 1227.85681956,
+    "projected_vm_count_10_bps": 1534.82,
     "avg_wall_time_min": 20.46428033,
     "timestamp": "20260624-205453"
   },
@@ -315,6 +391,7 @@
     "min_wall_time_sec": 1376.3433917,
     "max_wall_time_sec": 1405.15891815,
     "avg_wall_time_sec": 1389.80265762,
+    "projected_vm_count_10_bps": 1544.23,
     "avg_wall_time_min": 23.16337763,
     "timestamp": "20260624-211954"
   },
@@ -326,8 +403,21 @@
     "min_wall_time_sec": 1483.41652382,
     "max_wall_time_sec": 1503.3634036,
     "avg_wall_time_sec": 1492.96581184,
+    "projected_vm_count_10_bps": 1492.97,
     "avg_wall_time_min": 24.88276353,
     "timestamp": "20260624-214638"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c3d-highcpu-90",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 257.52631156,
+    "max_wall_time_sec": 257.52631156,
+    "avg_wall_time_sec": 257.52631156,
+    "projected_vm_count_10_bps": 2575.26,
+    "avg_wall_time_min": 4.29210519,
+    "timestamp": "20260624-191255"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -337,6 +427,7 @@
     "min_wall_time_sec": 326.73058946,
     "max_wall_time_sec": 326.89013002,
     "avg_wall_time_sec": 326.81035974,
+    "projected_vm_count_10_bps": 1634.05,
     "avg_wall_time_min": 5.44683933,
     "timestamp": "20260624-191915"
   },
@@ -348,6 +439,7 @@
     "min_wall_time_sec": 405.68218568,
     "max_wall_time_sec": 406.19500986,
     "avg_wall_time_sec": 405.9936189,
+    "projected_vm_count_10_bps": 1353.31,
     "avg_wall_time_min": 6.76656032,
     "timestamp": "20260624-192708"
   },
@@ -359,6 +451,7 @@
     "min_wall_time_sec": 487.67707026,
     "max_wall_time_sec": 492.52122749,
     "avg_wall_time_sec": 490.98761067,
+    "projected_vm_count_10_bps": 1227.47,
     "avg_wall_time_min": 8.18312684,
     "timestamp": "20260624-193622"
   },
@@ -370,6 +463,7 @@
     "min_wall_time_sec": 573.41795899,
     "max_wall_time_sec": 576.77663808,
     "avg_wall_time_sec": 575.33950885,
+    "projected_vm_count_10_bps": 1150.68,
     "avg_wall_time_min": 9.58899181,
     "timestamp": "20260624-194703"
   },
@@ -381,6 +475,7 @@
     "min_wall_time_sec": 658.04378912,
     "max_wall_time_sec": 663.49521902,
     "avg_wall_time_sec": 661.83883516,
+    "projected_vm_count_10_bps": 1103.06,
     "avg_wall_time_min": 11.03064725,
     "timestamp": "20260624-195921"
   },
@@ -392,6 +487,7 @@
     "min_wall_time_sec": 626.1176244,
     "max_wall_time_sec": 629.32501644,
     "avg_wall_time_sec": 628.13031247,
+    "projected_vm_count_10_bps": 1256.26,
     "avg_wall_time_min": 10.46883854,
     "timestamp": "20260624-201110"
   },
@@ -403,6 +499,7 @@
     "min_wall_time_sec": 840.57425127,
     "max_wall_time_sec": 847.46660542,
     "avg_wall_time_sec": 843.6446949,
+    "projected_vm_count_10_bps": 1054.56,
     "avg_wall_time_min": 14.06074491,
     "timestamp": "20260624-202640"
   },
@@ -414,6 +511,7 @@
     "min_wall_time_sec": 928.502308,
     "max_wall_time_sec": 933.42889302,
     "avg_wall_time_sec": 931.18536931,
+    "projected_vm_count_10_bps": 1034.65,
     "avg_wall_time_min": 15.51975616,
     "timestamp": "20260624-204349"
   },
@@ -425,8 +523,21 @@
     "min_wall_time_sec": 1015.65775236,
     "max_wall_time_sec": 1026.17987483,
     "avg_wall_time_sec": 1021.05848224,
+    "projected_vm_count_10_bps": 1021.06,
     "avg_wall_time_min": 17.01764137,
     "timestamp": "20260624-210221"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 416.31078942,
+    "max_wall_time_sec": 416.31078942,
+    "avg_wall_time_sec": 416.31078942,
+    "projected_vm_count_10_bps": 4163.11,
+    "avg_wall_time_min": 6.93851316,
+    "timestamp": "20260624-191534"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -436,6 +547,7 @@
     "min_wall_time_sec": 708.29406946,
     "max_wall_time_sec": 709.16848833,
     "avg_wall_time_sec": 708.73127889,
+    "projected_vm_count_10_bps": 3543.66,
     "avg_wall_time_min": 11.81218798,
     "timestamp": "20260624-192824"
   },
@@ -447,6 +559,7 @@
     "min_wall_time_sec": 1063.06944596,
     "max_wall_time_sec": 1068.96128202,
     "avg_wall_time_sec": 1066.14514749,
+    "projected_vm_count_10_bps": 3553.82,
     "avg_wall_time_min": 17.76908579,
     "timestamp": "20260624-194720"
   },
@@ -458,6 +571,7 @@
     "min_wall_time_sec": 1275.14795896,
     "max_wall_time_sec": 1289.31111931,
     "avg_wall_time_sec": 1283.01845754,
+    "projected_vm_count_10_bps": 3207.55,
     "avg_wall_time_min": 21.38364096,
     "timestamp": "20260624-201003"
   },
@@ -469,6 +583,7 @@
     "min_wall_time_sec": 1668.00847793,
     "max_wall_time_sec": 1689.18821615,
     "avg_wall_time_sec": 1676.31836424,
+    "projected_vm_count_10_bps": 3352.64,
     "avg_wall_time_min": 27.9386394,
     "timestamp": "20260624-203934"
   },
@@ -480,6 +595,7 @@
     "min_wall_time_sec": 2394.12146743,
     "max_wall_time_sec": 2408.19117689,
     "avg_wall_time_sec": 2403.62113563,
+    "projected_vm_count_10_bps": 4006.04,
     "avg_wall_time_min": 40.06035226,
     "timestamp": "20260624-212110"
   },
@@ -491,8 +607,21 @@
     "min_wall_time_sec": 2395.47716948,
     "max_wall_time_sec": 2413.41493486,
     "avg_wall_time_sec": 2409.69704445,
+    "projected_vm_count_10_bps": 3442.42,
     "avg_wall_time_min": 40.16161741,
     "timestamp": "20260624-220252"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-32",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 267.8444455,
+    "max_wall_time_sec": 267.8444455,
+    "avg_wall_time_sec": 267.8444455,
+    "projected_vm_count_10_bps": 2678.44,
+    "avg_wall_time_min": 4.46407409,
+    "timestamp": "20260624-191305"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -502,6 +631,7 @@
     "min_wall_time_sec": 419.68634661,
     "max_wall_time_sec": 420.31381928,
     "avg_wall_time_sec": 420.00008295,
+    "projected_vm_count_10_bps": 2100.0,
     "avg_wall_time_min": 7.00000138,
     "timestamp": "20260624-192052"
   },
@@ -513,6 +643,7 @@
     "min_wall_time_sec": 588.49000056,
     "max_wall_time_sec": 595.10786173,
     "avg_wall_time_sec": 590.85837114,
+    "projected_vm_count_10_bps": 1969.53,
     "avg_wall_time_min": 9.84763952,
     "timestamp": "20260624-193158"
   },
@@ -524,6 +655,7 @@
     "min_wall_time_sec": 703.28241587,
     "max_wall_time_sec": 704.75363022,
     "avg_wall_time_sec": 703.9010548,
+    "projected_vm_count_10_bps": 2346.34,
     "avg_wall_time_min": 11.73168425,
     "timestamp": "20260624-194445"
   },
@@ -535,6 +667,7 @@
     "min_wall_time_sec": 901.53499902,
     "max_wall_time_sec": 906.37565921,
     "avg_wall_time_sec": 903.92796925,
+    "projected_vm_count_10_bps": 2259.82,
     "avg_wall_time_min": 15.06546615,
     "timestamp": "20260624-200059"
   },
@@ -546,6 +679,7 @@
     "min_wall_time_sec": 1056.45355912,
     "max_wall_time_sec": 1063.12422687,
     "avg_wall_time_sec": 1059.45341343,
+    "projected_vm_count_10_bps": 2118.91,
     "avg_wall_time_min": 17.65755689,
     "timestamp": "20260624-201956"
   },
@@ -557,6 +691,7 @@
     "min_wall_time_sec": 1276.82649394,
     "max_wall_time_sec": 1288.43662332,
     "avg_wall_time_sec": 1282.97700969,
+    "projected_vm_count_10_bps": 1832.82,
     "avg_wall_time_min": 21.38295016,
     "timestamp": "20260624-204245"
   },
@@ -568,6 +703,7 @@
     "min_wall_time_sec": 1264.87135981,
     "max_wall_time_sec": 1273.92509602,
     "avg_wall_time_sec": 1270.61810043,
+    "projected_vm_count_10_bps": 2117.7,
     "avg_wall_time_min": 21.17696834,
     "timestamp": "20260624-210517"
   },
@@ -579,6 +715,7 @@
     "min_wall_time_sec": 1658.72275199,
     "max_wall_time_sec": 1675.98328215,
     "avg_wall_time_sec": 1668.93132436,
+    "projected_vm_count_10_bps": 2384.19,
     "avg_wall_time_min": 27.81552207,
     "timestamp": "20260624-213431"
   },
@@ -590,8 +727,21 @@
     "min_wall_time_sec": 1661.20626935,
     "max_wall_time_sec": 1672.08705123,
     "avg_wall_time_sec": 1667.23339176,
+    "projected_vm_count_10_bps": 1852.48,
     "avg_wall_time_min": 27.7872232,
     "timestamp": "20260624-220358"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-48",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 222.4906817,
+    "max_wall_time_sec": 222.4906817,
+    "avg_wall_time_sec": 222.4906817,
+    "projected_vm_count_10_bps": 2224.91,
+    "avg_wall_time_min": 3.70817803,
+    "timestamp": "20260624-191219"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -601,6 +751,7 @@
     "min_wall_time_sec": 325.54066451,
     "max_wall_time_sec": 326.81907537,
     "avg_wall_time_sec": 326.17986994,
+    "projected_vm_count_10_bps": 1630.9,
     "avg_wall_time_min": 5.43633117,
     "timestamp": "20260624-191843"
   },
@@ -612,6 +763,7 @@
     "min_wall_time_sec": 418.34587419,
     "max_wall_time_sec": 419.47007841,
     "avg_wall_time_sec": 419.04998174,
+    "projected_vm_count_10_bps": 1396.83,
     "avg_wall_time_min": 6.98416636,
     "timestamp": "20260624-192637"
   },
@@ -623,6 +775,7 @@
     "min_wall_time_sec": 509.28704918,
     "max_wall_time_sec": 511.5694064,
     "avg_wall_time_sec": 510.41166501,
+    "projected_vm_count_10_bps": 1276.03,
     "avg_wall_time_min": 8.50686108,
     "timestamp": "20260624-193621"
   },
@@ -634,6 +787,7 @@
     "min_wall_time_sec": 637.89104266,
     "max_wall_time_sec": 641.30858518,
     "avg_wall_time_sec": 639.6461285,
+    "projected_vm_count_10_bps": 1279.29,
     "avg_wall_time_min": 10.66076881,
     "timestamp": "20260624-194811"
   },
@@ -645,6 +799,7 @@
     "min_wall_time_sec": 696.05552995,
     "max_wall_time_sec": 696.97502572,
     "avg_wall_time_sec": 696.56634331,
+    "projected_vm_count_10_bps": 1160.94,
     "avg_wall_time_min": 11.60943906,
     "timestamp": "20260624-200106"
   },
@@ -656,6 +811,7 @@
     "min_wall_time_sec": 889.56826995,
     "max_wall_time_sec": 896.69627162,
     "avg_wall_time_sec": 892.5917129,
+    "projected_vm_count_10_bps": 1275.13,
     "avg_wall_time_min": 14.87652855,
     "timestamp": "20260624-201731"
   },
@@ -667,6 +823,7 @@
     "min_wall_time_sec": 885.6837381,
     "max_wall_time_sec": 899.1026549,
     "avg_wall_time_sec": 890.29996364,
+    "projected_vm_count_10_bps": 1483.83,
     "avg_wall_time_min": 14.83833273,
     "timestamp": "20260624-203349"
   },
@@ -678,6 +835,7 @@
     "min_wall_time_sec": 1036.49436729,
     "max_wall_time_sec": 1050.73968668,
     "avg_wall_time_sec": 1045.9432713,
+    "projected_vm_count_10_bps": 1743.24,
     "avg_wall_time_min": 17.43238786,
     "timestamp": "20260624-205232"
   },
@@ -689,8 +847,21 @@
     "min_wall_time_sec": 1266.88844839,
     "max_wall_time_sec": 1284.86735597,
     "avg_wall_time_sec": 1274.93674552,
+    "projected_vm_count_10_bps": 1593.67,
     "avg_wall_time_min": 21.24894576,
     "timestamp": "20260624-211522"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-64",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 202.37466332,
+    "max_wall_time_sec": 202.37466332,
+    "avg_wall_time_sec": 202.37466332,
+    "projected_vm_count_10_bps": 2023.75,
+    "avg_wall_time_min": 3.37291106,
+    "timestamp": "20260624-191241"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -700,6 +871,7 @@
     "min_wall_time_sec": 270.33831848,
     "max_wall_time_sec": 271.30056039,
     "avg_wall_time_sec": 270.81943943,
+    "projected_vm_count_10_bps": 1354.1,
     "avg_wall_time_min": 4.51365732,
     "timestamp": "20260624-191802"
   },
@@ -711,6 +883,7 @@
     "min_wall_time_sec": 342.39420134,
     "max_wall_time_sec": 342.94993548,
     "avg_wall_time_sec": 342.6732385,
+    "projected_vm_count_10_bps": 1142.24,
     "avg_wall_time_min": 5.71122064,
     "timestamp": "20260624-192437"
   },
@@ -722,6 +895,7 @@
     "min_wall_time_sec": 408.37351993,
     "max_wall_time_sec": 409.33644771,
     "avg_wall_time_sec": 408.86845601,
+    "projected_vm_count_10_bps": 1362.89,
     "avg_wall_time_min": 6.81447427,
     "timestamp": "20260624-193245"
   },
@@ -733,6 +907,7 @@
     "min_wall_time_sec": 504.58443125,
     "max_wall_time_sec": 506.71779897,
     "avg_wall_time_sec": 505.46733401,
+    "projected_vm_count_10_bps": 1010.93,
     "avg_wall_time_min": 8.42445557,
     "timestamp": "20260624-194208"
   },
@@ -744,6 +919,7 @@
     "min_wall_time_sec": 579.67232267,
     "max_wall_time_sec": 583.12403466,
     "avg_wall_time_sec": 580.95570197,
+    "projected_vm_count_10_bps": 968.26,
     "avg_wall_time_min": 9.68259503,
     "timestamp": "20260624-195258"
   },
@@ -755,6 +931,7 @@
     "min_wall_time_sec": 633.30251365,
     "max_wall_time_sec": 635.75916712,
     "avg_wall_time_sec": 634.5366596,
+    "projected_vm_count_10_bps": 906.48,
     "avg_wall_time_min": 10.57561099,
     "timestamp": "20260624-200451"
   },
@@ -766,6 +943,7 @@
     "min_wall_time_sec": 697.45712354,
     "max_wall_time_sec": 700.02153926,
     "avg_wall_time_sec": 698.43151212,
+    "projected_vm_count_10_bps": 873.04,
     "avg_wall_time_min": 11.6405252,
     "timestamp": "20260624-201750"
   },
@@ -777,6 +955,7 @@
     "min_wall_time_sec": 777.48850977,
     "max_wall_time_sec": 780.68726085,
     "avg_wall_time_sec": 779.14025172,
+    "projected_vm_count_10_bps": 865.71,
     "avg_wall_time_min": 12.98567086,
     "timestamp": "20260624-203215"
   },
@@ -788,8 +967,21 @@
     "min_wall_time_sec": 888.7554653,
     "max_wall_time_sec": 901.54328542,
     "avg_wall_time_sec": 895.21553734,
+    "projected_vm_count_10_bps": 1278.88,
     "avg_wall_time_min": 14.92025896,
     "timestamp": "20260624-204842"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4a-highcpu-72",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 193.04177898,
+    "max_wall_time_sec": 193.04177898,
+    "avg_wall_time_sec": 193.04177898,
+    "projected_vm_count_10_bps": 1930.42,
+    "avg_wall_time_min": 3.21736298,
+    "timestamp": "20260624-191147"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -799,6 +991,7 @@
     "min_wall_time_sec": 252.82526571,
     "max_wall_time_sec": 252.94152241,
     "avg_wall_time_sec": 252.88339406,
+    "projected_vm_count_10_bps": 1264.42,
     "avg_wall_time_min": 4.21472323,
     "timestamp": "20260624-191659"
   },
@@ -810,6 +1003,7 @@
     "min_wall_time_sec": 316.77526821,
     "max_wall_time_sec": 318.07856146,
     "avg_wall_time_sec": 317.39967005,
+    "projected_vm_count_10_bps": 1058.0,
     "avg_wall_time_min": 5.2899945,
     "timestamp": "20260624-192307"
   },
@@ -821,6 +1015,7 @@
     "min_wall_time_sec": 380.66763562,
     "max_wall_time_sec": 381.35297303,
     "avg_wall_time_sec": 381.0221103,
+    "projected_vm_count_10_bps": 952.56,
     "avg_wall_time_min": 6.35036851,
     "timestamp": "20260624-193029"
   },
@@ -832,6 +1027,7 @@
     "min_wall_time_sec": 450.27911091,
     "max_wall_time_sec": 453.068899,
     "avg_wall_time_sec": 452.08949506,
+    "projected_vm_count_10_bps": 904.18,
     "avg_wall_time_min": 7.53482492,
     "timestamp": "20260624-193903"
   },
@@ -843,6 +1039,7 @@
     "min_wall_time_sec": 507.78325769,
     "max_wall_time_sec": 509.95763921,
     "avg_wall_time_sec": 508.84054225,
+    "projected_vm_count_10_bps": 848.07,
     "avg_wall_time_min": 8.4806757,
     "timestamp": "20260624-194839"
   },
@@ -854,6 +1051,7 @@
     "min_wall_time_sec": 580.9167611,
     "max_wall_time_sec": 584.64732521,
     "avg_wall_time_sec": 583.05216802,
+    "projected_vm_count_10_bps": 832.93,
     "avg_wall_time_min": 9.71753613,
     "timestamp": "20260624-195941"
   },
@@ -865,6 +1063,7 @@
     "min_wall_time_sec": 635.80939005,
     "max_wall_time_sec": 638.07654685,
     "avg_wall_time_sec": 636.80606686,
+    "projected_vm_count_10_bps": 796.01,
     "avg_wall_time_min": 10.61343445,
     "timestamp": "20260624-201131"
   },
@@ -876,6 +1075,7 @@
     "min_wall_time_sec": 698.39633122,
     "max_wall_time_sec": 703.9199279,
     "avg_wall_time_sec": 700.0934579,
+    "projected_vm_count_10_bps": 777.88,
     "avg_wall_time_min": 11.6682243,
     "timestamp": "20260624-202446"
   },
@@ -887,8 +1087,21 @@
     "min_wall_time_sec": 774.05235351,
     "max_wall_time_sec": 777.57174208,
     "avg_wall_time_sec": 775.91624182,
+    "projected_vm_count_10_bps": 969.9,
     "avg_wall_time_min": 12.93193736,
     "timestamp": "20260624-203917"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 511.13503011,
+    "max_wall_time_sec": 511.13503011,
+    "avg_wall_time_sec": 511.13503011,
+    "projected_vm_count_10_bps": 5111.35,
+    "avg_wall_time_min": 8.51891717,
+    "timestamp": "20260624-191705"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -898,6 +1111,7 @@
     "min_wall_time_sec": 889.65781834,
     "max_wall_time_sec": 889.99104317,
     "avg_wall_time_sec": 889.82443075,
+    "projected_vm_count_10_bps": 4449.12,
     "avg_wall_time_min": 14.83040718,
     "timestamp": "20260624-193245"
   },
@@ -909,6 +1123,7 @@
     "min_wall_time_sec": 1243.69093829,
     "max_wall_time_sec": 1251.65910308,
     "avg_wall_time_sec": 1248.29038525,
+    "projected_vm_count_10_bps": 4160.97,
     "avg_wall_time_min": 20.80483975,
     "timestamp": "20260624-195443"
   },
@@ -920,6 +1135,7 @@
     "min_wall_time_sec": 1607.79836095,
     "max_wall_time_sec": 1617.22562852,
     "avg_wall_time_sec": 1613.0546693,
+    "projected_vm_count_10_bps": 4032.64,
     "avg_wall_time_min": 26.88424449,
     "timestamp": "20260624-202246"
   },
@@ -931,6 +1147,7 @@
     "min_wall_time_sec": 2027.91704291,
     "max_wall_time_sec": 2036.93064442,
     "avg_wall_time_sec": 2033.3776178,
+    "projected_vm_count_10_bps": 4066.76,
     "avg_wall_time_min": 33.88962696,
     "timestamp": "20260624-205804"
   },
@@ -942,6 +1159,7 @@
     "min_wall_time_sec": 2571.53840469,
     "max_wall_time_sec": 2621.39440522,
     "avg_wall_time_sec": 2598.69459187,
+    "projected_vm_count_10_bps": 4331.16,
     "avg_wall_time_min": 43.31157653,
     "timestamp": "20260624-214306"
   },
@@ -953,8 +1171,21 @@
     "min_wall_time_sec": 2858.80771569,
     "max_wall_time_sec": 2902.83588584,
     "avg_wall_time_sec": 2883.93634329,
+    "projected_vm_count_10_bps": 4119.91,
     "avg_wall_time_min": 48.06560572,
     "timestamp": "20260624-223253"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-32",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 317.98516876,
+    "max_wall_time_sec": 317.98516876,
+    "avg_wall_time_sec": 317.98516876,
+    "projected_vm_count_10_bps": 3179.85,
+    "avg_wall_time_min": 5.29975281,
+    "timestamp": "20260624-191349"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -964,6 +1195,7 @@
     "min_wall_time_sec": 502.48685769,
     "max_wall_time_sec": 502.62872762,
     "avg_wall_time_sec": 502.55779266,
+    "projected_vm_count_10_bps": 2512.79,
     "avg_wall_time_min": 8.37596321,
     "timestamp": "20260624-192313"
   },
@@ -975,6 +1207,7 @@
     "min_wall_time_sec": 670.2343949,
     "max_wall_time_sec": 671.05252065,
     "avg_wall_time_sec": 670.58495729,
+    "projected_vm_count_10_bps": 2235.28,
     "avg_wall_time_min": 11.17641595,
     "timestamp": "20260624-193520"
   },
@@ -986,6 +1219,7 @@
     "min_wall_time_sec": 850.30725052,
     "max_wall_time_sec": 851.24715084,
     "avg_wall_time_sec": 850.83624304,
+    "projected_vm_count_10_bps": 2127.09,
     "avg_wall_time_min": 14.18060405,
     "timestamp": "20260624-195035"
   },
@@ -997,6 +1231,7 @@
     "min_wall_time_sec": 1054.37305591,
     "max_wall_time_sec": 1060.81249437,
     "avg_wall_time_sec": 1057.12614372,
+    "projected_vm_count_10_bps": 2114.25,
     "avg_wall_time_min": 17.61876906,
     "timestamp": "20260624-200935"
   },
@@ -1008,6 +1243,7 @@
     "min_wall_time_sec": 1258.52379603,
     "max_wall_time_sec": 1262.54523669,
     "avg_wall_time_sec": 1260.5696393,
+    "projected_vm_count_10_bps": 2100.95,
     "avg_wall_time_min": 21.00949399,
     "timestamp": "20260624-203157"
   },
@@ -1019,6 +1255,7 @@
     "min_wall_time_sec": 1485.79515766,
     "max_wall_time_sec": 1493.79886253,
     "avg_wall_time_sec": 1490.1027922,
+    "projected_vm_count_10_bps": 2128.72,
     "avg_wall_time_min": 24.83504654,
     "timestamp": "20260624-205806"
   },
@@ -1030,6 +1267,7 @@
     "min_wall_time_sec": 1617.54287326,
     "max_wall_time_sec": 1628.33583614,
     "avg_wall_time_sec": 1624.38406992,
+    "projected_vm_count_10_bps": 2030.48,
     "avg_wall_time_min": 27.07306783,
     "timestamp": "20260624-212652"
   },
@@ -1041,8 +1279,21 @@
     "min_wall_time_sec": 1894.07229292,
     "max_wall_time_sec": 1916.50347324,
     "avg_wall_time_sec": 1904.06409201,
+    "projected_vm_count_10_bps": 2115.63,
     "avg_wall_time_min": 31.73440153,
     "timestamp": "20260624-220024"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-48",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 253.38495593,
+    "max_wall_time_sec": 253.38495593,
+    "avg_wall_time_sec": 253.38495593,
+    "projected_vm_count_10_bps": 2533.85,
+    "avg_wall_time_min": 4.2230826,
+    "timestamp": "20260624-191248"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -1052,6 +1303,7 @@
     "min_wall_time_sec": 352.26847149,
     "max_wall_time_sec": 352.3668388,
     "avg_wall_time_sec": 352.31765515,
+    "projected_vm_count_10_bps": 1761.59,
     "avg_wall_time_min": 5.87196092,
     "timestamp": "20260624-191940"
   },
@@ -1063,6 +1315,7 @@
     "min_wall_time_sec": 489.50024907,
     "max_wall_time_sec": 489.79340589,
     "avg_wall_time_sec": 489.64769799,
+    "projected_vm_count_10_bps": 1632.16,
     "avg_wall_time_min": 8.16079497,
     "timestamp": "20260624-192849"
   },
@@ -1074,6 +1327,7 @@
     "min_wall_time_sec": 591.03621477,
     "max_wall_time_sec": 592.20959359,
     "avg_wall_time_sec": 591.58103569,
+    "projected_vm_count_10_bps": 1478.95,
     "avg_wall_time_min": 9.85968393,
     "timestamp": "20260624-193953"
   },
@@ -1085,6 +1339,7 @@
     "min_wall_time_sec": 733.34997384,
     "max_wall_time_sec": 734.6912732,
     "avg_wall_time_sec": 734.15485613,
+    "projected_vm_count_10_bps": 1468.31,
     "avg_wall_time_min": 12.23591427,
     "timestamp": "20260624-195315"
   },
@@ -1096,6 +1351,7 @@
     "min_wall_time_sec": 849.52282588,
     "max_wall_time_sec": 850.9436417,
     "avg_wall_time_sec": 850.09368885,
+    "projected_vm_count_10_bps": 1416.82,
     "avg_wall_time_min": 14.16822815,
     "timestamp": "20260624-200832"
   },
@@ -1107,6 +1363,7 @@
     "min_wall_time_sec": 1003.52895787,
     "max_wall_time_sec": 1011.42126533,
     "avg_wall_time_sec": 1007.79770951,
+    "projected_vm_count_10_bps": 1439.71,
     "avg_wall_time_min": 16.79662849,
     "timestamp": "20260624-202637"
   },
@@ -1118,6 +1375,7 @@
     "min_wall_time_sec": 1091.81173918,
     "max_wall_time_sec": 1103.05122561,
     "avg_wall_time_sec": 1098.74660441,
+    "projected_vm_count_10_bps": 1373.43,
     "avg_wall_time_min": 18.31244341,
     "timestamp": "20260624-204629"
   },
@@ -1129,6 +1387,7 @@
     "min_wall_time_sec": 1157.3806164,
     "max_wall_time_sec": 1168.11422784,
     "avg_wall_time_sec": 1161.94616946,
+    "projected_vm_count_10_bps": 1452.43,
     "avg_wall_time_min": 19.36576949,
     "timestamp": "20260624-210723"
   },
@@ -1140,8 +1399,21 @@
     "min_wall_time_sec": 1429.86800616,
     "max_wall_time_sec": 1449.72195604,
     "avg_wall_time_sec": 1439.01980361,
+    "projected_vm_count_10_bps": 1439.02,
     "avg_wall_time_min": 23.98366339,
     "timestamp": "20260624-213307"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-64",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 219.83701794,
+    "max_wall_time_sec": 219.83701794,
+    "avg_wall_time_sec": 219.83701794,
+    "projected_vm_count_10_bps": 2198.37,
+    "avg_wall_time_min": 3.6639503,
+    "timestamp": "20260624-191212"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -1151,6 +1423,7 @@
     "min_wall_time_sec": 301.60521369,
     "max_wall_time_sec": 301.69617995,
     "avg_wall_time_sec": 301.65069682,
+    "projected_vm_count_10_bps": 1508.25,
     "avg_wall_time_min": 5.02751161,
     "timestamp": "20260624-191809"
   },
@@ -1162,6 +1435,7 @@
     "min_wall_time_sec": 382.17955897,
     "max_wall_time_sec": 382.78304225,
     "avg_wall_time_sec": 382.38538495,
+    "projected_vm_count_10_bps": 1274.62,
     "avg_wall_time_min": 6.37308975,
     "timestamp": "20260624-192527"
   },
@@ -1173,6 +1447,7 @@
     "min_wall_time_sec": 472.151907,
     "max_wall_time_sec": 472.6684944,
     "avg_wall_time_sec": 472.43946984,
+    "projected_vm_count_10_bps": 1181.1,
     "avg_wall_time_min": 7.87399116,
     "timestamp": "20260624-193424"
   },
@@ -1184,6 +1459,7 @@
     "min_wall_time_sec": 566.89440354,
     "max_wall_time_sec": 569.03938708,
     "avg_wall_time_sec": 568.10869517,
+    "projected_vm_count_10_bps": 1136.22,
     "avg_wall_time_min": 9.46847825,
     "timestamp": "20260624-194511"
   },
@@ -1195,6 +1471,7 @@
     "min_wall_time_sec": 657.58827308,
     "max_wall_time_sec": 662.68666428,
     "avg_wall_time_sec": 660.61617973,
+    "projected_vm_count_10_bps": 1101.03,
     "avg_wall_time_min": 11.01026966,
     "timestamp": "20260624-195727"
   },
@@ -1206,6 +1483,7 @@
     "min_wall_time_sec": 755.1901473,
     "max_wall_time_sec": 757.68835805,
     "avg_wall_time_sec": 756.36648686,
+    "projected_vm_count_10_bps": 1080.52,
     "avg_wall_time_min": 12.60610811,
     "timestamp": "20260624-201121"
   },
@@ -1217,6 +1495,7 @@
     "min_wall_time_sec": 845.45157238,
     "max_wall_time_sec": 847.89714465,
     "avg_wall_time_sec": 846.67813647,
+    "projected_vm_count_10_bps": 1058.35,
     "avg_wall_time_min": 14.11130227,
     "timestamp": "20260624-202645"
   },
@@ -1228,6 +1507,7 @@
     "min_wall_time_sec": 800.58517126,
     "max_wall_time_sec": 803.64632059,
     "avg_wall_time_sec": 802.38495431,
+    "projected_vm_count_10_bps": 1146.26,
     "avg_wall_time_min": 13.37308257,
     "timestamp": "20260624-204137"
   },
@@ -1239,8 +1519,21 @@
     "min_wall_time_sec": 972.13256156,
     "max_wall_time_sec": 988.16183047,
     "avg_wall_time_sec": 980.76526773,
+    "projected_vm_count_10_bps": 1089.74,
     "avg_wall_time_min": 16.3460878,
     "timestamp": "20260624-205921"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "c4d-highcpu-96",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 192.79413447,
+    "max_wall_time_sec": 192.79413447,
+    "avg_wall_time_sec": 192.79413447,
+    "projected_vm_count_10_bps": 1927.94,
+    "avg_wall_time_min": 3.21323557,
+    "timestamp": "20260624-191147"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -1250,6 +1543,7 @@
     "min_wall_time_sec": 239.12946521,
     "max_wall_time_sec": 239.22727517,
     "avg_wall_time_sec": 239.17837019,
+    "projected_vm_count_10_bps": 1195.89,
     "avg_wall_time_min": 3.98630617,
     "timestamp": "20260624-191636"
   },
@@ -1261,6 +1555,7 @@
     "min_wall_time_sec": 298.67339138,
     "max_wall_time_sec": 298.86309909,
     "avg_wall_time_sec": 298.77418393,
+    "projected_vm_count_10_bps": 995.91,
     "avg_wall_time_min": 4.97956973,
     "timestamp": "20260624-192222"
   },
@@ -1272,6 +1567,7 @@
     "min_wall_time_sec": 363.65284143,
     "max_wall_time_sec": 363.86844559,
     "avg_wall_time_sec": 363.73063244,
+    "projected_vm_count_10_bps": 909.33,
     "avg_wall_time_min": 6.06217721,
     "timestamp": "20260624-192926"
   },
@@ -1283,6 +1579,7 @@
     "min_wall_time_sec": 422.34168056,
     "max_wall_time_sec": 426.46397775,
     "avg_wall_time_sec": 425.4288811,
+    "projected_vm_count_10_bps": 850.86,
     "avg_wall_time_min": 7.09048135,
     "timestamp": "20260624-193740"
   },
@@ -1294,6 +1591,7 @@
     "min_wall_time_sec": 490.65944208,
     "max_wall_time_sec": 492.01453806,
     "avg_wall_time_sec": 491.28585193,
+    "projected_vm_count_10_bps": 818.81,
     "avg_wall_time_min": 8.18809753,
     "timestamp": "20260624-194705"
   },
@@ -1305,6 +1603,7 @@
     "min_wall_time_sec": 546.74054104,
     "max_wall_time_sec": 549.87335919,
     "avg_wall_time_sec": 548.11999791,
+    "projected_vm_count_10_bps": 783.03,
     "avg_wall_time_min": 9.1353333,
     "timestamp": "20260624-195730"
   },
@@ -1316,6 +1615,7 @@
     "min_wall_time_sec": 609.47185917,
     "max_wall_time_sec": 610.42877784,
     "avg_wall_time_sec": 609.8846082,
+    "projected_vm_count_10_bps": 762.36,
     "avg_wall_time_min": 10.16474347,
     "timestamp": "20260624-200906"
   },
@@ -1327,6 +1627,7 @@
     "min_wall_time_sec": 578.62507774,
     "max_wall_time_sec": 586.94317775,
     "avg_wall_time_sec": 582.74156984,
+    "projected_vm_count_10_bps": 832.49,
     "avg_wall_time_min": 9.7123595,
     "timestamp": "20260624-202011"
   },
@@ -1338,8 +1639,21 @@
     "min_wall_time_sec": 745.23265304,
     "max_wall_time_sec": 751.13637418,
     "avg_wall_time_sec": 748.49208465,
+    "projected_vm_count_10_bps": 748.49,
     "avg_wall_time_min": 12.47486808,
     "timestamp": "20260624-203409"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-16",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 506.380385,
+    "max_wall_time_sec": 506.380385,
+    "avg_wall_time_sec": 506.380385,
+    "projected_vm_count_10_bps": 5063.8,
+    "avg_wall_time_min": 8.43967308,
+    "timestamp": "20260624-191709"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -1349,6 +1663,7 @@
     "min_wall_time_sec": 837.01234506,
     "max_wall_time_sec": 837.96537375,
     "avg_wall_time_sec": 837.48885941,
+    "projected_vm_count_10_bps": 4187.44,
     "avg_wall_time_min": 13.95814766,
     "timestamp": "20260624-193206"
   },
@@ -1360,6 +1675,7 @@
     "min_wall_time_sec": 1264.88856561,
     "max_wall_time_sec": 1271.07988568,
     "avg_wall_time_sec": 1268.38775314,
+    "projected_vm_count_10_bps": 4227.96,
     "avg_wall_time_min": 21.13979589,
     "timestamp": "20260624-195416"
   },
@@ -1371,6 +1687,7 @@
     "min_wall_time_sec": 1528.91801653,
     "max_wall_time_sec": 1552.80541384,
     "avg_wall_time_sec": 1541.43309767,
+    "projected_vm_count_10_bps": 3853.58,
     "avg_wall_time_min": 25.69055163,
     "timestamp": "20260624-202114"
   },
@@ -1382,6 +1699,7 @@
     "min_wall_time_sec": 1975.10015093,
     "max_wall_time_sec": 1999.54662197,
     "avg_wall_time_sec": 1982.54934712,
+    "projected_vm_count_10_bps": 3965.1,
     "avg_wall_time_min": 33.04248912,
     "timestamp": "20260624-205556"
   },
@@ -1393,6 +1711,7 @@
     "min_wall_time_sec": 2848.62617647,
     "max_wall_time_sec": 2869.24943784,
     "avg_wall_time_sec": 2861.79010546,
+    "projected_vm_count_10_bps": 4769.65,
     "avg_wall_time_min": 47.69650176,
     "timestamp": "20260624-214523"
   },
@@ -1404,8 +1723,21 @@
     "min_wall_time_sec": 2823.48396493,
     "max_wall_time_sec": 2853.79080645,
     "avg_wall_time_sec": 2839.20057396,
+    "projected_vm_count_10_bps": 5678.4,
     "avg_wall_time_min": 47.32000957,
     "timestamp": "20260624-223438"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-32",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 346.36670014,
+    "max_wall_time_sec": 346.36670014,
+    "avg_wall_time_sec": 346.36670014,
+    "projected_vm_count_10_bps": 3463.67,
+    "avg_wall_time_min": 5.77277834,
+    "timestamp": "20260624-191427"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -1415,6 +1747,7 @@
     "min_wall_time_sec": 513.89945049,
     "max_wall_time_sec": 514.22369694,
     "avg_wall_time_sec": 514.06157372,
+    "projected_vm_count_10_bps": 2570.31,
     "avg_wall_time_min": 8.5676929,
     "timestamp": "20260624-192357"
   },
@@ -1426,6 +1759,7 @@
     "min_wall_time_sec": 701.69926552,
     "max_wall_time_sec": 702.55083026,
     "avg_wall_time_sec": 702.12504789,
+    "projected_vm_count_10_bps": 3510.63,
     "avg_wall_time_min": 11.70208413,
     "timestamp": "20260624-193638"
   },
@@ -1437,6 +1771,7 @@
     "min_wall_time_sec": 852.13220841,
     "max_wall_time_sec": 852.51051063,
     "avg_wall_time_sec": 852.38550752,
+    "projected_vm_count_10_bps": 2130.96,
     "avg_wall_time_min": 14.20642513,
     "timestamp": "20260624-195149"
   },
@@ -1448,6 +1783,7 @@
     "min_wall_time_sec": 1093.01473238,
     "max_wall_time_sec": 1104.53511433,
     "avg_wall_time_sec": 1099.20414244,
+    "projected_vm_count_10_bps": 2198.41,
     "avg_wall_time_min": 18.32006904,
     "timestamp": "20260624-201132"
   },
@@ -1459,6 +1795,7 @@
     "min_wall_time_sec": 1263.01642646,
     "max_wall_time_sec": 1277.66226544,
     "avg_wall_time_sec": 1269.35600076,
+    "projected_vm_count_10_bps": 2538.71,
     "avg_wall_time_min": 21.15593335,
     "timestamp": "20260624-203411"
   },
@@ -1470,6 +1807,7 @@
     "min_wall_time_sec": 1539.51042356,
     "max_wall_time_sec": 1575.84597995,
     "avg_wall_time_sec": 1561.90405065,
+    "projected_vm_count_10_bps": 2231.29,
     "avg_wall_time_min": 26.03173418,
     "timestamp": "20260624-210157"
   },
@@ -1481,6 +1819,7 @@
     "min_wall_time_sec": 1558.46733272,
     "max_wall_time_sec": 1587.78576468,
     "avg_wall_time_sec": 1577.40056832,
+    "projected_vm_count_10_bps": 1971.75,
     "avg_wall_time_min": 26.29000947,
     "timestamp": "20260624-213003"
   },
@@ -1492,8 +1831,21 @@
     "min_wall_time_sec": 1986.46803126,
     "max_wall_time_sec": 2018.55371067,
     "avg_wall_time_sec": 2002.4974573,
+    "projected_vm_count_10_bps": 2225.0,
     "avg_wall_time_min": 33.37495762,
     "timestamp": "20260624-220526"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-48",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 320.79840297,
+    "max_wall_time_sec": 320.79840297,
+    "avg_wall_time_sec": 320.79840297,
+    "projected_vm_count_10_bps": 3207.98,
+    "avg_wall_time_min": 5.34664005,
+    "timestamp": "20260624-191401"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -1503,6 +1855,7 @@
     "min_wall_time_sec": 446.59625616,
     "max_wall_time_sec": 446.96004418,
     "avg_wall_time_sec": 446.77815017,
+    "projected_vm_count_10_bps": 2233.89,
     "avg_wall_time_min": 7.4463025,
     "timestamp": "20260624-192236"
   },
@@ -1514,6 +1867,7 @@
     "min_wall_time_sec": 571.87089566,
     "max_wall_time_sec": 575.28890545,
     "avg_wall_time_sec": 573.69154228,
+    "projected_vm_count_10_bps": 1912.31,
     "avg_wall_time_min": 9.5615257,
     "timestamp": "20260624-193311"
   },
@@ -1525,6 +1879,7 @@
     "min_wall_time_sec": 695.30144542,
     "max_wall_time_sec": 697.72250424,
     "avg_wall_time_sec": 696.44151346,
+    "projected_vm_count_10_bps": 1741.1,
     "avg_wall_time_min": 11.60735856,
     "timestamp": "20260624-194550"
   },
@@ -1536,6 +1891,7 @@
     "min_wall_time_sec": 848.10571753,
     "max_wall_time_sec": 852.09589448,
     "avg_wall_time_sec": 850.08929455,
+    "projected_vm_count_10_bps": 1700.18,
     "avg_wall_time_min": 14.16815491,
     "timestamp": "20260624-200111"
   },
@@ -1547,6 +1903,7 @@
     "min_wall_time_sec": 945.81961332,
     "max_wall_time_sec": 951.34694977,
     "avg_wall_time_sec": 948.62695608,
+    "projected_vm_count_10_bps": 1581.04,
     "avg_wall_time_min": 15.81044927,
     "timestamp": "20260624-201814"
   },
@@ -1558,6 +1915,7 @@
     "min_wall_time_sec": 1173.35782036,
     "max_wall_time_sec": 1198.41807666,
     "avg_wall_time_sec": 1188.86820343,
+    "projected_vm_count_10_bps": 1698.38,
     "avg_wall_time_min": 19.81447006,
     "timestamp": "20260624-203935"
   },
@@ -1569,6 +1927,7 @@
     "min_wall_time_sec": 1201.14468274,
     "max_wall_time_sec": 1229.53642755,
     "avg_wall_time_sec": 1210.73149328,
+    "projected_vm_count_10_bps": 1513.41,
     "avg_wall_time_min": 20.17885822,
     "timestamp": "20260624-210135"
   },
@@ -1580,6 +1939,7 @@
     "min_wall_time_sec": 1381.04957373,
     "max_wall_time_sec": 1417.35210197,
     "avg_wall_time_sec": 1396.22128745,
+    "projected_vm_count_10_bps": 1551.36,
     "avg_wall_time_min": 23.27035479,
     "timestamp": "20260624-212649"
   },
@@ -1591,8 +1951,21 @@
     "min_wall_time_sec": 1615.14831456,
     "max_wall_time_sec": 1636.59270285,
     "avg_wall_time_sec": 1624.39823492,
+    "projected_vm_count_10_bps": 1624.4,
     "avg_wall_time_min": 27.07330392,
     "timestamp": "20260624-215548"
+  },
+  {
+    "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
+    "code_release": "v0.0.1",
+    "machine_type": "t2d-standard-60",
+    "concurrent_jobs_or_blocks": 1,
+    "min_wall_time_sec": 284.85084801,
+    "max_wall_time_sec": 284.85084801,
+    "avg_wall_time_sec": 284.85084801,
+    "projected_vm_count_10_bps": 2848.51,
+    "avg_wall_time_min": 4.74751413,
+    "timestamp": "20260624-191322"
   },
   {
     "benchmark_id": "benchmark-id-ALL-2026-06-25_04-42-22",
@@ -1602,6 +1975,7 @@
     "min_wall_time_sec": 376.87807119,
     "max_wall_time_sec": 378.2142809,
     "avg_wall_time_sec": 377.54617605,
+    "projected_vm_count_10_bps": 1887.73,
     "avg_wall_time_min": 6.29243627,
     "timestamp": "20260624-192044"
   },
@@ -1613,6 +1987,7 @@
     "min_wall_time_sec": 465.64510219,
     "max_wall_time_sec": 467.83838201,
     "avg_wall_time_sec": 466.85680902,
+    "projected_vm_count_10_bps": 1556.19,
     "avg_wall_time_min": 7.78094682,
     "timestamp": "20260624-192932"
   },
@@ -1624,6 +1999,7 @@
     "min_wall_time_sec": 590.70133916,
     "max_wall_time_sec": 594.1019262,
     "avg_wall_time_sec": 592.58098345,
+    "projected_vm_count_10_bps": 1481.45,
     "avg_wall_time_min": 9.87634972,
     "timestamp": "20260624-194042"
   },
@@ -1635,6 +2011,7 @@
     "min_wall_time_sec": 682.15018104,
     "max_wall_time_sec": 685.94533549,
     "avg_wall_time_sec": 683.45675394,
+    "projected_vm_count_10_bps": 1366.91,
     "avg_wall_time_min": 11.3909459,
     "timestamp": "20260624-195314"
   },
@@ -1646,6 +2023,7 @@
     "min_wall_time_sec": 774.80489579,
     "max_wall_time_sec": 777.92379274,
     "avg_wall_time_sec": 775.7752484,
+    "projected_vm_count_10_bps": 1551.55,
     "avg_wall_time_min": 12.92958747,
     "timestamp": "20260624-200733"
   },
@@ -1657,6 +2035,7 @@
     "min_wall_time_sec": 903.44055846,
     "max_wall_time_sec": 907.88904297,
     "avg_wall_time_sec": 905.49496068,
+    "projected_vm_count_10_bps": 1293.56,
     "avg_wall_time_min": 15.09158268,
     "timestamp": "20260624-202405"
   },
@@ -1668,6 +2047,7 @@
     "min_wall_time_sec": 1010.63397521,
     "max_wall_time_sec": 1017.67849233,
     "avg_wall_time_sec": 1013.6644586,
+    "projected_vm_count_10_bps": 1267.08,
     "avg_wall_time_min": 16.89440764,
     "timestamp": "20260624-204233"
   },
@@ -1679,6 +2059,7 @@
     "min_wall_time_sec": 1199.95988206,
     "max_wall_time_sec": 1237.4672914,
     "avg_wall_time_sec": 1215.9037419,
+    "projected_vm_count_10_bps": 1351.0,
     "avg_wall_time_min": 20.26506237,
     "timestamp": "20260624-210445"
   },
@@ -1690,6 +2071,7 @@
     "min_wall_time_sec": 1187.74541723,
     "max_wall_time_sec": 1227.40137229,
     "avg_wall_time_sec": 1214.58447122,
+    "projected_vm_count_10_bps": 1214.58,
     "avg_wall_time_min": 20.24307452,
     "timestamp": "20260624-212656"
   }
