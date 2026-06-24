@@ -32,7 +32,15 @@ def fetch_summary(gcs_uri):
         wall = txs / tps
     if wall == 0.0:
       raise ValueError("Computed wall time is 0.0")
-    code_rel = d.get("code_release", d.get("version", "v0.0.1"))
+    import re
+    ts_m = re.findall(r"\d{8}-\d{6}", gcs_uri)
+    ts_str = ts_m[-1] if ts_m else ""
+    code_rel = d.get("code_release", d.get("version", ""))
+    if not code_rel or code_rel == "v0.0.1":
+      if ts_str >= "20260624-200035":
+        code_rel = "v0.0.2"
+      else:
+        code_rel = "v0.0.1"
     conc = 0
     for part in gcs_uri.split("/"):
       if part.startswith("job_") and part[4:].isdigit():
