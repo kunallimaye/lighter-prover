@@ -524,7 +524,7 @@ cloud_bench_run() {
           --pids-limit=-1 \
           --ulimit nofile=1048576:1048576 \
           -v /tmp/reports:/data/reports:rw \
-          ${image_uri} --tx-per-proof ${tx_per_proof}
+          ${image_uri}
       else
         threads_per_job=\$(( \$(nproc) / ${jobs} ))
         pids=()
