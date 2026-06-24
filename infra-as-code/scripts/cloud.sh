@@ -500,11 +500,11 @@ cloud_bench_run() {
   _log_info "Ensuring VM instance '${target_vm}' (${zone}) is started before SSH connection..."
   gcloud compute instances start "${target_vm}" --zone="${zone}" --project="${build_project}" --quiet || true
 
-  for _ in {1..15}; do
+  for _ in {1..40}; do
     if gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="echo ready" --quiet 2>/dev/null; then
       break
     fi
-    sleep 3
+    sleep 5
   done
 
   gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
