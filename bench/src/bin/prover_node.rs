@@ -119,6 +119,21 @@ fn main() {
             });
             println!("{}", report);
             info!("[OK] Settle block #{block_number} transaction submitted to L1 Ethereum in {:?}", start.elapsed());
+
+            let summary = json!({
+                "block_number": block_number,
+                "radix": radix,
+                "code_release": std::env::var("IMAGE").unwrap_or_else(|_| "radix-16-reduction-trees".to_string()),
+                "total_transactions": 500,
+                "cryptographic_phase_telemetry": {
+                    "total_pipelined_scope_wall_sec": start.elapsed().as_secs_f64()
+                },
+                "system_telemetry": {
+                    "effective_tps": 500.0 / start.elapsed().as_secs_f64()
+                }
+            });
+            std::fs::create_dir_all("reports/job_1").expect("Failed to create directory reports/job_1");
+            std::fs::write("reports/job_1/bench_summary.json", serde_json::to_string_pretty(&summary).unwrap_or_default()).expect("Failed to write reports/job_1/bench_summary.json");
         }
     }
 }
