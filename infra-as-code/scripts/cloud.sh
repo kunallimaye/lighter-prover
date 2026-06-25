@@ -675,251 +675,50 @@ cloud_run_distributed_cluster() {
   _log_ok "GCP Cloud Build declarative distributed proving cycle completed successfully!"
 }
 
-cloud_test_t2d_hypothesis() {
-  local build_project="$(_resolve_build_project)"
-  _log_info "Booting 4 concurrent AB Proving Pods (Control P0/P1 in us-east4-b vs Hypothesis P2/P3 in us-east4-c)..."
-  cloud_vm_start "all"
-  sleep 45
+# ─── Honest benchmark stubs (issue #282) ─────────────────────────────────
+#
+# The functions below previously fabricated "empirical" metrics: they slept
+# for fixed durations and then wrote hardcoded heredoc JSON/Markdown ledgers
+# (fixed GKE wall times, fixed annual-savings figures, and a hardcoded capstone
+# proving-time matrix). None of those numbers were measured. They have been
+# replaced with fail-loud stubs. See reports/PROVENANCE.md for the full list of
+# fabricated literals and the artifacts that were purged.
+#
+# Real numbers require a genuine distributed proving run on live GCP compute
+# (#281 reduction-tree circuit correctness + #283 honest distributed
+# prover-node, both now merged). Regenerating real, provenance-stamped reports
+# from a live cloud run is a deliberate follow-up, NOT part of #282.
+#
+# To run a real distributed benchmark instead, use the honest verbs directly:
+#   make cloud-run-distributed-cluster ENGINE=gke ARCH=c3d BLOCKS=2 CHUNK=1
+#   make cloud-bench-run VM=<id> JOBS=<n> CHUNK=<n>
+# These submit a real Cloud Build cycle and emit only measured telemetry.
 
-  _log_info "Executing 4-Pod Concurrent Multi-Block AB Benchmark Race (Blocks 1042..1045)..."
-  local start_ts=$(date +%s%N)
-
-  _log_info "Control Pods P0 & P1 (ARM c4a-64 leaves): Dispatched 250 concurrent provers..."
-  _log_info "Hypothesis Pods P2 & P3 (AMD t2d-60 leaves): Dispatched 250 concurrent znver3 provers..."
-  sleep 13
-
-  local end_ts=$(date +%s%N)
-  local elapsed_ms=$(( (end_ts - start_ts) / 1000000 ))
-
-  _log_ok "AB Multi-Block Trial concluded! Control wall time: 12005 ms | Hypothesis t2d wall time: 12962 ms"
-
-  mkdir -p "${ROOT_DIR}/reports"
-  cat << 'EOF' > "${ROOT_DIR}/reports/t2d_hypothesis_results.json"
-{
-  "experiment": "phase4_ab_t2d_arbitrage",
-  "concurrency": "4_pods_parallel_2_blocks_per_paradigm",
-  "region": "us-east4",
-  "control_arm_c4a": {
-    "leaf_shape": "c4a-highcpu-64",
-    "tree_shape": "c4a-highcpu-16",
-    "e2e_block_wall_time_ms": 12005,
-    "effective_tps": 41.65,
-    "hourly_pod_burn": 2.314
-  },
-  "hypothesis_amd_t2d": {
-    "leaf_shape": "t2d-standard-60",
-    "tree_shape": "c4a-highcpu-16",
-    "compiler_flags": "-C target-cpu=znver3",
-    "e2e_block_wall_time_ms": 12962,
-    "effective_tps": 38.57,
-    "hourly_pod_burn": 0.934,
-    "annual_fleet_savings_usd": 1384431,
-    "cost_reduction_pct": 59.63
-  }
+_die_requires_live_run() {
+  local name="$1"
+  _die "${name}: not implemented. This benchmark previously fabricated hardcoded
+       'empirical' metrics and has been removed (issue #282). Generating real
+       numbers requires a live distributed proving run on GCP compute (#281 +
+       #283, now merged). Run a genuine benchmark with the honest verbs instead:
+         make cloud-run-distributed-cluster ENGINE=gke ARCH=c3d BLOCKS=2 CHUNK=1
+         make cloud-bench-run VM=<id> JOBS=<n> CHUNK=<n>
+       Regenerating provenance-stamped reports from a real run is a follow-up."
 }
-EOF
 
-  _log_info "Rendering official Phase 4 proposal report proposal_phase4_t2d_milan_leaf_arbitrage.md..."
-  cat << 'EOF' > "${ROOT_DIR}/reports/proposal_phase4_t2d_milan_leaf_arbitrage.md"
-# Proposal Phase 4: Flagship Silicon Arbitrage via AMD Milan Tau (`t2d`) Leaf Provers
-
-## Executive Summary & Empirical Verdict
-Across our 4-Pod Concurrent Multi-Block AB Benchmark Race in `us-east4` (**Blocks 1042..1045**), we have empirically proven the single largest commercial cost reduction in Lighter's engineering history.
-
-While **ARM Neoverse V2 (`c4a-highcpu-64`)** achieved an E2E block wall time of $12.005\text{s}$ ($\$2.314\text{/hr/pod}$), our `znver3`-optimized **AMD EPYC Milan Tau (`t2d-standard-60`)** leaf provers achieved an E2E block wall time of **$12.962\text{s}$** ($\$0.934\text{/hr/pod}$). 
-
-By trading $+957\text{ milliseconds}$ of settlement finality, **Lighter slashes spot compute billings by $\mathbf{59.63\%}$ — banking a cash arbitrage savings of $\mathbf{\$1,384,431 \text{ every year}}$ across 10 BPS.**
-
----
-
-## Empirical AB Benchmark Ledger (`reports/t2d_hypothesis_results.json`) 🏢📊
-
-| Silicon Paradigm & Pod Shape | Assigned Concurrency | Target Region | Leaf Vectorization Physics | Empirical E2E Block Wall Time | Saturated Effective TPS | Spot Hourly Pod Rate | Annual 120-Pod Fleet Billing | Net Annual Cash Arbitrage Lift |
-| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Control Pods $P_0, P_1$** *(3 * c4a-64 + 1 * c4a-16)* | 2 Blocks Parallel | `us-east4` | 128-bit NEON | **$12.005\text{ seconds}$** | $41.65\text{ TPS}$ | $\$2.314\text{ / hr}$ | $\$2,431,993$ | **Control Baseline** |
-| **Hypothesis Pods $P_2, P_3$** *(3 * t2d-60 + 1 * c4a-16)* | 2 Blocks Parallel | `us-east4` | 256-bit AVX2 (`znver3`) | $12.962\text{ seconds}$ | $38.57\text{ TPS}$ | **$\mathbf{\$0.934\text{ / hr}}$** | **$\mathbf{\$981,562}$** | 🏆 **$\mathbf{+\$1,450,431\text{ / yr}}$** *(59.6% Slash!)* |
-
----
-
-## Architectural Recommendation & Next Steps 🎯🔒
-1. **Adopt Asymmetric Tau Pods**: Standardize Terraform production modules on `t2d-standard-60` leaves paired with `c4a-highcpu-16` aggregators.
-2. **Release Mandate Compliance**: Attach this findings report alongside `reports/t2d_hypothesis_results.json` in Release `v0.1.0`.
-EOF
-
-  _log_ok "Official Phase 4 proposal findings report generated successfully!"
-
-  _log_info "Executing mandatory immediate post-test auto-teardown across all 16 VMs..."
-  cloud_vm_stop "all"
+cloud_test_t2d_hypothesis() {
+  _die_requires_live_run "cloud-test-t2d-hypothesis (Phase 4 t2d vs c4a AB race)"
 }
 
 cloud_test_gke_performance_tax() {
-  _log_info "Booting or simulating GKE Autopilot / Standard cluster with 6 ARM Axion c4a worker replicas..."
-  sleep 3
-
-  _log_info "Executing 2-Block GKE Distributed Proving Benchmark Race (Blocks 1042 & 1043)..."
-  local start_ts=$(date +%s%N)
-
-  _log_info "GKE Dataplane V2 (eBPF): Routing 500 Goldilocks FRI witness chunks across virtual overlay interfaces..."
-  sleep 12
-
-  local end_ts=$(date +%s%N)
-  local elapsed_ms=$(( (end_ts - start_ts) / 1000000 ))
-
-  _log_ok "GKE 2-Block Distributed Proving concluded! Wall time: 12152 ms (<= 1.3% eBPF overlay tax vs bare GCE MIGs)!"
-
-  mkdir -p "${ROOT_DIR}/reports"
-  cat << 'EOF' > "${ROOT_DIR}/reports/gke_tax_results.json"
-{
-  "experiment": "phase5_gke_performance_tax_validation",
-  "concurrency": "2_blocks_parallel_across_gke_namespaces",
-  "cluster_engine": "gke_autopilot_dataplane_v2_ebpf",
-  "leaf_shape": "compute_class_c4a_64cpu_128gi_memory",
-  "empirical_gke_wall_time_ms": 12152,
-  "bare_gce_mig_wall_time_ms": 12005,
-  "net_ebpf_overlay_tax_pct": 1.22,
-  "effective_tps": 41.15,
-  "reliability_healing_time_ms": 400
-}
-EOF
-
-  _log_info "Rendering official Phase 5 proposal report proposal_phase5_gke_autopilot_reliability.md..."
-  cat << 'EOF' > "${ROOT_DIR}/reports/proposal_phase5_gke_autopilot_reliability.md"
-# Proposal Phase 5: Zero-Toil Distributed Proving via Google Kubernetes Engine (`GKE Autopilot`)
-
-## Executive Summary & Empirical Verdict
-Across our 2-Block GKE Distributed Proving Benchmark Race (**Blocks 1042 & 1043**), we have empirically proven that **GKE Autopilot combined with GKE Dataplane V2 (eBPF)** introduces virtually zero performance tax over bare GCE Managed Instance Groups.
-
-While bare GCE MIGs achieved a block proving wall time of 12.005s, our GKE Autopilot container assembly line achieved an E2E block wall time of **12.152 seconds** (a negligible 1.22% overlay network tax). 
-
-In exchange for this nominal 147-millisecond wire delta, **Lighter eliminates 95% of ongoing DevOps SRE operational toil — gaining automated sub-second Spot preemption healing (~400ms), 4-second zero-downtime container rollouts, and scale-to-zero cost governance.**
-
----
-
-## Empirical Benchmark Ledger (`reports/gke_tax_results.json`) 🏢📊
-
-| Orchestration Engine & Network Dataplane | Assigned Concurrency | Silicon Compute Class | Container Resource Request | Empirical Block Wall Time | Effective Settlement TPS | Net Overlay Wire Tax | Spot Preemption Healing Time | Operational SRE Toil Lift |
-| :--- | :---: | :---: | :--- | :---: | :---: | :---: | :--- | :--- |
-| **Bare GCE MIGs** *(Control Baseline)* | 2 Blocks Parallel | ARM Axion `c4a` | Bare Host OS Network | **12.005 seconds** | 41.65 TPS | Baseline | Catastrophic Abort | High Manual Scripting Toil |
-| **GKE Autopilot** *(Dataplane V2 eBPF)* | 2 Blocks Parallel | ARM Axion `c4a` | 64 CPU / 128Gi Memory | 12.152 seconds | 41.15 TPS | **+1.22%** *(147ms)* | **~400 milliseconds** | 🌟 **-95% Toil** *(Automated KEDA)* |
-
----
-
-## Architectural Recommendation & Next Steps 🎯🔒
-1. **Standardize on GKE Autopilot**: Deprecate bare GCE MIG Terraform manifests in favor of canonical Kubernetes Deployments (`prover_pod_unit.yaml`).
-2. **Standard GKE Fallback**: Maintain standard node pool definitions as an approved fallback if compute class auto-provisioning encounters quota hurdles.
-EOF
-
-  _log_ok "Official Phase 5 findings report generated successfully!"
-
-  _log_info "Executing mandatory immediate post-test auto-teardown across GKE worker nodes..."
-  cloud_vm_stop "all"
+  _die_requires_live_run "cloud-test-gke-performance-tax (Phase 5 GKE overlay tax)"
 }
 
 cloud_test_capstone_matrix() {
-  _log_info "Executing Unmocked Empirical 6-Row Capstone Benchmark Suite across ALL Releases (Universal AVX-512 silicon, BLOCKS=2)..."
-  cloud_run_distributed_cluster --engine=gke --arch=c3d --blocks=2 --chunk=1
-
-  mkdir -p "${ROOT_DIR}/reports"
-  cat << 'EOF' > "${ROOT_DIR}/reports/capstone_six_release_empirical_matrix.json"
-{
-  "experiment": "capstone_six_release_empirical_observatory",
-  "silicon_standard": "c3d_highcpu_180_and_t2d_standard_60_spot",
-  "concurrency_blocks": 2,
-  "macro_extrapolation_target_load_bps": 10,
-  "macro_extrapolation_target_tps": 5000,
-  "empirical_verification_build_id": "8a72b192-35c6-4174-9969-529146291835",
-  "matrix": [
-    {
-      "release": "v0.0.0_monolith_baseline",
-      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=500",
-      "architecture": "single_thread_monolith_c3d_avx512",
-      "measured_block_proving_time_s": 224.60,
-      "projected_spot_vms_5000_tps": 2246,
-      "relative_latency_reduction_pct": 0.0
-    },
-    {
-      "release": "v0.0.1_async_pipelining",
-      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=500 JOBS=2",
-      "architecture": "multi_thread_stream_c3d_avx512",
-      "measured_block_proving_time_s": 206.20,
-      "projected_spot_vms_5000_tps": 2062,
-      "relative_latency_reduction_pct": 8.19
-    },
-    {
-      "release": "v0.0.2_dynamic_chunking_sweet_spot",
-      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=4",
-      "architecture": "chunk4_u_curve_optimum_c3d_avx512",
-      "measured_block_proving_time_s": 22.50,
-      "projected_spot_vms_5000_tps": 225,
-      "relative_latency_reduction_pct": 89.98
-    },
-    {
-      "release": "v0.0.2_dynamic_chunking_monolith_drag",
-      "runner": "cloud-bench-run TARGET=prover-c3d-1 CHUNK=1",
-      "architecture": "chunk1_single_vm_thrashing_c3d_avx512",
-      "measured_block_proving_time_s": 1254.50,
-      "projected_spot_vms_5000_tps": 12545,
-      "relative_latency_reduction_pct": -458.54
-    },
-    {
-      "release": "0.0.3-distributed-proving_baseload",
-      "runner": "cloud-run-distributed-cluster --engine=gke --arch=c3d --blocks=2 --chunk=1",
-      "architecture": "dynamic_chunk1_avx512_single_numa_c3d_pods",
-      "measured_block_proving_time_s": 19.50,
-      "measured_leaf_proving_time_s": 3.12,
-      "projected_baseload_pods_3000_tps": 117,
-      "projected_total_pods_5000_tps": 195,
-      "projected_spot_vms_5000_tps": 780,
-      "relative_latency_reduction_pct": 91.31,
-      "standby_teardown_leakage": 0.0
-    },
-    {
-      "release": "0.0.3-distributed-proving_burst",
-      "runner": "cloud-run-distributed-cluster --engine=gke --arch=t2d --blocks=2 --chunk=2",
-      "architecture": "dynamic_chunk2_zen3_spot_t2d_pods",
-      "measured_block_proving_time_s": 26.41,
-      "measured_leaf_proving_time_s": 4.15,
-      "projected_burst_pods_2000_tps": 106,
-      "projected_total_pods_5000_tps": 264,
-      "projected_spot_vms_5000_tps": 1056,
-      "relative_latency_reduction_pct": 88.24,
-      "standby_teardown_leakage": 0.0
-    }
-  ]
-}
-EOF
-
-  cat << 'EOF' > "${ROOT_DIR}/reports/proposal_phase6_capstone_six_release_observatory.md"
-# Capstone Empirical Observatory: Lighter Prover Architecture Evolution
-
-Across our golden unmocked verification runs standardized uniformly on **AMD Genoa Zen 4 AVX-512 Single-NUMA Instances (`c3d-highcpu-180`, `requests.cpu: 30`)** and **AMD Milan Zen 3 Spot Instances (`t2d-standard-60`)**, we have empirically tested and validated ALL six evolutionary variations of Lighter Prover's cryptographic architecture across 2 continuous test blocks (`BLOCKS=2`):
-
-| Proving Paradigm & Edition | CPU Type & Topology | Assigned Leaf Batch (`CHUNK`) | Measured Finality Time ($W$) | Extrapolated Baseload Fleet ($60\%$) | Extrapolated Global Fleet ($100\%$) | Standby Leakage |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **`v0.0.0` Monolith Baseline** | Standalone VM (`c3d-180`) | 500 txs | 224.60s | N/A | 2,246 Spot VMs | High |
-| **`v0.0.1` Async Proof Gen** | Standalone VM (`c3d-180`) | 500 txs | 206.20s | N/A | 2,062 Spot VMs | High |
-| **`v0.0.2` Dynamic Chunking** | Standalone VM *(Sweet Spot N=4)* | 4 txs | 22.50s | N/A | 225 Spot VMs | High |
-| **`v0.0.2` Dynamic Chunking** | Standalone VM *(Monolith Drag N=1)* | 1 tx | 1,254.50s | N/A | 12,545 Spot VMs | High |
-| 🏆 **`0.0.3-distributed-proving`** | **GKE Pods** (`c3d-180` Single-NUMA) | **1 tx (AVX-512)** | **19.50s** | **117 Pods** *(117 GKE VMs inc. Aggs)* | **195 Pods** *(195 GKE VMs inc. Aggs)* | 🏆 **0.00** |
-| 🥈 **`0.0.3-distributed-proving`** | **GKE Pods** (`t2d-60` Zen 3 Spot) | **2 txs (Spot)** | **26.41s** | N/A *(Burst Tier)* | **106 Burst Pods** *(106 GKE VMs inc. Aggs)* | 🏆 **0.00** |
-
-## Empirical Capstone Takeaways 🔬⚡
-1. **The Monolithic Sharding Trap (`v0.0.2` N=1 vs. `0.0.3`)**: Measuring `v0.0.2` on a single VM at `CHUNK=1` reveals a catastrophic runtime drag of **1,254.50 seconds** (requiring 12,545 VMs). Because 1 single host OS kernel gets buried under 500 parallel proof tasks, memory bus contention thrashes execution. By distributing the 500 leaves horizontally over Pub/Sub (`0.0.3-distributed-proving`), each pod crunches 1 leaf in 3.12s, collapsing global finality to **19.50s (+64.3x speedup)**!
-2. **Hybrid Bimodal Spot Arbitrage (`c3d` Baseload $+$ `t2d` Burst)**: Sizing baseload traffic ($60\% = 6\text{ blocks/sec}$) on dedicated AVX-512 `c3d` pods ($117\text{ pods}$) and elastic volume spikes ($40\%+$) on spot `t2d` pods ($106\text{ pods}$) bounds global financial footprint at $223\text{ bimodal pods}$!
-3. **Symmetric Zero-Billing Teardown**: Cloud Build step `tf-destroy` guarantees immediate symmetric eviction (`Destroy complete: 34 resources`), permanently capping standby billing leakage at 0.00/hr!
-EOF
-
-  _log_ok "Official 6-row empirical capstone trial concluded and verified ledgers written!"
+  _die_requires_live_run "cloud-test-capstone-matrix (Phase 6 six-release capstone matrix)"
 }
 
 cloud_test_omni_silicon_parallel() {
-  _log_info "Executing 4-Block Parallel Comparative AB Benchmark Suite (BLOCKS=4, 2,000 total leaf transactions) across Quad-Silicon (c3d, c4a, c4d, t2d)..."
-  python3 infra-as-code/scripts/render_pod_spec.py --arch=c3d --blocks=4 >/dev/null
-  python3 infra-as-code/scripts/render_pod_spec.py --arch=c4a --blocks=4 >/dev/null
-  python3 infra-as-code/scripts/render_pod_spec.py --arch=c4d --blocks=4 >/dev/null
-  python3 infra-as-code/scripts/render_pod_spec.py --arch=t2d --blocks=4 >/dev/null
-
-  _log_ok "Official 11-variation empirical benchmark sequence concluded and verified ledgers written!"
+  _die_requires_live_run "cloud-test-omni-silicon-parallel (4-block quad-silicon suite)"
 }
 
 # ─── Main Dispatch ────────────────────────────────────────────────────
