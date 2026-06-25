@@ -475,11 +475,12 @@ cloud_bench_run() {
   if [[ "${vm_image}" == *"arm64"* || "${vm_mtype}" == *"a-"* || "${vm_mtype}" == *"t2a"* ]]; then
     image_tag="arm64"
   fi
-  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"
+  local rel_tag="${TAG:-v0.0.3-distributed-proving}"
+  local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${rel_tag}"
   if [[ "${image_arg}" != "default" && -n "${image_arg}" ]]; then
     if [[ "${image_arg}" != *"/"* ]]; then
       local tag_suffix="${image_arg#zkp-prover:}"
-      image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${tag_suffix}-${image_tag}"
+      image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${tag_suffix}"
     else
       image_uri="${image_arg}"
     fi
@@ -551,7 +552,8 @@ cloud_bench_run() {
         ts=\$(date +%Y%m%d-%H%M%S)
         dest=\$(echo \"${bench_template}\" | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
         if [[ -n \"${benchmark_id}\" ]]; then
-          dest=\"benchmark-reports/${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
+          code_rel=\"\$(echo \"${image_uri}\" | awk -F: \"{print \\\$NF}\" | sed -e \"s/-amd64//g\" -e \"s/-arm64//g\")\"
+          dest=\"benchmark-reports/${benchmark_id}/\$code_rel/\$machine_type/\$instance_id/\$ts\"
         fi
         gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
       fi
