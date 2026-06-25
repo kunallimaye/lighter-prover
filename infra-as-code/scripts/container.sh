@@ -69,46 +69,40 @@ container_run() {
 
 test_distributed_fast() {
   cd "${ROOT_DIR}"
-  _log_info "Compiling prover-node microservice daemon..."
+  _log_info "Compiling prover-node distributed daemon..."
   cargo build --release --bin prover-node
 
-  _log_info "Starting local Pub/Sub emulator container using ${ENGINE}..."
-  "${ENGINE}" run -d --rm -p 8085:8085 --name pubsub-test google/cloud-sdk gcloud beta emulators pubsub start --host-port=0.0.0.0:8085 2>/dev/null || true
-  sleep 3
+  # The prover-node uses a filesystem proof transport (reports/stark_proofs/),
+  # NOT Pub/Sub. Leaves write proofs, the tree node reads + folds them, and the
+  # root coordinator harvests + verifies the parent. Every stage verifies its own
+  # proof; this integration run fails (non-zero exit) if any verification fails.
+  rm -rf reports/stark_proofs
+  _log_info "Running leaf -> tree -> root pipeline over the filesystem transport..."
+  target/release/prover-node leaf-worker --chunk-idx 0 --tx-per-proof 1
+  target/release/prover-node leaf-worker --chunk-idx 1 --tx-per-proof 1
+  target/release/prover-node tree-node --level 1 --node-idx 0 --radix 2 --tx-per-proof 1
+  target/release/prover-node root-coordinator --block-number 1042 --radix 2 --node-idx 0 --tx-per-proof 1
 
-  _log_info "Executing 2-minute scaled-down distributed proving assembly line..."
-  PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node leaf-worker --chunk-idx 0 --tx-per-proof 4 &
-  PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node leaf-worker --chunk-idx 1 --tx-per-proof 4 &
-  PUBSUB_EMULATOR_HOST=localhost:8085 target/release/prover-node tree-node --level 1 --node-idx 0
+  # Assert the real aggregated parent proof was produced.
+  [ -f reports/stark_proofs/tree_L1_N0.proof ] \
+    || _die "Distributed pipeline did not produce an aggregated parent proof"
 
-  "${ENGINE}" stop pubsub-test 2>/dev/null || true
-  _log_ok "2-minute scaled developer distributed simulation verified!"
+  _log_ok "Distributed leaf->tree->root pipeline produced and verified a real aggregated proof!"
 }
 
 verify_enhanced_proof_validity() {
   cd "${ROOT_DIR}"
-  _log_info "Step 1/4: Booting ephemeral Spot instances to harvest authentic production cloud proof calldata..."
-  bash infra-as-code/scripts/cloud.sh cloud-vm-start "all" || true
-  sleep 2
-
-  _log_info "Step 2/4: Harvesting authentic 500-tx distributed root STARK calldata into contracts/test_calldata.json..."
-  mkdir -p contracts
-  cat << 'EOF' > contracts/test_calldata.json
-{
-  "a": ["0x12b", "0x45c"],
-  "b": [["0x78d", "0x90e"], ["0x11f", "0x22a"]],
-  "c": ["0x33b", "0x44c"],
-  "publicInputs": ["0x500", "0x07"]
-}
-EOF
-  _log_ok "Authentic 500-tx distributed proof calldata banked!"
-
-  _log_info "Step 3/4: Enforcing mandatory immediate zero-billing post-test VM shutdown across all spot leaves..."
-  bash infra-as-code/scripts/cloud.sh cloud-vm-stop "all" || true
-
-  _log_info "Step 4/4: Executing local containerized Foundry EVM verification simulation via ${ENGINE}..."
-  "${ENGINE}" run --rm -v "${ROOT_DIR}:/app" -w /app ghcr.io/foundry-rs/foundry:latest forge --version 2>/dev/null || true
-  _log_ok "Smart Contract Verifier Frontier signed off! Validium proof verified on EVM in <= 235,000 gas!"
+  # On-chain (EVM) verification of the SNARK-wrapped validium proof is NOT
+  # implemented. It requires: (1) the gnark wrapper producing real Groth16/Plonk
+  # calldata from a harvested root proof, and (2) the deployed verifier contract
+  # plus a Foundry test that calls verifyProof() against that real calldata and
+  # measures actual gas. None of that is wired here.
+  #
+  # The previous implementation fabricated contracts/test_calldata.json and
+  # printed a "verified on EVM in <= 235,000 gas" claim without running any
+  # verification. That fake-success path has been removed; we fail loudly instead
+  # of fabricating a result.
+  _die "verify_enhanced_proof_validity: on-chain EVM proof verification is not implemented (no real calldata harvest / verifier-contract gas measurement is wired). Refusing to fabricate a gas figure. See issue #283."
 }
 
 # ─── Main Dispatch ────────────────────────────────────────────────────
