@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast lint-reports
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -26,13 +26,13 @@ cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults 
 cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment (accepts ENGINE=gke/mig ARCH=c4a/c3d/t2d BLOCKS=2 CHUNK=1)
 	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster --engine=$(ENGINE) --arch=$(ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK)
 
-test-t2d-hypothesis: ## Execute 4-pod concurrent multi-block AB race comparing AMD Milan Tau t2d vs ARM Axion c4a
+test-t2d-hypothesis: ## (DISABLED #282) t2d vs c4a AB race - fails loudly; use cloud-run-distributed-cluster for a real run
 	@bash infra-as-code/scripts/cloud.sh cloud-test-t2d-hypothesis
 
-test-gke-tax: ## Execute 2-block distributed proving benchmark on GKE Autopilot validating zero eBPF overlay tax
+test-gke-tax: ## (DISABLED #282) GKE overlay-tax benchmark - fails loudly; use cloud-run-distributed-cluster for a real run
 	@bash infra-as-code/scripts/cloud.sh cloud-test-gke-performance-tax
 
-test-capstone: ## Execute sequential 4-release benchmark trial at JOB=10 on c4a-64 spot instances
+test-capstone: ## (DISABLED #282) six-release capstone matrix - fails loudly; use cloud-run-distributed-cluster for a real run
 	@bash infra-as-code/scripts/cloud.sh cloud-test-capstone-matrix
 
 verify-enhanced-proof-validity: ## Verify authentic production cloud STARK proof calldata against EVM via containerized podman Foundry runner
@@ -75,3 +75,6 @@ local-build-and-run: ## Build and run local ZKP benchmark binary (bench/Makefile
 
 test-distributed-fast: ## Execute 2-minute scaled developer distributed proving simulation (C=4 chunks over local Pub/Sub)
 	@bash infra-as-code/scripts/container.sh test-distributed-fast
+
+lint-reports: ## Anti-fabrication guard: fail if fabricated benchmark metrics reappear in scripts or reports (#282)
+	@bash infra-as-code/scripts/check_no_fabricated_reports.sh
