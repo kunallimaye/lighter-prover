@@ -96,6 +96,8 @@ def main():
       continue
     parts = p.split("/")
     if len(parts) >= 7 and parts[3] == "benchmark-reports":
+      if not parts[5].startswith("v0.0") and not parts[5].startswith("radix"):
+        continue
       bench_id = parts[4]
       code_rel = parts[5]
       mtype = parts[6]
