@@ -94,7 +94,7 @@ steps:
         fi
         if [ -f "reports/job_1/bench_summary.json" ] && [ -n "${_TF_STATE_BUCKET}" ]; then
           TS=$(date +%Y%m%d-%H%M%S)
-          DEST="benchmark-reports/${_BENCHMARK_ID}/gke-${_ARCH}/blocks-${_BLOCK_CONCURRENCY}/gke-pod-1/$${TS}"
+          DEST="benchmark-reports/${_BENCHMARK_ID}/${_TAG}/gke-${_ARCH}/blocks-${_BLOCK_CONCURRENCY}/gke-pod-1/$${TS}"
           echo "[INFO] Uploading GKE telemetry reports to gs://${_TF_STATE_BUCKET}/$${DEST}/..."
           gsutil -m cp -r reports/* "gs://${_TF_STATE_BUCKET}/$${DEST}/"
         fi
