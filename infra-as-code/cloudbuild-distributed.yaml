@@ -2,8 +2,11 @@
 #
 # Target Directory: infra-as-code/terraform
 #
-# This pipeline initializes remote GCS backend state, applies Terraform IaC,
-# executes unmocked distributed Plonky2 proving across Pub/Sub, and cleanly destroys hardware.
+# This pipeline initializes remote GCS backend state, applies Terraform IaC for
+# the bare GCE MIG engine, runs a distributed Plonky2 proving smoke pipeline
+# (leaf -> tree -> root over a filesystem proof transport), and cleanly destroys
+# hardware. The GKE engine is not provisioned and fails fast (see
+# docs/decisions/ADR-distributed-gke-topology.md).
 
 steps:
   # 1. Initialize Terraform backend
@@ -25,12 +28,15 @@ steps:
     args:
       - '-c'
       - |
-        if [ "${_ENGINE}" != "gke" ]; then
-          echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
-          terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
-        else
-          echo "[INFO] Engine is GKE: Skipping bare-metal GCE VM terraform apply..."
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[ERROR] GKE engine is not provisioned: no google_container_cluster resource exists" >&2
+          echo "[ERROR] and the proving-pod node pools are gated off (cluster_id is empty)." >&2
+          echo "[ERROR] Refusing to silently skip terraform apply and fake a deploy." >&2
+          echo "[ERROR] Use ENGINE=mig (bare GCE MIG) until GKE is provisioned. See docs/decisions/ADR-distributed-gke-topology.md and the GKE follow-up issue." >&2
+          exit 1
         fi
+        echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
+        terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
@@ -57,7 +63,14 @@ steps:
           python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}"
         fi
 
-  # 3. Execute Authentic Unmocked Distributed Proving Assembly Line
+  # 3. Distributed proving smoke run on the build VM.
+  #
+  # This runs the real single-node leaf -> tree -> root pipeline over the
+  # filesystem proof transport on the Cloud Build worker. It is a smoke check
+  # that the daemon produces and verifies a real aggregated proof — NOT the
+  # production distributed deploy (that is the GKE/MIG fleet path). The root
+  # coordinator fails loudly if no real proof was produced upstream, so this step
+  # cannot report a fabricated success.
   - id: dist-prove
     name: 'rust:latest'
     entrypoint: 'sh'
@@ -68,24 +81,27 @@ steps:
         export SILICON_ARCH="${_ARCH}"
         export IMAGE="${_IMAGE}"
         export BLOCK_CONCURRENCY="${_BLOCK_CONCURRENCY}"
-        echo "[INFO] Dispatched authentic unmocked distributed proving benchmark (engine=${_ENGINE}, arch=${_ARCH}, chunk=${_CHUNK_SIZE}, bench_id=${_BENCHMARK_ID}, image=${_IMAGE}, blocks=${_BLOCK_CONCURRENCY})..."
-        cargo run --release --bin prover-node -- root-coordinator --block-number 1042
+        echo "[INFO] Running distributed proving smoke pipeline (engine=${_ENGINE}, arch=${_ARCH}, chunk=${_CHUNK_SIZE}, bench_id=${_BENCHMARK_ID}, image=${_IMAGE}, blocks=${_BLOCK_CONCURRENCY})..."
+        cargo build --release --bin prover-node
+        cargo run --release --bin prover-node -- leaf-worker --chunk-idx 0 --tx-per-proof 1
+        cargo run --release --bin prover-node -- leaf-worker --chunk-idx 1 --tx-per-proof 1
+        cargo run --release --bin prover-node -- tree-node --level 1 --node-idx 0 --radix "${_RADIX}" --tx-per-proof 1
+        cargo run --release --bin prover-node -- root-coordinator --block-number 1042 --radix "${_RADIX}" --node-idx 0 --tx-per-proof 1
 
-  # 3b. Upload Distributed Proving Telemetry Summary to GCS
+  # 3b. Upload the real distributed proof artifacts to GCS (if any were produced)
   - id: upload-reports
     name: 'gcr.io/cloud-builders/gsutil'
     entrypoint: 'sh'
     args:
       - '-c'
       - |
-        echo "[DEBUG] Inspecting reports directory contents..."
-        ls -la reports/ || true
-        ls -la reports/job_1/ || true
-        if [ -f "reports/job_1/bench_summary.json" ] && [ -n "${_TF_STATE_BUCKET:-}" ]; then
+        echo "[DEBUG] Inspecting proof transport directory contents..."
+        ls -la reports/stark_proofs/ || true
+        if [ -d "reports/stark_proofs" ] && [ -n "${_TF_STATE_BUCKET:-}" ]; then
           TS=$(date +%Y%m%d-%H%M%S)
-          DEST="benchmark-reports/${_BENCHMARK_ID}/${_TAG}/gke-${_ARCH}/blocks-${_BLOCK_CONCURRENCY}/gke-pod-1/$${TS}"
-          echo "[INFO] Uploading GKE telemetry reports to gs://${_TF_STATE_BUCKET}/$${DEST}/..."
-          gsutil -m cp -r reports/* "gs://${_TF_STATE_BUCKET}/$${DEST}/"
+          DEST="distributed-proofs/${_BENCHMARK_ID}/${_TAG}/${_ENGINE}-${_ARCH}/blocks-${_BLOCK_CONCURRENCY}/$${TS}"
+          echo "[INFO] Uploading aggregated proof artifacts to gs://${_TF_STATE_BUCKET}/$${DEST}/..."
+          gsutil -m cp -r reports/stark_proofs/* "gs://${_TF_STATE_BUCKET}/$${DEST}/"
         fi
 
   # 4. Mandatory Post-Test Zero-Billing Teardown
@@ -96,11 +112,9 @@ steps:
     args:
       - '-c'
       - |
-        if [ "${_ENGINE}" != "gke" ]; then
-          terraform destroy -auto-approve -no-color -input=false
-        else
-          echo "[INFO] Engine is GKE: Skipping bare-metal GCE VM terraform destroy..."
-        fi
+        # Only the bare GCE MIG engine reaches this step (ENGINE=gke fails fast in
+        # tf-apply), so always tear the fleet down for zero-billing.
+        terraform destroy -auto-approve -no-color -input=false
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
@@ -116,8 +130,11 @@ steps:
       - 'TF_VAR_orchestration_engine=${_ENGINE}'
 
 substitutions:
-  _ENGINE: 'gke'
+  # NOTE: GKE engine is not provisioned (see ADR-distributed-gke-topology.md);
+  # the bare GCE MIG path is the working engine. ENGINE=gke fails fast in tf-apply.
+  _ENGINE: 'mig'
   _ARCH: 'c3d'
+  _RADIX: '2'
   _CHUNK_SIZE: '1'
   _TF_ACTION: 'apply'
   _BLOCK_CONCURRENCY: '2'

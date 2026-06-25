@@ -2,12 +2,19 @@
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Modular Proving Pod Instantiation
-# Universally orchestrates physical compute capacity across GKE node pools or bare MIGs.
+# Orchestrates physical compute capacity for the bare GCE MIG engine.
+#
+# NOTE: The GKE engine is NOT provisioned. No `google_container_cluster` resource
+# exists in this configuration, so `cluster_id` cannot be bound to a real cluster
+# and the GKE node pools in the module remain gated off (count = 0). The GKE
+# engine path is intentionally disabled until a cluster resource is added; the
+# distributed Cloud Build pipeline fails fast on ENGINE=gke rather than faking a
+# deploy. See docs/decisions/ADR-distributed-gke-topology.md and issue #283.
 
 module "proving_pod_fleet" {
   source               = "./modules/proving_pod_node_pool"
   orchestration_engine = var.orchestration_engine
-  cluster_id           = "" # Bound dynamically when GKE cluster resource is instantiated
+  cluster_id           = "" # GKE not provisioned; node pools stay gated off (see ADR).
   region               = var.runtime_region != "" ? var.runtime_region : var.region
   zone                 = "${var.runtime_region != "" ? var.runtime_region : var.region}-a"
   service_account      = var.runtime_sa_email != "" ? var.runtime_sa_email : var.builder_sa_email

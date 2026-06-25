@@ -16,8 +16,10 @@ COPY bench/Cargo.toml bench/Cargo.toml
 COPY circuit/ circuit/
 COPY bench/ bench/
 
-# Compile benchmark STARK proving entrypoint
-RUN cargo build --release --bin bench
+# Compile benchmark STARK proving entrypoint and the distributed prover daemon.
+# The K8s proving pods (infra-as-code/kubernetes/prover_pod_unit.yaml) invoke the
+# `prover-node` binary, so it must be present in the image.
+RUN cargo build --release --bin bench --bin prover-node
 
 # ─── Stage 2: Minimal High-Throughput Compute Runtime ────────────────
 FROM debian:bookworm-slim AS runtime
@@ -29,8 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /data
 
-# Copy compiled bench harness and default test fixture
+# Copy compiled bench harness, distributed prover daemon and default test fixture
 COPY --from=builder /app/target/release/bench /usr/local/bin/bench
+COPY --from=builder /app/target/release/prover-node /usr/local/bin/prover-node
 COPY bench/bench_test.json /data/bench_test.json
 
 ENV RUST_LOG=info
