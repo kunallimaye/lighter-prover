@@ -32,15 +32,6 @@ def fetch_summary(gcs_uri):
         wall = txs / tps
     if wall == 0.0:
       raise ValueError("Computed wall time is 0.0")
-    import re
-    ts_m = re.findall(r"\d{8}-\d{6}", gcs_uri)
-    ts_str = ts_m[-1] if ts_m else ""
-    code_rel = d.get("code_release", d.get("version", ""))
-    if not code_rel or code_rel == "v0.0.1":
-      if ts_str >= "20260624-200035":
-        code_rel = "v0.0.2"
-      else:
-        code_rel = "v0.0.1"
     conc = 0
     for part in gcs_uri.split("/"):
       if part.startswith("job_") and part[4:].isdigit():
@@ -51,7 +42,7 @@ def fetch_summary(gcs_uri):
       conc = 1
     if conc <= 0 or conc > 10:
       raise ValueError(f"Invalid concurrency count: {conc}")
-    return gcs_uri, round(wall, 8), code_rel, conc
+    return gcs_uri, round(wall, 8), "", conc
   except Exception as e:
     print(f"[ERROR] Corrupted or missing telemetry artifact {gcs_uri}: {e}", file=sys.stderr)
     return gcs_uri, None, None, None
@@ -104,10 +95,11 @@ def main():
     if p not in cache:
       continue
     parts = p.split("/")
-    if len(parts) >= 6:
-      bench_id = parts[4] if parts[3] == "benchmark-reports" else parts[3]
-      mtype = parts[5] if parts[3] == "benchmark-reports" else parts[4]
-      wall, code_rel, _ = cache[p]
+    if len(parts) >= 7 and parts[3] == "benchmark-reports":
+      bench_id = parts[4]
+      code_rel = parts[5]
+      mtype = parts[6]
+      wall, _, _ = cache[p]
       ts_m = re.findall(r"\d{8}-\d{6}", p)
       ts = ts_m[-1] if ts_m else "default_ts"
       key = (bench_id, code_rel, mtype, ts)
