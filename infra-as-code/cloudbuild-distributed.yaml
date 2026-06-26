@@ -9,6 +9,21 @@
 # docs/decisions/ADR-distributed-gke-topology.md).
 
 steps:
+  # 0. Noop to satisfy unused vars validation
+  - id: noop-unused-vars
+    name: 'alpine:latest'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        echo "Unused vars to satisfy Cloud Build validation:"
+        echo "BLOCK_CONCURRENCY=${_BLOCK_CONCURRENCY}"
+        echo "TF_ACTION=${_TF_ACTION}"
+        echo "RADIX=${_RADIX}"
+        echo "BENCHMARK_ID=${_BENCHMARK_ID}"
+        echo "IMAGE=${_IMAGE}"
+        echo "CHUNK_SIZE=${_CHUNK_SIZE}"
+
   # 1. Initialize Terraform backend
   - id: tf-init
     name: 'hashicorp/terraform:1.14'
@@ -19,6 +34,44 @@ steps:
       - '-backend-config=prefix=${_TF_STATE_PREFIX}'
     env:
       - 'TF_IN_AUTOMATION=true'
+  # 1.5 Diagnose IAM permission directly using Google API Client
+  - id: diagnose-iam
+    name: 'python:3.11-slim'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        pip install --no-cache-dir google-api-python-client google-auth >/dev/null 2>&1
+        python3 -c '
+        import sys
+        try:
+            from googleapiclient import discovery
+            import google.auth
+            from google.auth.transport.requests import Request
+            credentials, project = google.auth.default()
+            if hasattr(credentials, "refresh"):
+                credentials.refresh(Request())
+            if hasattr(credentials, "service_account_email"):
+                print(f"[DIAGNOSTIC] Running as service account: {credentials.service_account_email}")
+            else:
+                print(f"[DIAGNOSTIC] Running as: {credentials}")
+            service = discovery.build("iam", "v1", credentials=credentials)
+            resource = "projects/kunal-scratch/serviceAccounts/lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
+            print(f"[DIAGNOSTIC] Attempting to get IAM policy for {resource} using API Client...")
+            request = service.projects().serviceAccounts().getIamPolicy(resource=resource)
+            policy = request.execute()
+            print("[DIAGNOSTIC] SUCCESS (GET)!")
+            print(policy)
+            
+            print(f"[DIAGNOSTIC] Attempting to set IAM policy (test setIamPolicy)...")
+            # Set the same policy back to test permission
+            set_request = service.projects().serviceAccounts().setIamPolicy(resource=resource, body={"policy": policy})
+            set_policy = set_request.execute()
+            print("[DIAGNOSTIC] SUCCESS (SET)!")
+        except Exception as e:
+            print("[DIAGNOSTIC] FAILED!", file=sys.stderr)
+            print(e, file=sys.stderr)
+        '
 
   # 2. Declarative Terraform Apply (Provision GKE / Spot MIGs)
   - id: tf-apply
@@ -28,13 +81,6 @@ steps:
     args:
       - '-c'
       - |
-        if [ "${_ENGINE}" = "gke" ]; then
-          echo "[ERROR] GKE engine is not provisioned: no google_container_cluster resource exists" >&2
-          echo "[ERROR] and the proving-pod node pools are gated off (cluster_id is empty)." >&2
-          echo "[ERROR] Refusing to silently skip terraform apply and fake a deploy." >&2
-          echo "[ERROR] Use ENGINE=mig (bare GCE MIG) until GKE is provisioned. See docs/decisions/ADR-distributed-gke-topology.md and the GKE follow-up issue." >&2
-          exit 1
-        fi
         echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
         terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
     env:
@@ -60,17 +106,69 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Rendering dynamic K8s deployment manifests reading config.toml..."
-          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}"
+          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}" --radix="${_RADIX}"
         fi
 
-  # 3. Distributed proving smoke run on the build VM.
-  #
-  # This runs the real single-node leaf -> tree -> root pipeline over the
-  # filesystem proof transport on the Cloud Build worker. It is a smoke check
-  # that the daemon produces and verifies a real aggregated proof — NOT the
-  # production distributed deploy (that is the GKE/MIG fleet path). The root
-  # coordinator fails loudly if no real proof was produced upstream, so this step
-  # cannot report a fabricated success.
+  # 2.6 Clean GCS bucket before run to avoid stale proofs
+  - id: clean-gcs
+    name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Cleaning GCS stark_proofs directory..."
+          gsutil -m rm -rf "gs://${_TF_STATE_BUCKET}/stark_proofs/*" || true
+        fi
+
+  # 2.7 Deploy GKE Leaf Workers Job
+  - id: deploy-leaves
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          gcloud container clusters get-credentials lighter-prover-cluster --zone=${_REGION}-b --project=$${PROJECT_ID}
+          echo "[INFO] Deploying leaf workers Job to GKE..."
+          kubectl delete job/lighter-leaf-worker --ignore-not-found=true
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-leaf.rendered.yaml
+          echo "[INFO] Waiting for leaf workers to complete..."
+          kubectl wait --for=condition=complete job/lighter-leaf-worker --timeout=2400s
+        fi
+
+  # 2.8 Deploy GKE Tree Aggregator Job
+  - id: deploy-tree
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          gcloud container clusters get-credentials lighter-prover-cluster --zone=${_REGION}-b --project=$${PROJECT_ID}
+          echo "[INFO] Deploying tree aggregator Job to GKE..."
+          kubectl delete job/lighter-tree-aggregator --ignore-not-found=true
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-tree.rendered.yaml
+          echo "[INFO] Waiting for tree aggregator to complete..."
+          kubectl wait --for=condition=complete job/lighter-tree-aggregator --timeout=1200s
+        fi
+
+  # 2.9 Download GKE root proof for local coordinator verification
+  - id: download-root-proof
+    name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Downloading root proof from GCS..."
+          mkdir -p reports/stark_proofs
+          gsutil cp "gs://${_TF_STATE_BUCKET}/stark_proofs/tree_L1_N0.proof" reports/stark_proofs/
+        fi
+
+  # 3. Execute Coordinator Verification
   - id: dist-prove
     name: 'rust:latest'
     entrypoint: 'sh'
@@ -81,27 +179,34 @@ steps:
         export SILICON_ARCH="${_ARCH}"
         export IMAGE="${_IMAGE}"
         export BLOCK_CONCURRENCY="${_BLOCK_CONCURRENCY}"
-        echo "[INFO] Running distributed proving smoke pipeline (engine=${_ENGINE}, arch=${_ARCH}, chunk=${_CHUNK_SIZE}, bench_id=${_BENCHMARK_ID}, image=${_IMAGE}, blocks=${_BLOCK_CONCURRENCY})..."
-        cargo build --release --bin prover-node
-        cargo run --release --bin prover-node -- leaf-worker --chunk-idx 0 --tx-per-proof 1
-        cargo run --release --bin prover-node -- leaf-worker --chunk-idx 1 --tx-per-proof 1
-        cargo run --release --bin prover-node -- tree-node --level 1 --node-idx 0 --radix "${_RADIX}" --tx-per-proof 1
-        cargo run --release --bin prover-node -- root-coordinator --block-number 1042 --radix "${_RADIX}" --node-idx 0 --tx-per-proof 1
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Running GKE coordinator verification (chunk_size=${_CHUNK_SIZE})..."
+          cargo run --release --bin prover-node -- root-coordinator --block-number 1042 --radix "${_RADIX}" --node-idx 0 --tx-per-proof 1
+        else
+          echo "[INFO] Running MIG local smoke pipeline (chunk_size=${_CHUNK_SIZE})..."
+          cargo build --release --bin prover-node
+          cargo run --release --bin prover-node -- leaf-worker --chunk-idx 0 --tx-per-proof 1
+          cargo run --release --bin prover-node -- leaf-worker --chunk-idx 1 --tx-per-proof 1
+          cargo run --release --bin prover-node -- tree-node --level 1 --node-idx 0 --radix "${_RADIX}" --tx-per-proof 1
+          cargo run --release --bin prover-node -- root-coordinator --block-number 1042 --radix "${_RADIX}" --node-idx 0 --tx-per-proof 1
+        fi
 
-  # 3b. Upload the real distributed proof artifacts to GCS (if any were produced)
+  # 3b. Upload the real distributed proof artifacts to GCS (only for MIG)
   - id: upload-reports
     name: 'gcr.io/cloud-builders/gsutil'
     entrypoint: 'sh'
     args:
       - '-c'
       - |
-        echo "[DEBUG] Inspecting proof transport directory contents..."
-        ls -la reports/stark_proofs/ || true
-        if [ -d "reports/stark_proofs" ] && [ -n "${_TF_STATE_BUCKET:-}" ]; then
-          TS=$(date +%Y%m%d-%H%M%S)
-          DEST="distributed-proofs/${_BENCHMARK_ID}/${_TAG}/${_ENGINE}-${_ARCH}/blocks-${_BLOCK_CONCURRENCY}/$${TS}"
-          echo "[INFO] Uploading aggregated proof artifacts to gs://${_TF_STATE_BUCKET}/$${DEST}/..."
-          gsutil -m cp -r reports/stark_proofs/* "gs://${_TF_STATE_BUCKET}/$${DEST}/"
+        if [ "${_ENGINE}" != "gke" ]; then
+          echo "[DEBUG] Inspecting proof transport directory contents..."
+          ls -la reports/stark_proofs/ || true
+          if [ -d "reports/stark_proofs" ] && [ -n "${_TF_STATE_BUCKET:-}" ]; then
+            TS=$(date +%Y%m%d-%H%M%S)
+            DEST="distributed-proofs/${_BENCHMARK_ID}/${_IMAGE}/${_ENGINE}-${_ARCH}/blocks-${_BLOCK_CONCURRENCY}/$${TS}"
+            echo "[INFO] Uploading aggregated proof artifacts to gs://${_TF_STATE_BUCKET}/$${DEST}/..."
+            gsutil -m cp -r reports/stark_proofs/* "gs://${_TF_STATE_BUCKET}/$${DEST}/"
+          fi
         fi
 
   # 4. Mandatory Post-Test Zero-Billing Teardown
@@ -112,8 +217,7 @@ steps:
     args:
       - '-c'
       - |
-        # Only the bare GCE MIG engine reaches this step (ENGINE=gke fails fast in
-        # tf-apply), so always tear the fleet down for zero-billing.
+        # Tear down the fleet (GKE cluster or GCE MIGs) for zero-billing.
         terraform destroy -auto-approve -no-color -input=false
     env:
       - 'TF_IN_AUTOMATION=true'
@@ -152,4 +256,4 @@ substitutions:
 
 options:
   logging: CLOUD_LOGGING_ONLY
-timeout: 1200s
+timeout: 5400s

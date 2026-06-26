@@ -22,6 +22,7 @@ def main():
   parser.add_argument("--input", default="infra-as-code/kubernetes/prover_pod_unit.yaml", help="Input YAML")
   parser.add_argument("--output", default="infra-as-code/kubernetes/prover_pod_unit.rendered.yaml", help="Output YAML")
   parser.add_argument("--image", required=True, help="Container release tag or 'default'")
+  parser.add_argument("--radix", type=int, default=2, help="Reduction tree radix")
   args = parser.parse_args()
 
   if not args.image or args.image.strip() == "":
@@ -42,6 +43,11 @@ def main():
     with open(args.config, "r", encoding="utf-8") as f:
       data = tomllib.load(f)
 
+  gcs_bucket = data.get("gcp", {}).get("bench", {}).get("bucket", "kunal-scratch-tfstate")
+  gsa_email = data.get("gcp", {}).get("target", {}).get("runtime_sa", {}).get("email", "")
+  if not gsa_email:
+    gsa_email = data.get("gcp", {}).get("target", {}).get("build_sa", {}).get("email", "")
+
   pod_cfg = data.get("proving_pod", {})
   defaults = pod_cfg.get("defaults", {})
   
@@ -59,7 +65,11 @@ def main():
   leaf_cpu = str(leaf_cfg.get("cpu_requests", "30" if arch in ("c3d", "t2d", "c4d") else "64"))
   leaf_mem = str(leaf_cfg.get("memory_requests", "60Gi" if arch in ("c3d", "c4d") else "128Gi"))
   leaf_chunk = int(leaf_cfg.get("chunk_size", 1 if arch in ("c3d", "c4d") else 4))
-  leaf_replicas = 3 * args.blocks
+  
+  # For Indexed Job, completions is the total number of chunks we need to prove (radix).
+  # Parallelism is controlled by the blocks parameter (BLOCKS), capped at completions.
+  completions = args.radix
+  parallelism = min(args.blocks, completions)
 
   agg_cpu = str(agg_cfg.get("cpu_requests", "30" if arch in ("c3d", "c4d") else "16"))
   agg_mem = str(agg_cfg.get("memory_requests", "60Gi" if arch in ("c3d", "c4d") else "32Gi"))
@@ -69,12 +79,17 @@ def main():
     print(f"Error: Input YAML {args.input} not found.", file=sys.stderr)
     sys.exit(1)
 
-  with open(args.input, "r", encoding="utf-8") as f:
-    yaml_content = f.read()
-
-  # Render Leaf Worker Deployment
-  rendered = f"""apiVersion: apps/v1
-kind: Deployment
+  # Split rendering into Leaf and Tree Jobs
+  leaf_rendered = f"""apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prover-sa
+  namespace: default
+  annotations:
+    iam.gke.io/gcp-service-account: {gsa_email}
+---
+apiVersion: batch/v1
+kind: Job
 metadata:
   name: lighter-leaf-worker
   labels:
@@ -82,24 +97,31 @@ metadata:
     role: leaf-worker
     silicon-arch: {arch}
 spec:
-  replicas: {leaf_replicas}
-  selector:
-    matchLabels:
-      role: leaf-worker
+  parallelism: {parallelism}
+  completions: {completions}
+  completionMode: Indexed
   template:
     metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
       labels:
         role: leaf-worker
         silicon-arch: {arch}
     spec:
+      serviceAccountName: prover-sa
       nodeSelector:
-        cloud.google.com/gke-spot: "true"
-        cloud.google.com/compute-class: "{arch}"
-        kubernetes.io/arch: {kube_arch}
+        role: leaf-worker
+        silicon-arch: {arch}
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "zkp-prover"
+        effect: "NoSchedule"
+      restartPolicy: OnFailure
       containers:
       - name: prover
         image: {image_uri}
-        command: ["prover-node", "leaf-worker", "--tx-per-proof", "{leaf_chunk}"]
+        command: ["sh", "-c", "prover-node leaf-worker --chunk-idx $JOB_COMPLETION_INDEX --tx-per-proof {leaf_chunk}"]
         resources:
           limits:
             cpu: "{leaf_cpu}"
@@ -107,9 +129,20 @@ spec:
           requests:
             cpu: "{leaf_cpu}"
             memory: "{leaf_mem}"
----
-apiVersion: apps/v1
-kind: Deployment
+        volumeMounts:
+        - name: gcs-volume
+          mountPath: /data/reports
+      volumes:
+      - name: gcs-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: "{gcs_bucket}"
+            mountOptions: "implicit-dirs"
+"""
+
+  tree_rendered = f"""apiVersion: batch/v1
+kind: Job
 metadata:
   name: lighter-tree-aggregator
   labels:
@@ -117,24 +150,28 @@ metadata:
     role: tree-node
     silicon-arch: {arch}
 spec:
-  replicas: {agg_replicas}
-  selector:
-    matchLabels:
-      role: tree-node
   template:
     metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
       labels:
         role: tree-node
         silicon-arch: {arch}
     spec:
+      serviceAccountName: prover-sa
       nodeSelector:
-        cloud.google.com/gke-spot: "true"
-        cloud.google.com/compute-class: "{arch}"
-        kubernetes.io/arch: {kube_arch}
+        role: tree-node
+        silicon-arch: {arch}
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "zkp-prover"
+        effect: "NoSchedule"
+      restartPolicy: OnFailure
       containers:
       - name: aggregator
         image: {image_uri}
-        command: ["prover-node", "tree-node"]
+        command: ["prover-node", "tree-node", "--level", "1", "--node-idx", "0", "--radix", "{args.radix}", "--tx-per-proof", "{leaf_chunk}"]
         resources:
           limits:
             cpu: "{agg_cpu}"
@@ -142,12 +179,27 @@ spec:
           requests:
             cpu: "{agg_cpu}"
             memory: "{agg_mem}"
+        volumeMounts:
+        - name: gcs-volume
+          mountPath: /data/reports
+      volumes:
+      - name: gcs-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: "{gcs_bucket}"
+            mountOptions: "implicit-dirs"
 """
 
-  with open(args.output, "w", encoding="utf-8") as f:
-    f.write(rendered)
+  leaf_output = args.output.replace(".rendered.yaml", "-leaf.rendered.yaml")
+  tree_output = args.output.replace(".rendered.yaml", "-tree.rendered.yaml")
 
-  print(f"[OK] Dynamically rendered K8s Proving Pod manifest to {args.output} (arch={arch}, blocks={args.blocks}, leaf_chunk={leaf_chunk})")
+  with open(leaf_output, "w", encoding="utf-8") as f:
+    f.write(leaf_rendered)
+  with open(tree_output, "w", encoding="utf-8") as f:
+    f.write(tree_rendered)
+
+  print(f"[OK] Dynamically rendered K8s Proving Pod Jobs to {leaf_output} and {tree_output} (arch={arch}, blocks={args.blocks}, radix={args.radix}, leaf_chunk={leaf_chunk})")
 
 
 if __name__ == "__main__":

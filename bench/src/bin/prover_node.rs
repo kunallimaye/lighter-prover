@@ -45,7 +45,7 @@ use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
 use circuit::hexadecimal_tree_chain_constraints::HexadecimalTreeChainCircuit;
 use circuit::recursion::batch::{Batch, BatchTarget, BatchTargetWitness};
 use circuit::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
-use plonky2::iop::witness::PartialWitness;
+use plonky2::iop::witness::{PartialWitness, Witness};
 use plonky2::plonk::circuit_data::CircuitData;
 use plonky2::plonk::proof::ProofWithPublicInputs;
 use plonky2::plonk::prover::prove;
@@ -210,8 +210,10 @@ fn prove_leaf_batch(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTr
     let pbt = pre_exec_circuit.target;
     let pre_exec_data = pre_exec_circuit.builder.build::<C>();
     let block_pre_exec = BlockPreExec::from_block(&block);
+    timing.push("pre_execution_proving", Level::Info);
     let pre_proof = BlockPreExecutionCircuit::prove(&pre_exec_data, &block_pre_exec, &pbt)
         .expect("Block pre-execution failed to prove");
+    timing.pop();
     let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
 
     // ── Real BlockTxCircuit leaf prove ──
@@ -238,58 +240,82 @@ fn prove_leaf_batch(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTr
     let mut market_tree_root = block.old_market_tree_root;
     let mut account_delta_tree_root = block.old_account_delta_tree_root;
 
-    // State root surrogate for the Batch continuity chain: the account tree root
-    // is the value that genuinely transitions chunk-to-chunk and is exposed by
-    // the leaf proof's public inputs, so adjacent leaf Batches chain on it.
-    // Captured at the START of the target chunk's iteration (= prior chunk's
-    // post-root), so chunk i's `old_state_root` == chunk i-1's `new_state_root`.
-    let mut old_state_root = account_tree_root;
-    let mut delta_root_before = account_delta_tree_root;
-    let mut tx_witness: Option<BlockTxWitness<F>> = None;
+    // Phase 1: Fast Pre-Execution (Witness Generation Only) for prefix chunks 0..chunk_idx
+    if chunk_idx > 0 {
+        timing.push("prefix_pre_execution", Level::Info);
+        for index in 0..chunk_idx {
+            let chunk_span = format!("chunk_{index}_witness_gen");
+            timing.push(&chunk_span, Level::Debug);
 
-    for index in 0..=chunk_idx {
-        if index == chunk_idx {
-            old_state_root = account_tree_root;
-            delta_root_before = account_delta_tree_root;
+            let block_tx = BlockTx {
+                created_at: block.created_at,
+                old_system_config: system_config,
+                register_stack_before: register_stack,
+                all_assets_before: all_assets.clone(),
+                all_market_details_before: all_market_details.clone(),
+                old_account_tree_root: account_tree_root,
+                old_account_pub_data_tree_root: account_pub_data_tree_root,
+                old_account_delta_tree_root: account_delta_tree_root,
+                old_market_tree_root: market_tree_root,
+                txs: tx_chunks[index].to_vec(),
+            };
+
+            // Generate witness (runs generators to compute next state, but does NOT prove)
+            let pw = BlockTxCircuit::generate_witness(&block_tx, &bt).expect("Failed to generate witness");
+            let witness = plonky2::iop::generator::generate_partial_witness(pw, &data.prover_only, &data.common)
+                .expect("Failed to execute circuit generators");
+
+            // Extract the entire next-state consistently via public inputs, with safety guards
+            let public_inputs: Vec<F> = data.prover_only.public_inputs
+                .iter()
+                .map(|&t| witness.try_get_target(t)
+                    .unwrap_or_else(|| panic!("PI target {t:?} unresolved after witness gen for chunk {index}")))
+                .collect();
+            let w = BlockTxWitness::from_public_inputs(&public_inputs);
+            
+            account_tree_root = w.new_account_tree_root;
+            account_pub_data_tree_root = w.new_account_pub_data_tree_root;
+            account_delta_tree_root = w.new_account_delta_tree_root;
+            market_tree_root = w.new_market_tree_root;
+            all_assets = w.all_assets_after.clone();
+            all_market_details = w.all_market_details_after.clone();
+            register_stack = w.register_stack_after;
+            system_config = w.new_system_config;
+
+            timing.pop(); // chunk_span
         }
-        let block_tx = BlockTx {
-            created_at: block.created_at,
-            old_system_config: system_config,
-            register_stack_before: register_stack,
-            all_assets_before: all_assets.clone(),
-            // Real pre-state market details (threaded), NOT `default()`.
-            all_market_details_before: all_market_details.clone(),
-            old_account_tree_root: account_tree_root,
-            old_account_pub_data_tree_root: account_pub_data_tree_root,
-            old_account_delta_tree_root: account_delta_tree_root,
-            old_market_tree_root: market_tree_root,
-            txs: tx_chunks[index].to_vec(),
-        };
-
-        let pw =
-            BlockTxCircuit::generate_witness(&block_tx, &bt).expect("Failed to generate witness");
-        timing.push("leaf_stark_generation", Level::Info);
-        let tx_proof = prove::<F, C, D>(&data.prover_only, &data.common, pw, timing)
-            .expect("Failed to prove leaf STARK");
-        timing.pop();
-
-        // Verify the leaf STARK before trusting its public inputs.
-        data.verify(tx_proof.clone())
-            .expect("Leaf BlockTxCircuit proof failed verification");
-
-        let w = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs);
-        all_assets = w.all_assets_after.clone();
-        all_market_details = w.all_market_details_after.clone();
-        register_stack = w.register_stack_after;
-        system_config = w.new_system_config;
-        account_tree_root = w.new_account_tree_root;
-        account_pub_data_tree_root = w.new_account_pub_data_tree_root;
-        account_delta_tree_root = w.new_account_delta_tree_root;
-        market_tree_root = w.new_market_tree_root;
-        tx_witness = Some(w);
+        timing.pop(); // prefix_pre_execution
     }
 
-    let tx_witness = tx_witness.expect("at least one chunk proved");
+    // Phase 2: Real Proving for the target chunk_idx
+    let old_state_root = account_tree_root;
+    let delta_root_before = account_delta_tree_root;
+
+    let block_tx = BlockTx {
+        created_at: block.created_at,
+        old_system_config: system_config,
+        register_stack_before: register_stack,
+        all_assets_before: all_assets.clone(),
+        all_market_details_before: all_market_details.clone(),
+        old_account_tree_root: account_tree_root,
+        old_account_pub_data_tree_root: account_pub_data_tree_root,
+        old_account_delta_tree_root: account_delta_tree_root,
+        old_market_tree_root: market_tree_root,
+        txs: tx_chunks[chunk_idx].to_vec(),
+    };
+
+    let pw = BlockTxCircuit::generate_witness(&block_tx, &bt).expect("Failed to generate witness");
+    
+    timing.push("target_chunk_proving", Level::Info);
+    let tx_proof = prove::<F, C, D>(&data.prover_only, &data.common, pw, timing)
+        .expect("Failed to prove leaf STARK");
+    timing.pop();
+
+    timing.push("target_chunk_verification", Level::Info);
+    data.verify(tx_proof.clone()).expect("Leaf BlockTxCircuit proof failed verification");
+    timing.pop();
+
+    let tx_witness = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs);
 
     // ── Real Batch aggregate from the proven (threaded) public inputs ──
     //
@@ -345,11 +371,21 @@ fn load_or_prove_leaf(
     let path = leaf_proof_path(chunk_idx);
     if path.exists() {
         info!("Loading existing leaf proof from transport: {}", path.display());
-        return read_proof(&path);
+        timing.push("gcs_proof_load", Level::Info);
+        let proof = read_proof(&path);
+        timing.pop();
+        return proof;
     }
     let batch = prove_leaf_batch(chunk_idx, tx_per_proof, timing);
+    
+    timing.push("batch_leaf_proving", Level::Info);
     let proof = prove_batch_leaf(&batch);
+    timing.pop();
+
+    timing.push("gcs_proof_write", Level::Info);
     write_proof(&path, &proof);
+    timing.pop();
+    
     proof
 }
 
@@ -576,5 +612,125 @@ fn main() {
             // harvest+verify performed in THIS run, not a fake end-to-end TPS.
             std::process::exit(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plonky2::util::timing::TimingTree;
+
+    // The original sequential implementation for reference
+    fn prove_leaf_batch_sequential(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTree) -> Batch<F> {
+        let block = load_test_block();
+        
+        let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+        let pbt = pre_exec_circuit.target;
+        let pre_exec_data = pre_exec_circuit.builder.build::<C>();
+        let block_pre_exec = BlockPreExec::from_block(&block);
+        
+        timing.push("pre_execution_proving", Level::Info);
+        let pre_proof = BlockPreExecutionCircuit::prove(&pre_exec_data, &block_pre_exec, &pbt)
+            .expect("Block pre-execution failed to prove");
+        timing.pop();
+        
+        let pre_exec_witness = BlockPreExecWitness::from_public_inputs(&pre_proof.public_inputs);
+
+        let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, tx_per_proof, CHAIN_ID);
+        let bt = circuit.target;
+        let data = circuit.builder.build::<C>();
+
+        let tx_chunks: Vec<&[circuit::tx::Tx<F>]> = block.txs.chunks(tx_per_proof).collect();
+
+        let mut all_assets = block.all_assets.clone();
+        let mut all_market_details = pre_exec_witness.new_market_details.clone();
+        let mut system_config = block.old_system_config;
+        let mut register_stack = block.register_stack_before;
+        let mut account_tree_root = block.old_account_tree_root;
+        let mut account_pub_data_tree_root = block.old_account_pub_data_tree_root;
+        let mut market_tree_root = block.old_market_tree_root;
+        let mut account_delta_tree_root = block.old_account_delta_tree_root;
+
+        let mut old_state_root = account_tree_root;
+        let mut delta_root_before = account_delta_tree_root;
+        let mut tx_witness: Option<BlockTxWitness<F>> = None;
+
+        for index in 0..=chunk_idx {
+            if index == chunk_idx {
+                old_state_root = account_tree_root;
+                delta_root_before = account_delta_tree_root;
+            }
+            let block_tx = BlockTx {
+                created_at: block.created_at,
+                old_system_config: system_config,
+                register_stack_before: register_stack,
+                all_assets_before: all_assets.clone(),
+                all_market_details_before: all_market_details.clone(),
+                old_account_tree_root: account_tree_root,
+                old_account_pub_data_tree_root: account_pub_data_tree_root,
+                old_account_delta_tree_root: account_delta_tree_root,
+                old_market_tree_root: market_tree_root,
+                txs: tx_chunks[index].to_vec(),
+            };
+
+            let pw = BlockTxCircuit::generate_witness(&block_tx, &bt).expect("Failed to generate witness");
+            let tx_proof = prove::<F, C, D>(&data.prover_only, &data.common, pw, timing)
+                .expect("Failed to prove leaf STARK");
+
+            data.verify(tx_proof.clone()).expect("Verification failed");
+
+            let w = BlockTxWitness::from_public_inputs(&tx_proof.public_inputs);
+            all_assets = w.all_assets_after.clone();
+            all_market_details = w.all_market_details_after.clone();
+            register_stack = w.register_stack_after;
+            system_config = w.new_system_config;
+            account_tree_root = w.new_account_tree_root;
+            account_pub_data_tree_root = w.new_account_pub_data_tree_root;
+            account_delta_tree_root = w.new_account_delta_tree_root;
+            market_tree_root = w.new_market_tree_root;
+            tx_witness = Some(w);
+        }
+
+        let tx_witness = tx_witness.unwrap();
+        let seq = chunk_idx as u64 + 1;
+        Batch::<F> {
+            end_block_number: seq,
+            batch_size: 1,
+            first_created_at: block.created_at + chunk_idx as i64,
+            last_created_at: block.created_at + chunk_idx as i64,
+            old_state_root,
+            new_state_root: tx_witness.new_account_tree_root,
+            new_validium_root: pre_exec_witness.new_validium_root,
+            old_account_delta_tree_root: delta_root_before,
+            new_account_delta_tree_root: tx_witness.new_account_delta_tree_root,
+            priority_operations_count: tx_witness.priority_operations_count,
+            ..Batch::<F>::default()
+        }
+    }
+
+    #[test]
+    fn test_equivalence_and_performance() {
+        let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Debug).try_init();
+        
+        let chunk_idx = 2; // Test with 3 chunks (0, 1, 2)
+        let tx_per_proof = 1;
+
+        let mut timing_seq = TimingTree::new("Sequential", Level::Info);
+        info!("Running sequential proving...");
+        let batch_seq = prove_leaf_batch_sequential(chunk_idx, tx_per_proof, &mut timing_seq);
+        timing_seq.print();
+
+        let mut timing_opt = TimingTree::new("Optimized (Option A)", Level::Info);
+        info!("Running optimized proving...");
+        let batch_opt = prove_leaf_batch(chunk_idx, tx_per_proof, &mut timing_opt);
+        timing_opt.print();
+
+        // Assert equivalence
+        assert_eq!(batch_seq.old_state_root, batch_opt.old_state_root, "old_state_root mismatch");
+        assert_eq!(batch_seq.new_state_root, batch_opt.new_state_root, "new_state_root mismatch");
+        assert_eq!(batch_seq.old_account_delta_tree_root, batch_opt.old_account_delta_tree_root, "old_account_delta_tree_root mismatch");
+        assert_eq!(batch_seq.new_account_delta_tree_root, batch_opt.new_account_delta_tree_root, "new_account_delta_tree_root mismatch");
+        
+        info!("Equivalence verified successfully!");
     }
 }

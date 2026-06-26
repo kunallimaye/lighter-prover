@@ -18,7 +18,7 @@ terraform {
 # ═══════════════════════════════════════════════════════════════════════════
 
 resource "google_container_node_pool" "leaf_worker_pool" {
-  count    = var.orchestration_engine == "gke" && var.cluster_id != "" ? 1 : 0
+  count    = var.orchestration_engine == "gke" ? 1 : 0
   name     = "lighter-leaf-${var.silicon_arch}"
   cluster  = var.cluster_id
   location = var.zone
@@ -44,6 +44,10 @@ resource "google_container_node_pool" "leaf_worker_pool" {
     service_account = var.service_account
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
 
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+
     # Starvation Prevention & Topology Affinity
     gcfs_config {
       enabled = true
@@ -68,7 +72,7 @@ resource "google_container_node_pool" "leaf_worker_pool" {
 }
 
 resource "google_container_node_pool" "aggregator_pool" {
-  count    = var.orchestration_engine == "gke" && var.cluster_id != "" ? 1 : 0
+  count    = var.orchestration_engine == "gke" ? 1 : 0
   name     = "lighter-agg-${var.silicon_arch}"
   cluster  = var.cluster_id
   location = var.zone
@@ -88,6 +92,10 @@ resource "google_container_node_pool" "aggregator_pool" {
 
     service_account = var.service_account
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
 
     labels = {
       role         = "tree-node"

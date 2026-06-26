@@ -14,9 +14,9 @@
 module "proving_pod_fleet" {
   source               = "./modules/proving_pod_node_pool"
   orchestration_engine = var.orchestration_engine
-  cluster_id           = "" # GKE not provisioned; node pools stay gated off (see ADR).
+  cluster_id           = coalesce(one(google_container_cluster.primary[*].id), "")
   region               = var.runtime_region != "" ? var.runtime_region : var.region
-  zone                 = "${var.runtime_region != "" ? var.runtime_region : var.region}-a"
+  zone                 = "${var.runtime_region != "" ? var.runtime_region : var.region}-b"
   service_account      = var.runtime_sa_email != "" ? var.runtime_sa_email : var.builder_sa_email
   silicon_arch         = var.silicon_arch
 

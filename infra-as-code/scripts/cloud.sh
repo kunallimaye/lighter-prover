@@ -627,6 +627,7 @@ cloud_run_distributed_cluster() {
   local chunk="${CHUNK:-1}"
   local image="${IMAGE:-default}"
   local benchmark_id="${BENCHMARK_ID:-}"
+  local radix="${RADIX:-2}"
   for arg in "$@"; do
     case "$arg" in
       --engine=*) engine="${arg#*=}" ;;
@@ -634,6 +635,7 @@ cloud_run_distributed_cluster() {
       --blocks=*) blocks="${arg#*=}" ;;
       --chunk=*)  chunk="${arg#*=}" ;;
       --image=*)  image="${arg#*=}" ;;
+      --radix=*)  radix="${arg#*=}" ;;
       --benchmark-id=*) benchmark_id="${arg#*=}" ;;
       [0-9]*)     blocks="$arg" ;;
     esac
@@ -652,10 +654,10 @@ cloud_run_distributed_cluster() {
     build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
   fi
 
-  _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine}, arch=${arch}, blocks=${blocks}, chunk=${chunk})..."
+  _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine}, arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix})..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id}"
+  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix}"
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
