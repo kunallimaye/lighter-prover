@@ -16,10 +16,8 @@ COPY bench/Cargo.toml bench/Cargo.toml
 COPY circuit/ circuit/
 COPY bench/ bench/
 
-# Compile benchmark STARK proving entrypoint and the distributed prover daemon.
-# The K8s proving pods (infra-as-code/kubernetes/prover_pod_unit.yaml) invoke the
-# `prover-node` binary, so it must be present in the image.
-RUN cargo build --release --bin bench --bin prover-node
+ARG RUSTFLAGS
+RUN RUSTFLAGS=${RUSTFLAGS} cargo build --release --bin bench --bin prover-node
 
 # ─── Stage 2: Minimal High-Throughput Compute Runtime ────────────────
 FROM debian:bookworm-slim AS runtime

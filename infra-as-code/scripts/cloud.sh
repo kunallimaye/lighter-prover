@@ -363,10 +363,12 @@ cloud_zkp_build() {
   local dockerfile="Dockerfile.zkp-arm64"
   local image_tag="arm64"
   local platform="linux/arm64"
+  local rustflags="-C target-cpu=neoverse-v2"
   if [[ "${arch}" == "amd64" ]]; then
     dockerfile="Dockerfile.zkp"
     image_tag="amd64"
     platform="linux/amd64"
+    rustflags="-C target-cpu=znver3"
   fi
 
   local git_tag="${TAG:-$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")}"
@@ -393,7 +395,7 @@ cloud_zkp_build() {
     --project="${build_project}" \
     "${cb_args[@]}" \
     --config="infra-as-code/cloudbuild-zkp.yaml" \
-    --substitutions="_IMAGE_URI=${image_uri},_EXTRA_TAG_URI=${extra_tag_uri},_DOCKERFILE=${dockerfile},_PLATFORM=${platform}" \
+    --substitutions="_IMAGE_URI=${image_uri},_EXTRA_TAG_URI=${extra_tag_uri},_DOCKERFILE=${dockerfile},_PLATFORM=${platform},_RUSTFLAGS=${rustflags}" \
     --quiet
 
   _log_ok "ZKP container image built and pushed successfully to ${image_uri}."

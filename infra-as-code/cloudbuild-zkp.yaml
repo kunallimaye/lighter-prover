@@ -13,7 +13,7 @@ steps:
       - '--platform'
       - '${_PLATFORM}'
       - '--build-arg'
-      - 'RUSTFLAGS=-C target-cpu=znver3'
+      - 'RUSTFLAGS=${_RUSTFLAGS}'
       - '-f'
       - '${_DOCKERFILE}'
       - '-t'
@@ -28,6 +28,7 @@ substitutions:
   _DOCKERFILE: 'Dockerfile.zkp'
   _IMAGE_URI: 'zkp-prover:amd64'
   _EXTRA_TAG_URI: 'zkp-prover:latest'
+  _RUSTFLAGS: '-C target-cpu=znver3'
 
 options:
   logging: CLOUD_LOGGING_ONLY

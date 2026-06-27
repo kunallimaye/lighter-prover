@@ -26,10 +26,8 @@ COPY bench/ bench/
 
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 
-# Compile release STARK proving crate at full native hardware CPU speed.
-# Build both the bench harness and the distributed prover daemon: the K8s proving
-# pods (infra-as-code/kubernetes/prover_pod_unit.yaml) invoke `prover-node`.
-RUN cargo build --release --target aarch64-unknown-linux-gnu --bin bench --bin prover-node
+ARG RUSTFLAGS
+RUN RUSTFLAGS=${RUSTFLAGS} cargo build --release --target aarch64-unknown-linux-gnu --bin bench --bin prover-node
 
 # ─── Stage 2: Native ARM64 Runtime Packaging ──────────────────────────
 FROM --platform=linux/arm64 debian:bookworm-slim AS runtime
