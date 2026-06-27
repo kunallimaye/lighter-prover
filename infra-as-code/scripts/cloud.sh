@@ -657,7 +657,7 @@ cloud_run_distributed_cluster() {
   _log_info "Submitting unmocked distributed proving cycle to Cloud Build (engine=${engine}, arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix})..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix}"
+  substitutions="${substitutions},_ENGINE=${engine},_ARCH=${arch},_TF_STATE_PREFIX=lighter-prover-perf-${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix}"
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then

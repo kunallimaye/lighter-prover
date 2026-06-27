@@ -130,7 +130,7 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
-          gcloud container clusters get-credentials lighter-prover-cluster --zone=${_REGION}-b --project=$${PROJECT_ID}
+          gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
           echo "[INFO] Deploying leaf workers Job to GKE..."
           kubectl delete job/lighter-leaf-worker --ignore-not-found=true
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-leaf.rendered.yaml
@@ -147,7 +147,7 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
-          gcloud container clusters get-credentials lighter-prover-cluster --zone=${_REGION}-b --project=$${PROJECT_ID}
+          gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
           echo "[INFO] Deploying tree aggregator Job to GKE..."
           kubectl delete job/lighter-tree-aggregator --ignore-not-found=true
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-tree.rendered.yaml

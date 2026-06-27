@@ -4,7 +4,7 @@
 resource "google_container_cluster" "primary" {
   count    = var.orchestration_engine == "gke" ? 1 : 0
   provider = google-beta.runtime_beta
-  name     = "lighter-prover-cluster"
+  name     = "lighter-prover-cluster-${var.silicon_arch}"
   project  = var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id
   location = "${var.runtime_region != "" ? var.runtime_region : var.region}-b"
 
