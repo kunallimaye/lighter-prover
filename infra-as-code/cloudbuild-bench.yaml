@@ -10,6 +10,13 @@ steps:
         echo "TF_ACTION=${_TF_ACTION}"
         echo "TF_STATE_BUCKET=${_TF_STATE_BUCKET}"
         echo "TF_STATE_PREFIX=${_TF_STATE_PREFIX}"
+        echo "RUNTIME_PROJECT_ID=${_RUNTIME_PROJECT_ID}"
+        echo "BUILD_PROJECT_ID=${_BUILD_PROJECT_ID}"
+        echo "BUILDER_SA_EMAIL=${_BUILDER_SA_EMAIL}"
+        echo "RUNTIME_SA_EMAIL=${_RUNTIME_SA_EMAIL}"
+        echo "ORCH_PROJECT_ID=${_ORCH_PROJECT_ID}"
+        echo "AR_REPO=${_AR_REPO}"
+        echo "BENCHMARK_ID=${_BENCHMARK_ID}"
 
   # 1. Dynamic Deployment Spec Rendering
   - id: k8s-render
