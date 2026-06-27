@@ -117,6 +117,10 @@ substitutions:
   _TF_ACTION: 'apply'
   _TF_STATE_BUCKET: ''
   _TF_STATE_PREFIX: ''
+  _AR_REPO: ''
+  _ORCH_PROJECT_ID: ''
+  _BUILDER_SA_EMAIL: ''
+  _RUNTIME_SA_EMAIL: ''
 
 options:
   logging: CLOUD_LOGGING_ONLY
