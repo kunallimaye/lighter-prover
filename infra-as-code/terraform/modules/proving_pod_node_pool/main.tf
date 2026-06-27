@@ -23,7 +23,9 @@ resource "google_container_node_pool" "leaf_worker_pool" {
   cluster  = var.cluster_id
   location = var.zone
 
-  initial_node_count = var.leaf_node_count
+  # Start with 1 node to avoid GKE provisioning-time stockouts.
+  # The GKE Autoscaler will scale up to meet pod demand.
+  initial_node_count = 1
 
   autoscaling {
     min_node_count = 0
@@ -77,7 +79,9 @@ resource "google_container_node_pool" "aggregator_pool" {
   cluster  = var.cluster_id
   location = var.zone
 
-  initial_node_count = var.agg_node_count
+  # Start with 1 node to avoid GKE provisioning-time stockouts.
+  # The GKE Autoscaler will scale up to meet pod demand.
+  initial_node_count = 1
 
   autoscaling {
     min_node_count = 0
