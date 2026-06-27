@@ -23,6 +23,7 @@ def main():
   parser.add_argument("--output", default="infra-as-code/kubernetes/prover_pod_unit.rendered.yaml", help="Output YAML")
   parser.add_argument("--image", required=True, help="Container release tag or 'default'")
   parser.add_argument("--radix", type=int, default=2, help="Reduction tree radix")
+  parser.add_argument("--benchmark-id", default="", help="Benchmark ID for GCS path isolation")
   args = parser.parse_args()
 
   if not args.image or args.image.strip() == "":
@@ -78,6 +79,11 @@ def main():
   if not os.path.exists(args.input):
     print(f"Error: Input YAML {args.input} not found.", file=sys.stderr)
     sys.exit(1)
+
+  mount_opts = "implicit-dirs"
+  if args.benchmark_id:
+    # GCS Fuse only-dir option mounts a subdirectory as the root of the volume
+    mount_opts += f",only-dir={args.benchmark_id}"
 
   # Split rendering into Leaf and Tree Jobs
   leaf_rendered = f"""apiVersion: v1
@@ -138,7 +144,7 @@ spec:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
             bucketName: "{gcs_bucket}"
-            mountOptions: "implicit-dirs"
+            mountOptions: "{mount_opts}"
 """
 
   tree_rendered = f"""apiVersion: batch/v1
@@ -188,7 +194,7 @@ spec:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
             bucketName: "{gcs_bucket}"
-            mountOptions: "implicit-dirs"
+            mountOptions: "{mount_opts}"
 """
 
   leaf_output = args.output.replace(".rendered.yaml", "-leaf.rendered.yaml")

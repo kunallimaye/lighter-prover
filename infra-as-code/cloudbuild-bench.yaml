@@ -27,7 +27,7 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Rendering dynamic K8s deployment manifests reading config.toml..."
-          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}" --radix="${_RADIX}"
+          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}" --radix="${_RADIX}" --benchmark-id="${_BENCHMARK_ID}"
         fi
 
   # 2. Clean GCS bucket before run to avoid stale proofs
@@ -39,7 +39,11 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Cleaning GCS stark_proofs directory..."
-          gsutil -m rm -rf "gs://${_BENCHMARK_BUCKET}/stark_proofs/*" || true
+          if [ -n "${_BENCHMARK_ID}" ]; then
+            gsutil -m rm -rf "gs://${_BENCHMARK_BUCKET}/${_BENCHMARK_ID}/stark_proofs/*" || true
+          else
+            gsutil -m rm -rf "gs://${_BENCHMARK_BUCKET}/stark_proofs/*" || true
+          fi
         fi
 
   # 3. Deploy GKE Leaf Workers Job
@@ -86,7 +90,11 @@ steps:
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Downloading root proof from GCS..."
           mkdir -p reports/stark_proofs
-          gsutil cp "gs://${_BENCHMARK_BUCKET}/stark_proofs/tree_L1_N0.proof" reports/stark_proofs/
+          if [ -n "${_BENCHMARK_ID}" ]; then
+            gsutil cp "gs://${_BENCHMARK_BUCKET}/${_BENCHMARK_ID}/stark_proofs/tree_L1_N0.proof" reports/stark_proofs/
+          else
+            gsutil cp "gs://${_BENCHMARK_BUCKET}/stark_proofs/tree_L1_N0.proof" reports/stark_proofs/
+          fi
         fi
 
   # 6. Execute Coordinator Verification
