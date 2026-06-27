@@ -31,7 +31,6 @@ def main():
   image_tag = args.image.strip()
   if image_tag == "default":
     image_tag = "0.0.3-distributed-proving"
-  image_uri = f"us-docker.pkg.dev/kunal-scratch/lighter-prover-iac/zkp-prover:{image_tag}"
 
   if not os.path.exists(args.config):
     print(f"Error: Config file {args.config} not found.", file=sys.stderr)
@@ -48,6 +47,13 @@ def main():
   gsa_email = data.get("gcp", {}).get("target", {}).get("runtime_sa", {}).get("email", "")
   if not gsa_email:
     gsa_email = data.get("gcp", {}).get("target", {}).get("build_sa", {}).get("email", "")
+
+  # Dynamically resolve registry URI from config.toml
+  project_id = data.get("gcp", {}).get("defaults", {}).get("project", "kunal-scratch")
+  registry_cfg = data.get("gcp", {}).get("registry", {})
+  registry_region = registry_cfg.get("region", "us")
+  registry_repo = registry_cfg.get("repository", "lighter-prover-iac")
+  image_uri = f"{registry_region}-docker.pkg.dev/{project_id}/{registry_repo}/zkp-prover:{image_tag}"
 
   pod_cfg = data.get("proving_pod", {})
   defaults = pod_cfg.get("defaults", {})
