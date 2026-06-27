@@ -368,7 +368,7 @@ cloud_zkp_build() {
     dockerfile="Dockerfile.zkp"
     image_tag="amd64"
     platform="linux/amd64"
-    rustflags="-C target-cpu=znver3"
+    rustflags="-C target-cpu=x86-64-v4"
   fi
 
   local git_tag="${TAG:-$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")}"
