@@ -1,0 +1,123 @@
+steps:
+  # 0. Noop to satisfy unused vars validation
+  - id: noop-unused-vars
+    name: 'alpine:latest'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        echo "Unused vars to satisfy Cloud Build validation:"
+        echo "TF_ACTION=${_TF_ACTION}"
+        echo "TF_STATE_BUCKET=${_TF_STATE_BUCKET}"
+        echo "TF_STATE_PREFIX=${_TF_STATE_PREFIX}"
+
+  # 1. Dynamic Deployment Spec Rendering
+  - id: k8s-render
+    name: 'python:3.11-slim'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Rendering dynamic K8s deployment manifests reading config.toml..."
+          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}" --radix="${_RADIX}"
+        fi
+
+  # 2. Clean GCS bucket before run to avoid stale proofs
+  - id: clean-gcs
+    name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Cleaning GCS stark_proofs directory..."
+          gsutil -m rm -rf "gs://${_BENCHMARK_BUCKET}/stark_proofs/*" || true
+        fi
+
+  # 3. Deploy GKE Leaf Workers Job
+  - id: deploy-leaves
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
+          echo "[INFO] Deploying leaf workers Job to GKE..."
+          kubectl delete job/lighter-leaf-worker --ignore-not-found=true
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-leaf.rendered.yaml
+          echo "[INFO] Waiting for leaf workers to complete..."
+          kubectl wait --for=condition=complete job/lighter-leaf-worker --timeout=2400s
+        fi
+
+  # 4. Deploy GKE Tree Aggregator Job
+  - id: deploy-tree
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
+          echo "[INFO] Deploying tree aggregator Job to GKE..."
+          kubectl delete job/lighter-tree-aggregator --ignore-not-found=true
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-tree.rendered.yaml
+          echo "[INFO] Waiting for tree aggregator to complete..."
+          kubectl wait --for=condition=complete job/lighter-tree-aggregator --timeout=1200s
+        fi
+
+  # 5. Download GKE root proof for local coordinator verification
+  - id: download-root-proof
+    name: 'gcr.io/cloud-builders/gsutil'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Downloading root proof from GCS..."
+          mkdir -p reports/stark_proofs
+          gsutil cp "gs://${_BENCHMARK_BUCKET}/stark_proofs/tree_L1_N0.proof" reports/stark_proofs/
+        fi
+
+  # 6. Execute Coordinator Verification
+  - id: dist-prove
+    name: 'rust:latest'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        set -eu
+        export SILICON_ARCH="${_ARCH}"
+        export IMAGE="${_IMAGE}"
+        export BLOCK_CONCURRENCY="${_BLOCK_CONCURRENCY}"
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Running GKE coordinator verification (chunk_size=${_CHUNK_SIZE})..."
+          cargo run --release --bin prover-node -- root-coordinator --block-number 1042 --radix "${_RADIX}" --node-idx 0 --tx-per-proof 1
+        else
+          echo "[ERROR] Decoupled benchmark pipeline only supports GKE engine!"
+          exit 1
+        fi
+
+substitutions:
+  _ENGINE: 'gke'
+  _ARCH: 'c3d'
+  _RADIX: '16'
+  _CHUNK_SIZE: '1'
+  _BLOCK_CONCURRENCY: '10'
+  _REGION: 'us-east4'
+  _BUILD_PROJECT_ID: ''
+  _RUNTIME_PROJECT_ID: ''
+  _BENCHMARK_ID: ''
+  _IMAGE: 'latest'
+  _BENCHMARK_BUCKET: '' # Bucket where proofs are stored (usually same as TF state bucket)
+  # Unused but required to avoid validation errors if passed
+  _TF_ACTION: 'apply'
+  _TF_STATE_BUCKET: ''
+  _TF_STATE_PREFIX: ''
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 3600s

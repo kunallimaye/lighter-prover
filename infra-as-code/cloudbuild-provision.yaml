@@ -1,0 +1,112 @@
+steps:
+  # 0. Noop to satisfy unused vars validation
+  - id: noop-unused-vars
+    name: 'alpine:latest'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        echo "Unused vars to satisfy Cloud Build validation:"
+        echo "BLOCK_CONCURRENCY=${_BLOCK_CONCURRENCY}"
+        echo "TF_ACTION=${_TF_ACTION}"
+        echo "RADIX=${_RADIX}"
+        echo "BENCHMARK_ID=${_BENCHMARK_ID}"
+        echo "IMAGE=${_IMAGE}"
+        echo "CHUNK_SIZE=${_CHUNK_SIZE}"
+
+  # 1. Initialize Terraform backend
+  - id: tf-init
+    name: 'hashicorp/terraform:1.14'
+    dir: 'infra-as-code/terraform'
+    args:
+      - 'init'
+      - '-backend-config=bucket=${_TF_STATE_BUCKET}'
+      - '-backend-config=prefix=${_TF_STATE_PREFIX}'
+    env:
+      - 'TF_IN_AUTOMATION=true'
+
+  # 1.5 Diagnose IAM permission directly using Google API Client
+  - id: diagnose-iam
+    name: 'python:3.11-slim'
+    entrypoint: 'sh'
+    args:
+      - '-c'
+      - |
+        pip install --no-cache-dir google-api-python-client google-auth >/dev/null 2>&1
+        python3 -c '
+        import sys
+        try:
+            from googleapiclient import discovery
+            import google.auth
+            from google.auth.transport.requests import Request
+            credentials, project = google.auth.default()
+            if hasattr(credentials, "refresh"):
+                credentials.refresh(Request())
+            if hasattr(credentials, "service_account_email"):
+                print(f"[DIAGNOSTIC] Running as service account: {credentials.service_account_email}")
+            else:
+                print(f"[DIAGNOSTIC] Running as: {credentials}")
+            service = discovery.build("iam", "v1", credentials=credentials)
+            resource = "projects/kunal-scratch/serviceAccounts/lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
+            print(f"[DIAGNOSTIC] Attempting to get IAM policy for {resource} using API Client...")
+            request = service.projects().serviceAccounts().getIamPolicy(resource=resource)
+            policy = request.execute()
+            print("[DIAGNOSTIC] SUCCESS (GET)!")
+            print(policy)
+            
+            print(f"[DIAGNOSTIC] Attempting to set IAM policy (test setIamPolicy)...")
+            set_request = service.projects().serviceAccounts().setIamPolicy(resource=resource, body={"policy": policy})
+            set_policy = set_request.execute()
+            print("[DIAGNOSTIC] SUCCESS (SET)!")
+        except Exception as e:
+            print("[DIAGNOSTIC] FAILED!", file=sys.stderr)
+            print(e, file=sys.stderr)
+        '
+
+  # 2. Declarative Terraform Apply (Provision GKE)
+  - id: tf-apply
+    name: 'hashicorp/terraform:1.14'
+    entrypoint: 'sh'
+    dir: 'infra-as-code/terraform'
+    args:
+      - '-c'
+      - |
+        echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
+        terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
+    env:
+      - 'TF_IN_AUTOMATION=true'
+      - 'TF_VAR_enable_shared_resources=false'
+      - 'TF_VAR_orchestration_project_id=${_ORCH_PROJECT_ID}'
+      - 'TF_VAR_orchestration_region=${_REGION}'
+      - 'TF_VAR_build_project_id=${_BUILD_PROJECT_ID}'
+      - 'TF_VAR_build_region=${_REGION}'
+      - 'TF_VAR_runtime_project_id=${_RUNTIME_PROJECT_ID}'
+      - 'TF_VAR_runtime_region=${_REGION}'
+      - 'TF_VAR_builder_sa_email=${_BUILDER_SA_EMAIL}'
+      - 'TF_VAR_runtime_sa_email=${_RUNTIME_SA_EMAIL}'
+      - 'TF_VAR_ar_repo=${_AR_REPO}'
+      - 'TF_VAR_silicon_arch=${_ARCH}'
+      - 'TF_VAR_orchestration_engine=${_ENGINE}'
+
+substitutions:
+  _ENGINE: 'gke'
+  _ARCH: 'c3d'
+  _RADIX: '16'
+  _CHUNK_SIZE: '1'
+  _TF_ACTION: 'apply'
+  _BLOCK_CONCURRENCY: '10'
+  _TF_STATE_BUCKET: ''
+  _TF_STATE_PREFIX: 'lighter-prover-perf'
+  _REGION: 'us-east4'
+  _ORCH_PROJECT_ID: ''
+  _BUILD_PROJECT_ID: ''
+  _RUNTIME_PROJECT_ID: ''
+  _BUILDER_SA_EMAIL: ''
+  _RUNTIME_SA_EMAIL: ''
+  _AR_REPO: 'lighter-prover-iac'
+  _BENCHMARK_ID: ''
+  _IMAGE: 'latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

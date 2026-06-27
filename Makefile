@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast lint-reports
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster cloud-gke-provision cloud-gke-bench cloud-gke-teardown test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast lint-reports
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -25,6 +25,15 @@ cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults 
 
 cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment (accepts ENGINE=gke/mig ARCH=c4a/c3d/t2d BLOCKS=2 CHUNK=1 RADIX=2)
 	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster --engine=$(ENGINE) --arch=$(ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK) --radix=$(RADIX)
+
+cloud-gke-provision: ## Provision GKE cluster for specific architecture (accepts ARCH=c4a/c3d/t2d/c4d)
+	@bash infra-as-code/scripts/cloud.sh cloud-gke-provision --arch=$(ARCH)
+
+cloud-gke-bench: ## Run benchmark on existing GKE cluster (accepts ARCH=c4a/c3d/t2d/c4d BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 BENCHMARK_ID=...)
+	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK) --image=$(IMAGE) --radix=$(RADIX) --benchmark-id=$(BENCHMARK_ID)
+
+cloud-gke-teardown: ## Tear down GKE cluster for specific architecture (accepts ARCH=c4a/c3d/t2d/c4d)
+	@bash infra-as-code/scripts/cloud.sh cloud-gke-teardown --arch=$(ARCH)
 
 test-t2d-hypothesis: ## (DISABLED #282) t2d vs c4a AB race - fails loudly; use cloud-run-distributed-cluster for a real run
 	@bash infra-as-code/scripts/cloud.sh cloud-test-t2d-hypothesis

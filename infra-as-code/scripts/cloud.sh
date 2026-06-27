@@ -725,6 +725,156 @@ cloud_test_omni_silicon_parallel() {
   _die_requires_live_run "cloud-test-omni-silicon-parallel (4-block quad-silicon suite)"
 }
 
+cloud_gke_provision() {
+  local arch="${ARCH:-c3d}"
+  for arg in "$@"; do
+    case "$arg" in
+      --arch=*)   arch="${arg#*=}" ;;
+    esac
+  done
+
+  local build_project="$(_resolve_build_project)"
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
+
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local builder_sa="" runtime_sa="" build_machine=""
+  if [[ -f "${target_sa}" ]]; then
+    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
+  fi
+
+  _log_info "Provisioning GKE cluster for arch=${arch}..."
+  local substitutions
+  substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
+  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_TF_STATE_PREFIX=lighter-prover-perf-${arch}"
+
+  local cb_args=()
+  if [[ -n "${builder_sa}" ]]; then
+    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
+    cb_args+=(--machine-type="${build_machine}")
+  fi
+
+  gcloud builds submit "${ROOT_DIR}" \
+    --project="${build_project}" \
+    "${cb_args[@]}" \
+    --config="infra-as-code/cloudbuild-provision.yaml" \
+    --substitutions="${substitutions}" \
+    --quiet
+
+  _log_ok "GKE cluster for arch=${arch} provisioned successfully!"
+}
+
+cloud_gke_bench() {
+  local arch="${ARCH:-c3d}"
+  local blocks="${BLOCKS:-2}"
+  local chunk="${CHUNK:-1}"
+  local image="${IMAGE:-default}"
+  local benchmark_id="${BENCHMARK_ID:-}"
+  local radix="${RADIX:-2}"
+  for arg in "$@"; do
+    case "$arg" in
+      --arch=*)   arch="${arg#*=}" ;;
+      --blocks=*) blocks="${arg#*=}" ;;
+      --chunk=*)  chunk="${arg#*=}" ;;
+      --image=*)  image="${arg#*=}" ;;
+      --radix=*)  radix="${arg#*=}" ;;
+      --benchmark-id=*) benchmark_id="${arg#*=}" ;;
+      [0-9]*)     blocks="$arg" ;;
+    esac
+  done
+
+  local build_project="$(_resolve_build_project)"
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
+
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local builder_sa="" runtime_sa="" build_machine=""
+  if [[ -f "${target_sa}" ]]; then
+    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
+  fi
+
+  _log_info "Running benchmark on GKE cluster (arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix})..."
+  
+  local tf_state_bucket
+  tf_state_bucket="$(python3 -c "import json; print(json.load(open('infra-as-code/terraform/target.auto.tfvars.json')).get('tf_state_bucket', ''))" 2>/dev/null || true)"
+  if [[ -z "${tf_state_bucket}" ]]; then
+     tf_state_bucket="kunal-scratch-tfstate"
+  fi
+
+  local substitutions
+  substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
+  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix},_BENCHMARK_BUCKET=${tf_state_bucket}"
+
+  local cb_args=()
+  if [[ -n "${builder_sa}" ]]; then
+    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
+    cb_args+=(--machine-type="${build_machine}")
+  fi
+
+  gcloud builds submit "${ROOT_DIR}" \
+    --project="${build_project}" \
+    "${cb_args[@]}" \
+    --config="infra-as-code/cloudbuild-bench.yaml" \
+    --substitutions="${substitutions}" \
+    --quiet
+
+  _log_ok "GKE benchmark run for arch=${arch} completed successfully!"
+}
+
+cloud_gke_teardown() {
+  local arch="${ARCH:-c3d}"
+  for arg in "$@"; do
+    case "$arg" in
+      --arch=*)   arch="${arg#*=}" ;;
+    esac
+  done
+
+  local build_project="$(_resolve_build_project)"
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
+
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local builder_sa="" runtime_sa="" build_machine=""
+  if [[ -f "${target_sa}" ]]; then
+    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
+  fi
+
+  _log_info "Tearing down GKE cluster for arch=${arch}..."
+  local substitutions
+  substitutions="$(_build_substitutions "${build_project}" "destroy" "${builder_sa}" "${runtime_sa}")"
+  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_TF_STATE_PREFIX=lighter-prover-perf-${arch}"
+
+  local cb_args=()
+  if [[ -n "${builder_sa}" ]]; then
+    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
+    cb_args+=(--machine-type="${build_machine}")
+  fi
+
+  gcloud builds submit "${ROOT_DIR}" \
+    --project="${build_project}" \
+    "${cb_args[@]}" \
+    --config="infra-as-code/cloudbuild-teardown.yaml" \
+    --substitutions="${substitutions}" \
+    --quiet
+
+  _log_ok "GKE cluster for arch=${arch} torn down successfully!"
+}
+
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -732,6 +882,9 @@ case "${1:-}" in
   cloud-admin-undo)              cloud_admin_undo ;;
   cloud-bench-run)               shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" "${4:-default}" "${5:-}" ;;
   cloud-run-distributed-cluster) cloud_run_distributed_cluster ;;
+  cloud-gke-provision)           cloud_gke_provision ;;
+  cloud-gke-bench)               cloud_gke_bench ;;
+  cloud-gke-teardown)            cloud_gke_teardown ;;
   cloud-test-t2d-hypothesis)     cloud_test_t2d_hypothesis ;;
   cloud-test-gke-performance-tax) cloud_test_gke_performance_tax ;;
   cloud-test-capstone-matrix)    cloud_test_capstone_matrix ;;
@@ -742,5 +895,5 @@ case "${1:-}" in
   cloud-vm-start)                shift; cloud_vm_start "${1:-all}" ;;
   cloud-vm-stop)                 shift; cloud_vm_stop "${1:-all}" ;;
   cloud-zkp-build)               shift; cloud_zkp_build "${1:-arm64}" ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run|cloud-run-distributed-cluster|cloud-test-t2d-hypothesis|cloud-test-gke-performance-tax|cloud-test-capstone-matrix|cloud-test-omni-silicon-parallel|cloud-deploy|cloud-plan|cloud-destroy|cloud-vm-start|cloud-vm-stop|cloud-zkp-build}" ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run|cloud-run-distributed-cluster|cloud-gke-provision|cloud-gke-bench|cloud-gke-teardown|cloud-test-t2d-hypothesis|cloud-test-gke-performance-tax|cloud-test-capstone-matrix|cloud-test-omni-silicon-parallel|cloud-deploy|cloud-plan|cloud-destroy|cloud-vm-start|cloud-vm-stop|cloud-zkp-build}" ;;
 esac
