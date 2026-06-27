@@ -107,7 +107,21 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Rendering dynamic K8s deployment manifests reading config.toml..."
-          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}" --radix="${_RADIX}"
+          # --leaf-count is the total number of leaf proofs N (decoupled from
+          # radix). When _LEAF_COUNT is empty the renderer falls back to radix,
+          # preserving the single-level (N == radix) pipeline. The renderer also
+          # writes per-level tree manifests + a plan.env consumed by deploy-tree.
+          LEAF_COUNT_ARG=""
+          if [ -n "${_LEAF_COUNT}" ]; then
+            LEAF_COUNT_ARG="--leaf-count=${_LEAF_COUNT}"
+          fi
+          BENCH_ID_ARG=""
+          if [ -n "${_BENCHMARK_ID}" ]; then
+            BENCH_ID_ARG="--benchmark-id=${_BENCHMARK_ID}"
+          fi
+          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}" --radix="${_RADIX}" $${LEAF_COUNT_ARG} $${BENCH_ID_ARG}
+          echo "[INFO] Tree geometry plan:"
+          cat infra-as-code/kubernetes/prover_pod_unit-tree.plan.env
         fi
 
   # 2.6 Clean GCS bucket before run to avoid stale proofs
@@ -139,7 +153,16 @@ steps:
           kubectl wait --for=condition=complete job/lighter-leaf-worker --timeout=2400s
         fi
 
-  # 2.8 Deploy GKE Tree Aggregator Job
+  # 2.8 Deploy GKE Tree Aggregator Jobs — CROSS-LEVEL GATING (#295)
+  #
+  # Kubernetes batch/v1 Jobs have no native inter-Job ordering, so a multi-level
+  # reduction tree (depth = ceil(log_radix N)) must apply + wait each level IN
+  # ORDER: level L+1 must not start until every level-L node proof exists in the
+  # shared GCS-Fuse transport. We drive the loop from the plan.env that
+  # render_pod_spec.py emitted (the SINGLE source of truth for depth/node-counts)
+  # and gate each level on `kubectl wait --for=condition=complete`. The final
+  # (root) tree level is just the last entry in TREE_LEVELS; the root-coordinator
+  # Job is applied + waited on after the last level completes.
   - id: deploy-tree
     name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
@@ -147,13 +170,40 @@ steps:
       - '-c'
       - |
         if [ "${_ENGINE}" = "gke" ]; then
+          set -eu
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
           gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
-          echo "[INFO] Deploying tree aggregator Job to GKE..."
-          kubectl delete job/lighter-tree-aggregator --ignore-not-found=true
-          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-tree.rendered.yaml
-          echo "[INFO] Waiting for tree aggregator to complete..."
-          kubectl wait --for=condition=complete job/lighter-tree-aggregator --timeout=1200s
+
+          # Single source of truth: depth + per-level node counts from the renderer.
+          PLAN_FILE="infra-as-code/kubernetes/prover_pod_unit-tree.plan.env"
+          if [ ! -f "$${PLAN_FILE}" ]; then
+            echo "[ERROR] Missing $${PLAN_FILE}; k8s-render must run before deploy-tree." >&2
+            exit 1
+          fi
+          # shellcheck disable=SC1090
+          . "$${PLAN_FILE}"
+          echo "[INFO] Tree depth=$${TREE_DEPTH}, levels=[$${TREE_LEVELS}], root_level=$${ROOT_LEVEL}"
+
+          # Apply + wait each tree level IN ORDER. The wait between levels is the
+          # actual cross-level gate (level L+1 is not applied until level L is
+          # complete and its proofs are in the transport).
+          for level in $${TREE_LEVELS}; do
+            LEVEL_FILE="infra-as-code/kubernetes/prover_pod_unit-tree-l$${level}.rendered.yaml"
+            JOB="lighter-tree-aggregator-l$${level}"
+            echo "[INFO] Deploying tree level $${level}/$${TREE_DEPTH} ($${JOB})..."
+            kubectl delete job/$${JOB} --ignore-not-found=true
+            kubectl apply -f "$${LEVEL_FILE}"
+            echo "[INFO] Waiting for tree level $${level} ($${JOB}) to complete (gate before level $$((level + 1)))..."
+            kubectl wait --for=condition=complete job/$${JOB} --timeout=1200s
+          done
+
+          # Root coordinator: harvest + verify the single root proof. Applied only
+          # after the last tree level (= ROOT_LEVEL) has completed above.
+          echo "[INFO] Deploying root-coordinator Job (root proof: $${ROOT_PROOF_NAME})..."
+          kubectl delete job/lighter-root-coordinator --ignore-not-found=true
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-tree-root.rendered.yaml
+          echo "[INFO] Waiting for root-coordinator to complete..."
+          kubectl wait --for=condition=complete job/lighter-root-coordinator --timeout=1200s
         fi
 
   # 2.9 Download GKE root proof for local coordinator verification
@@ -164,9 +214,16 @@ steps:
       - '-c'
       - |
         if [ "${_ENGINE}" = "gke" ]; then
-          echo "[INFO] Downloading root proof from GCS..."
+          # Root proof name is depth-dependent (tree_L{ROOT_LEVEL}_N0.proof), so
+          # read it from the renderer's plan.env rather than hardcoding level 1.
+          PLAN_FILE="infra-as-code/kubernetes/prover_pod_unit-tree.plan.env"
+          ROOT_PROOF_NAME="tree_L1_N0.proof"
+          if [ -f "$${PLAN_FILE}" ]; then
+            ROOT_PROOF_NAME=$(grep '^ROOT_PROOF_NAME=' "$${PLAN_FILE}" | cut -d= -f2)
+          fi
+          echo "[INFO] Downloading root proof $${ROOT_PROOF_NAME} from GCS..."
           mkdir -p reports/stark_proofs
-          gsutil cp "gs://${_TF_STATE_BUCKET}/stark_proofs/tree_L1_N0.proof" reports/stark_proofs/
+          gsutil cp "gs://${_TF_STATE_BUCKET}/stark_proofs/$${ROOT_PROOF_NAME}" reports/stark_proofs/
         fi
 
   # 3. Execute Coordinator Verification
@@ -182,7 +239,15 @@ steps:
         export BLOCK_CONCURRENCY="${_BLOCK_CONCURRENCY}"
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Running GKE coordinator verification (chunk_size=${_CHUNK_SIZE})..."
-          cargo run --release --bin prover-node -- root-coordinator --block-number 1042 --radix "${_RADIX}" --node-idx 0 --tx-per-proof 1
+          # --leaf-count must match the rendered tree so the local coordinator
+          # derives the same root_level and looks for tree_L{ROOT_LEVEL}_N0.proof
+          # (the artifact download-root-proof fetched). Read N from the plan.env.
+          PLAN_FILE="infra-as-code/kubernetes/prover_pod_unit-tree.plan.env"
+          LEAF_COUNT="${_RADIX}"
+          if [ -f "$${PLAN_FILE}" ]; then
+            LEAF_COUNT=$(grep '^LEAF_COUNT=' "$${PLAN_FILE}" | cut -d= -f2)
+          fi
+          cargo run --release --bin prover-node -- root-coordinator --block-number 1042 --radix "${_RADIX}" --leaf-count "$${LEAF_COUNT}" --node-idx 0 --tx-per-proof 1
         else
           echo "[INFO] Running MIG local smoke pipeline (chunk_size=${_CHUNK_SIZE})..."
           cargo build --release --bin prover-node
@@ -241,6 +306,10 @@ substitutions:
   _ENGINE: 'mig'
   _ARCH: 'c3d'
   _RADIX: '2'
+  # Total leaf proofs N (decoupled from radix fan-in). Empty -> renderer falls
+  # back to radix, preserving the single-level (N == radix) pipeline. Set > radix
+  # to exercise the multi-level cross-level-gated GKE tree (#295).
+  _LEAF_COUNT: ''
   _CHUNK_SIZE: '1'
   _TF_ACTION: 'apply'
   _BLOCK_CONCURRENCY: '2'
