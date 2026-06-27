@@ -725,26 +725,12 @@ cloud_test_omni_silicon_parallel() {
   _die_requires_live_run "cloud-test-omni-silicon-parallel (4-block quad-silicon suite)"
 }
 
-cloud_gke_provision() {
-  local arch="${ARCH:-c3d}"
-  for arg in "$@"; do
-    case "$arg" in
-      --arch=*)   arch="${arg#*=}" ;;
-    esac
-  done
-
-  local build_project="$(_resolve_build_project)"
-  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
-    _generate_tfvars
-  fi
-
-  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-  local builder_sa="" runtime_sa="" build_machine=""
-  if [[ -f "${target_sa}" ]]; then
-    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
-    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
-    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
-  fi
+_cloud_gke_provision_arch() {
+  local arch="$1"
+  local build_project="$2"
+  local builder_sa="$3"
+  local runtime_sa="$4"
+  local build_machine="$5"
 
   _log_info "Provisioning GKE cluster for arch=${arch}..."
   local substitutions
@@ -769,11 +755,82 @@ cloud_gke_provision() {
   _log_ok "GKE cluster for arch=${arch} provisioned successfully!"
 }
 
+cloud_gke_provision() {
+  local arch="all"
+  for arg in "$@"; do
+    case "$arg" in
+      --arch=*)   arch="${arg#*=}" ;;
+      *)          arch="$arg" ;;
+    esac
+  done
+
+  local build_project="$(_resolve_build_project)"
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
+
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local builder_sa="" runtime_sa="" build_machine=""
+  if [[ -f "${target_sa}" ]]; then
+    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
+  fi
+
+  if [[ "${arch}" == "all" ]]; then
+    _log_info "Provisioning ALL GKE clusters (t2d, c3d, c4a, c4d) in parallel..."
+    _cloud_gke_provision_arch "t2d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    _cloud_gke_provision_arch "c3d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    _cloud_gke_provision_arch "c4a" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    _cloud_gke_provision_arch "c4d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    wait
+    _log_ok "All GKE clusters provisioned."
+  else
+    _cloud_gke_provision_arch "${arch}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}"
+  fi
+}
+
+_cloud_gke_bench_arch() {
+  local arch="$1"
+  local blocks="$2"
+  local chunk="$3"
+  local image="$4"
+  local benchmark_id="$5"
+  local radix="$6"
+  local build_project="$7"
+  local builder_sa="$8"
+  local runtime_sa="$9"
+  local build_machine="${10}"
+  local tf_state_bucket="${11}"
+
+  _log_info "Running benchmark on GKE cluster (arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix}, image=${image})..."
+  local substitutions
+  substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
+  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix},_BENCHMARK_BUCKET=${tf_state_bucket}"
+
+  local cb_args=()
+  if [[ -n "${builder_sa}" ]]; then
+    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  fi
+  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
+    cb_args+=(--machine-type="${build_machine}")
+  fi
+
+  gcloud builds submit "${ROOT_DIR}" \
+    --project="${build_project}" \
+    "${cb_args[@]}" \
+    --config="infra-as-code/cloudbuild-bench.yaml" \
+    --substitutions="${substitutions}" \
+    --quiet
+
+  _log_ok "GKE benchmark run for arch=${arch} completed successfully!"
+}
+
 cloud_gke_bench() {
-  local arch="${ARCH:-c3d}"
+  local arch="all"
   local blocks="${BLOCKS:-2}"
   local chunk="${CHUNK:-1}"
-  local image="${IMAGE:-default}"
+  local image="default"
   local benchmark_id="${BENCHMARK_ID:-}"
   local radix="${RADIX:-2}"
   for arg in "$@"; do
@@ -801,56 +858,46 @@ cloud_gke_bench() {
     build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
   fi
 
-  _log_info "Running benchmark on GKE cluster (arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix})..."
-  
   local tf_state_bucket
   tf_state_bucket="$(python3 -c "import json; print(json.load(open('infra-as-code/terraform/target.auto.tfvars.json')).get('tf_state_bucket', ''))" 2>/dev/null || true)"
   if [[ -z "${tf_state_bucket}" ]]; then
      tf_state_bucket="kunal-scratch-tfstate"
   fi
 
-  local substitutions
-  substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix},_BENCHMARK_BUCKET=${tf_state_bucket}"
-
-  local cb_args=()
-  if [[ -n "${builder_sa}" ]]; then
-    cb_args+=(--service-account="projects/${build_project}/serviceAccounts/${builder_sa}")
+  if [[ "${arch}" == "all" ]]; then
+    _log_info "Running GKE benchmarks for ALL architectures in parallel..."
+    local t2d_img="${image}" c3d_img="${image}" c4a_img="${image}" c4d_img="${image}"
+    if [[ "${image}" == "default" || "${image}" == "latest" ]]; then
+      t2d_img="amd64"
+      c3d_img="amd64"
+      c4d_img="amd64"
+      c4a_img="arm64"
+    fi
+    _cloud_gke_bench_arch "t2d" "${blocks}" "${chunk}" "${t2d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" &
+    _cloud_gke_bench_arch "c3d" "${blocks}" "${chunk}" "${c3d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" &
+    _cloud_gke_bench_arch "c4a" "${blocks}" "${chunk}" "${c4a_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" &
+    _cloud_gke_bench_arch "c4d" "${blocks}" "${chunk}" "${c4d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" &
+    wait
+    _log_ok "All GKE benchmarks completed."
+  else
+    local resolved_image="${image}"
+    if [[ "${image}" == "default" ]]; then
+      if [[ "${arch}" == "c4a" ]]; then
+        resolved_image="arm64"
+      else
+        resolved_image="amd64"
+      fi
+    fi
+    _cloud_gke_bench_arch "${arch}" "${blocks}" "${chunk}" "${resolved_image}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}"
   fi
-  if [[ -n "${build_machine}" && "${build_machine}" != "UNSPECIFIED" ]]; then
-    cb_args+=(--machine-type="${build_machine}")
-  fi
-
-  gcloud builds submit "${ROOT_DIR}" \
-    --project="${build_project}" \
-    "${cb_args[@]}" \
-    --config="infra-as-code/cloudbuild-bench.yaml" \
-    --substitutions="${substitutions}" \
-    --quiet
-
-  _log_ok "GKE benchmark run for arch=${arch} completed successfully!"
 }
 
-cloud_gke_teardown() {
-  local arch="${ARCH:-c3d}"
-  for arg in "$@"; do
-    case "$arg" in
-      --arch=*)   arch="${arg#*=}" ;;
-    esac
-  done
-
-  local build_project="$(_resolve_build_project)"
-  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
-    _generate_tfvars
-  fi
-
-  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-  local builder_sa="" runtime_sa="" build_machine=""
-  if [[ -f "${target_sa}" ]]; then
-    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
-    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
-    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
-  fi
+_cloud_gke_destroy_arch() {
+  local arch="$1"
+  local build_project="$2"
+  local builder_sa="$3"
+  local runtime_sa="$4"
+  local build_machine="$5"
 
   _log_info "Tearing down GKE cluster for arch=${arch}..."
   local substitutions
@@ -875,6 +922,41 @@ cloud_gke_teardown() {
   _log_ok "GKE cluster for arch=${arch} torn down successfully!"
 }
 
+cloud_gke_destroy() {
+  local arch="all"
+  for arg in "$@"; do
+    case "$arg" in
+      --arch=*)   arch="${arg#*=}" ;;
+      *)          arch="$arg" ;;
+    esac
+  done
+
+  local build_project="$(_resolve_build_project)"
+  if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
+    _generate_tfvars
+  fi
+
+  local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
+  local builder_sa="" runtime_sa="" build_machine=""
+  if [[ -f "${target_sa}" ]]; then
+    builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
+    runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
+    build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
+  fi
+
+  if [[ "${arch}" == "all" ]]; then
+    _log_info "Tearing down ALL GKE clusters (t2d, c3d, c4a, c4d) in parallel..."
+    _cloud_gke_destroy_arch "t2d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    _cloud_gke_destroy_arch "c3d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    _cloud_gke_destroy_arch "c4a" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    _cloud_gke_destroy_arch "c4d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    wait
+    _log_ok "All GKE clusters torn down."
+  else
+    _cloud_gke_destroy_arch "${arch}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}"
+  fi
+}
+
 # ─── Main Dispatch ────────────────────────────────────────────────────
 
 case "${1:-}" in
@@ -884,7 +966,7 @@ case "${1:-}" in
   cloud-run-distributed-cluster) cloud_run_distributed_cluster ;;
   cloud-gke-provision)           cloud_gke_provision ;;
   cloud-gke-bench)               cloud_gke_bench ;;
-  cloud-gke-teardown)            cloud_gke_teardown ;;
+  cloud-gke-destroy)             cloud_gke_destroy ;;
   cloud-test-t2d-hypothesis)     cloud_test_t2d_hypothesis ;;
   cloud-test-gke-performance-tax) cloud_test_gke_performance_tax ;;
   cloud-test-capstone-matrix)    cloud_test_capstone_matrix ;;
@@ -895,5 +977,5 @@ case "${1:-}" in
   cloud-vm-start)                shift; cloud_vm_start "${1:-all}" ;;
   cloud-vm-stop)                 shift; cloud_vm_stop "${1:-all}" ;;
   cloud-zkp-build)               shift; cloud_zkp_build "${1:-arm64}" ;;
-  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run|cloud-run-distributed-cluster|cloud-gke-provision|cloud-gke-bench|cloud-gke-teardown|cloud-test-t2d-hypothesis|cloud-test-gke-performance-tax|cloud-test-capstone-matrix|cloud-test-omni-silicon-parallel|cloud-deploy|cloud-plan|cloud-destroy|cloud-vm-start|cloud-vm-stop|cloud-zkp-build}" ;;
+  *) _die "Usage: $0 {cloud-admin-init|cloud-admin-undo|cloud-bench-run|cloud-run-distributed-cluster|cloud-gke-provision|cloud-gke-bench|cloud-gke-destroy|cloud-test-t2d-hypothesis|cloud-test-gke-performance-tax|cloud-test-capstone-matrix|cloud-test-omni-silicon-parallel|cloud-deploy|cloud-plan|cloud-destroy|cloud-vm-start|cloud-vm-stop|cloud-zkp-build}" ;;
 esac
