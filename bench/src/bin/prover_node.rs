@@ -11,21 +11,26 @@
 //!   derives the real [`Batch`] aggregate from the proven public inputs, wraps
 //!   it in a `BatchTarget`-shaped leaf proof, **verifies** it, and serialises it
 //!   to `reports/stark_proofs/leaf_{idx}.proof`.
-//! * [`Role::TreeNode`] — reads its children's leaf/parent proofs from the
-//!   transport and folds them with the #281-fixed reduction-tree circuit
-//!   ([`BinaryTreeChainCircuit`] for radix 2, [`HexadecimalTreeChainCircuit`]
-//!   for radix 16). The circuit pins the child verifying key, enforces
+//! * [`Role::TreeNode`] — reads its children's level-(L-1) proofs from the
+//!   transport and folds them with the #281/#289 reduction-tree circuit. Tree
+//!   depth is **dynamic**: `depth = ceil(log_radix(N))` for N leaves, so the
+//!   same `tree-node --level L` invocation folds any level. Level 1 folds leaf
+//!   proofs (non-recursive children, `dummy_proof` padding); level >= 2 folds
+//!   level-(L-1) node proofs (recursive children, real-base-proof padding per
+//!   #289). Each level pins the level-(L-1) child verifying key, enforces
 //!   state-root continuity and **verifies** the produced parent proof.
-//! * [`Role::RootCoordinator`] — harvests the real root proof from the
-//!   transport, **verifies** it, and emits metrics derived from real proving
-//!   wall-time. It performs **no** L1 settlement: real settlement needs an
-//!   Ethereum signer/RPC + deployed verifier contract that are not wired here,
-//!   so it fails loudly rather than fabricating a dispatch.
+//! * [`Role::RootCoordinator`] — computes the root level dynamically from N,
+//!   harvests the real root proof from the transport, **verifies** it against
+//!   the level-`root_level` circuit's VK, and emits metrics derived from real
+//!   proving wall-time. It performs **no** L1 settlement: real settlement needs
+//!   an Ethereum signer/RPC + deployed verifier contract that are not wired
+//!   here, so it fails loudly rather than fabricating a dispatch.
 //!
-//! Single-level (leaf -> parent) aggregation is implemented end-to-end. Deeper
-//! homogeneous tree levels (parent-of-parents) are a follow-up: they require a
-//! second tree circuit pinned to the parent VK and are intentionally not faked
-//! here.
+//! Multi-level (dynamic-depth) aggregation is implemented end-to-end over the
+//! filesystem transport, using the same `HexadecimalTreeChainCircuit` family at
+//! every level so the verifying keys chain (a level-L node pins the level-(L-1)
+//! node's VK). The radix-2 single-level case is retained on the
+//! [`BinaryTreeChainCircuit`] path for exact #281 back-compat.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,7 +47,9 @@ use circuit::block_pre_execution_constraints::{BlockPreExecutionCircuit, Circuit
 use circuit::block_pre_execution::BlockPreExecWitness;
 use circuit::block_tx::{BlockTx, BlockTxWitness};
 use circuit::block_tx_constraints::{BlockTxCircuit, Circuit as _};
-use circuit::hexadecimal_tree_chain_constraints::HexadecimalTreeChainCircuit;
+use circuit::hexadecimal_tree_chain_constraints::{
+    HexadecimalTreeChainCircuit, HexadecimalTreeChainTarget, RADIX as HEX_RADIX,
+};
 use circuit::recursion::batch::{Batch, BatchTarget, BatchTargetWitness};
 use circuit::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
 use plonky2::iop::witness::{PartialWitness, Witness};
@@ -76,7 +83,14 @@ pub enum Role {
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
     },
-    /// Fold child leaf/parent proofs at level L-1 into a level-L parent proof.
+    /// Fold child proofs at level L-1 into a level-L parent proof.
+    ///
+    /// At level 1 the children are level-0 leaf proofs; at level L>=2 they are
+    /// level-(L-1) node proofs. The fold uses the radix-16 reduction-tree
+    /// circuit pinned to the level-(L-1) child VK, padding under-full nodes per
+    /// the #289 API (`dummy_proof` at level 1, a real recursive base proof at
+    /// level >= 2). `--leaf-count` is the total number of leaves N in the tree;
+    /// it determines per-level node counts and the overall depth.
     TreeNode {
         #[arg(long)]
         level: usize,
@@ -84,6 +98,10 @@ pub enum Role {
         node_idx: usize,
         #[arg(long, default_value_t = 2)]
         radix: usize,
+        /// Total number of level-0 leaf proofs (N) feeding the tree. Decoupled
+        /// from `radix` (fan-in) so N can exceed radix and span multiple levels.
+        #[arg(long, default_value_t = 2)]
+        leaf_count: usize,
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
     },
@@ -93,11 +111,72 @@ pub enum Role {
         block_number: u64,
         #[arg(long, default_value_t = 2)]
         radix: usize,
-        #[arg(long, default_value_t = 1)]
+        /// Total number of level-0 leaf proofs (N). The root level is computed
+        /// dynamically as `ceil(log_radix(N))` rather than hardcoded.
+        #[arg(long, default_value_t = 2)]
+        leaf_count: usize,
+        #[arg(long, default_value_t = 0)]
         node_idx: usize,
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
     },
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Dynamic tree geometry
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Depth of the reduction tree needed to aggregate `n` leaves with the given
+/// `radix` fan-in: `ceil(log_radix(n))`, i.e. the number of node levels above
+/// the leaves. A single leaf needs no folding (depth 0); `n <= radix` needs a
+/// single level (depth 1); `radix < n <= radix^2` needs two levels, and so on.
+///
+/// Computed iteratively to avoid floating-point rounding hazards near exact
+/// powers of the radix (e.g. `log_2(8)` must yield exactly 3).
+fn tree_depth(n: usize, radix: usize) -> usize {
+    assert!(radix >= 2, "radix must be >= 2");
+    if n <= 1 {
+        return 0;
+    }
+    let mut depth = 0usize;
+    let mut span = 1usize; // radix^depth
+    while span < n {
+        span = span.saturating_mul(radix);
+        depth += 1;
+    }
+    depth
+}
+
+/// Number of nodes at `level` (>= 1) in a `radix`-ary reduction tree over `n`
+/// leaves: `ceil(n / radix^level)`. Level 1 folds the N leaves into
+/// `ceil(N/radix)` nodes; level 2 folds those into `ceil(N/radix^2)`, etc. The
+/// final (root) level always has exactly one node.
+fn nodes_at_level(n: usize, radix: usize, level: usize) -> usize {
+    assert!(level >= 1, "tree levels are 1-indexed");
+    assert!(radix >= 2, "radix must be >= 2");
+    let mut divisor = 1usize; // radix^level
+    for _ in 0..level {
+        divisor = divisor.saturating_mul(radix);
+    }
+    n.div_ceil(divisor).max(1)
+}
+
+/// Number of children that node `node_idx` at `level` actually has (the rest of
+/// its `radix` slots are padding). The child population at `level` is
+/// `nodes_at_level(n, radix, level - 1)` (with level-0 == the N leaves); this
+/// node owns the contiguous slice `[node_idx*radix, (node_idx+1)*radix)` of
+/// that population, clamped to the real count.
+fn real_children_for_node(n: usize, radix: usize, level: usize, node_idx: usize) -> usize {
+    let children_population = if level == 1 {
+        n
+    } else {
+        nodes_at_level(n, radix, level - 1)
+    };
+    let first = node_idx * radix;
+    if first >= children_population {
+        return 0;
+    }
+    (children_population - first).min(radix)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -390,60 +469,227 @@ fn load_or_prove_leaf(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Tree aggregation: real fold via the #281-fixed reduction-tree circuit
+// Tree aggregation: dynamic-depth fold via the #281/#289 reduction-tree circuit
+//
+// Multi-level aggregation requires the SAME circuit family at every level so the
+// verifying keys chain: a level-L node pins the level-(L-1) node's VK via
+// `constant_verifier_data`. Only `HexadecimalTreeChainCircuit` exposes the
+// recursive-base-proof padding API (`padding_proof: Some(..)`, validated in
+// #289) that level>=2 folding requires, so the multi-level engine uses it for
+// ALL levels. The CLI `--radix` controls *fan-in* (how many children each node
+// reads from the transport); the circuit itself is always RADIX-shaped, with
+// under-full nodes padded. radix=2 => depth = ceil(log2(N)).
+//
+// The radix-2 single-level (`BinaryTreeChainCircuit`) path is retained as the
+// exact-back-compat depth==1, radix==2 special case so #281 behaviour does not
+// regress.
 // ─────────────────────────────────────────────────────────────────────────
 
-/// Fold `radix` child leaf proofs (level 1 over leaves) into a real parent proof.
+/// A built reduction-tree node circuit plus the child circuit data its children
+/// are pinned to (needed both to pin the VK and to mint recursive base padding).
+struct NodeCircuit {
+    target: HexadecimalTreeChainTarget<D>,
+    data: CircuitData<F, C, D>,
+    /// The child circuit's data (level-(L-1) node, or the leaf at level 1).
+    child_data: CircuitData<F, C, D>,
+    /// `true` when the child is itself a recursive tree node (level >= 2), so
+    /// padding must use a real base proof rather than `dummy_proof`.
+    child_is_recursive: bool,
+}
+
+/// Build the level-`level` reduction-tree node circuit. The circuit at level L
+/// is a `HexadecimalTreeChainCircuit` pinned to the level-(L-1) circuit's VK.
 ///
-/// Uses the new #281 reduction-tree API: `define(config, &child_circuit_data)`
-/// pins the child VK via `constant_verifier_data`, and the static `prove(...)`
-/// verifies each child, enforces state-root continuity, folds the children's
-/// `Batch`es and **verifies** the produced parent proof internally.
-fn aggregate_level1(
+/// Built bottom-up and deterministically from the leaf circuit definition, so
+/// the VK at every level is identical across the `TreeNode` and
+/// `RootCoordinator` roles (both reconstruct the same chain of circuits). This
+/// is essential: a level-L node proof written by one process must verify against
+/// the level-L circuit rebuilt by another.
+///
+/// `level == 0` is the (non-recursive) leaf circuit itself, used as the base of
+/// the recursion; callers fold at `level >= 1`.
+fn build_node_circuit_for_level(level: usize) -> NodeCircuit {
+    assert!(level >= 1, "tree node circuits exist at level >= 1");
+
+    // Recurse to obtain the child circuit data. At level 1 the child is the
+    // non-recursive leaf; at level L the child is the level-(L-1) node.
+    let (child_data, child_is_recursive) = if level == 1 {
+        let (leaf_data, _t) = build_batch_leaf_data();
+        (leaf_data, false)
+    } else {
+        let child = build_node_circuit_for_level(level - 1);
+        (child.data, true)
+    };
+
+    let circuit = HexadecimalTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
+    let target = circuit.target;
+    let data = circuit.builder.build::<C>();
+    NodeCircuit {
+        target,
+        data,
+        child_data,
+        child_is_recursive,
+    }
+}
+
+/// Mint a real, satisfiable base proof of the level-`level` node circuit, usable
+/// as recursive padding for a level-(`level`+1) node (see the #289 doc comment).
+///
+/// The base proof's public inputs are irrelevant (padding slots fold with
+/// `cond = false`); it only has to *verify* against the pinned child VK. It is
+/// minted recursively, bottoming out at the leaf where `dummy_proof` works:
+///   * level-1 base: a single trivial leaf child, remaining slots dummy-padded.
+///   * level-L base: a single level-(L-1) base child, remaining slots padded
+///     with a level-(L-1) base proof.
+fn mint_base_proof_for_level(level: usize, timing: &mut TimingTree) -> ProofWithPublicInputs<F, C, D> {
+    assert!(level >= 1, "base proofs are minted at level >= 1");
+    timing.push("mint_recursive_base_proof", Level::Debug);
+    let node = build_node_circuit_for_level(level);
+
+    let proof = if !node.child_is_recursive {
+        // Level-1 base: one trivial leaf child; remaining slots dummy-padded.
+        let leaf_batch = Batch::<F> {
+            end_block_number: 1,
+            batch_size: 1,
+            ..Batch::<F>::default()
+        };
+        let leaf_proof = prove_batch_leaf(&leaf_batch);
+        HexadecimalTreeChainCircuit::prove(
+            &node.target,
+            &node.data,
+            &[leaf_proof],
+            &node.child_data,
+            None,
+        )
+        .expect("level-1 base proof must prove")
+    } else {
+        // Level-L base: one level-(L-1) base child; remaining slots padded with
+        // a level-(L-1) base proof (recursive padding all the way down).
+        let child_base = mint_base_proof_for_level(level - 1, timing);
+        HexadecimalTreeChainCircuit::prove(
+            &node.target,
+            &node.data,
+            &[child_base.clone()],
+            &node.child_data,
+            Some(&child_base),
+        )
+        .expect("level-L base proof must prove")
+    };
+    timing.pop();
+    proof
+}
+
+/// Read the real (non-padding) child proofs for node `node_idx` at `level` from
+/// the filesystem transport. Level-1 children are leaf proofs (`leaf_{i}.proof`);
+/// level-L children are level-(L-1) node proofs (`tree_L{L-1}_N{j}.proof`).
+fn read_children_for_node(
+    level: usize,
     node_idx: usize,
     radix: usize,
+    leaf_count: usize,
+) -> Vec<ProofWithPublicInputs<F, C, D>> {
+    let real = real_children_for_node(leaf_count, radix, level, node_idx);
+    let first = node_idx * radix;
+    (0..real)
+        .map(|c| {
+            let child_global_idx = first + c;
+            let path = if level == 1 {
+                leaf_proof_path(child_global_idx)
+            } else {
+                tree_proof_path(level - 1, child_global_idx)
+            };
+            read_proof(&path)
+        })
+        .collect()
+}
+
+/// Fold node `node_idx` at `level` over `leaf_count` total leaves with the given
+/// `radix` fan-in, producing a real, verified level-`level` parent proof.
+///
+/// Generalises the original single-level fold to arbitrary depth using the #289
+/// recursive-padding API. The radix-2, depth-1 case is delegated to the
+/// `BinaryTreeChainCircuit` path for exact #281 back-compat.
+fn aggregate_node(
+    level: usize,
+    node_idx: usize,
+    radix: usize,
+    leaf_count: usize,
     tx_per_proof: usize,
     timing: &mut TimingTree,
 ) -> ProofWithPublicInputs<F, C, D> {
-    // The children at level 0 are BatchTarget-shaped leaf proofs. Their VK is the
-    // leaf circuit's VK, which the tree circuit pins.
-    let (child_data, _child_target) = build_batch_leaf_data();
+    assert!(level >= 1, "tree levels are 1-indexed");
+    assert!(radix >= 2, "radix must be >= 2");
+    assert!(
+        radix <= HEX_RADIX,
+        "radix {radix} exceeds the reduction-tree node fan-in {HEX_RADIX}; \
+         a wider circuit would be required"
+    );
 
-    timing.push("recursive_tree_aggregation", Level::Info);
-    let parent = if radix == 16 {
-        let first = 16 * node_idx;
-        let child_proofs: Vec<ProofWithPublicInputs<F, C, D>> = (0..16)
-            .filter_map(|c| {
-                let idx = first + c;
-                let path = leaf_proof_path(idx);
-                path.exists().then(|| read_proof(&path))
-            })
-            .collect();
-        assert!(
-            !child_proofs.is_empty(),
-            "radix-16 TreeNode N{node_idx}: no child leaf proofs found in transport \
-             (expected leaf_{first}.proof ..)"
-        );
-        let circuit = HexadecimalTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
-        let target = circuit.target;
-        let data = circuit.builder.build::<C>();
-        // Level-1 children are non-recursive `BatchLeaf` proofs, so empty slots
-        // are padded with `dummy_proof` (padding_proof = None). For recursive
-        // children (level >= 2) the caller must instead supply a real base proof.
-        HexadecimalTreeChainCircuit::prove(&target, &data, &child_proofs, &child_data, None)
-            .expect("Radix-16 tree aggregation failed to prove")
-    } else {
+    let depth = tree_depth(leaf_count, radix);
+    assert!(
+        level <= depth.max(1),
+        "TreeNode level {level} exceeds tree depth {depth} for N={leaf_count}, radix={radix}; \
+         refusing to fold a non-existent level"
+    );
+    let node_count = nodes_at_level(leaf_count, radix, level);
+    assert!(
+        node_idx < node_count,
+        "TreeNode level {level} node {node_idx} out of range: only {node_count} node(s) \
+         exist at this level for N={leaf_count}, radix={radix}"
+    );
+
+    let _ = tx_per_proof; // child proofs already carry the proven batch state.
+
+    // Exact #281 back-compat: radix-2 single-level uses the binary circuit.
+    if radix == 2 && level == 1 && depth <= 1 {
+        let (child_data, _t) = build_batch_leaf_data();
+        timing.push("recursive_tree_aggregation", Level::Info);
         let left = read_proof(&leaf_proof_path(2 * node_idx));
         let right = read_proof(&leaf_proof_path(2 * node_idx + 1));
         let circuit = BinaryTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
         let target = circuit.target;
         let data = circuit.builder.build::<C>();
-        BinaryTreeChainCircuit::prove(&target, &data, &left, &right)
-            .expect("Radix-2 tree aggregation failed to prove")
+        let parent = BinaryTreeChainCircuit::prove(&target, &data, &left, &right)
+            .expect("Radix-2 tree aggregation failed to prove");
+        timing.pop();
+        return parent;
+    }
+
+    // General path (any radix, any level): build the level-`level` node circuit
+    // (pinned to the level-(L-1) child VK) and fold the real children, padding
+    // under-full nodes per the #289 API.
+    let node = build_node_circuit_for_level(level);
+    let child_proofs = read_children_for_node(level, node_idx, radix, leaf_count);
+    assert!(
+        !child_proofs.is_empty(),
+        "TreeNode level {level} node {node_idx}: no child proofs found in transport"
+    );
+
+    timing.push("recursive_tree_aggregation", Level::Info);
+    // Level-1 children are non-recursive leaf proofs => `dummy_proof` padding
+    // (None). Level >= 2 children are recursive node proofs => a real base proof
+    // is required ("generators weren't run" otherwise — see #289).
+    let parent = if node.child_is_recursive {
+        let base = mint_base_proof_for_level(level - 1, timing);
+        HexadecimalTreeChainCircuit::prove(
+            &node.target,
+            &node.data,
+            &child_proofs,
+            &node.child_data,
+            Some(&base),
+        )
+        .expect("level >= 2 tree aggregation failed to prove")
+    } else {
+        HexadecimalTreeChainCircuit::prove(
+            &node.target,
+            &node.data,
+            &child_proofs,
+            &node.child_data,
+            None,
+        )
+        .expect("level-1 tree aggregation failed to prove")
     };
     timing.pop();
-
-    let _ = tx_per_proof; // child proofs already carry the proven batch state.
     parent
 }
 
@@ -497,24 +743,22 @@ fn main() {
             level,
             node_idx,
             radix,
+            leaf_count,
             tx_per_proof,
         } => {
+            let depth = tree_depth(leaf_count, radix);
+            let node_count = nodes_at_level(leaf_count, radix, level);
             info!(
-                "Tree node: aggregating level {level} node {node_idx} (radix {radix}) \
+                "Tree node: aggregating level {level}/{depth} node {node_idx} \
+                 (radix {radix}, N={leaf_count}, {node_count} node(s) at this level) \
                  by folding child proofs read from {PROOF_DIR}/"
             );
 
-            if level != 1 {
-                eprintln!(
-                    "TreeNode level {level} is not implemented: only single-level \
-                     (leaf -> parent, level 1) aggregation is supported. Deeper \
-                     homogeneous levels require a tree circuit pinned to the parent \
-                     VK and are a tracked follow-up. Refusing to fake it."
-                );
-                std::process::exit(2);
-            }
-
-            let parent = aggregate_level1(node_idx, radix, tx_per_proof, &mut timing);
+            // `aggregate_node` refuses genuinely-unimplementable cases (level
+            // beyond the tree depth, node out of range, radix > circuit fan-in)
+            // with a clear panic message — no silent `exit(2)` cap on level != 1.
+            let parent =
+                aggregate_node(level, node_idx, radix, leaf_count, tx_per_proof, &mut timing);
             let path = tree_proof_path(level, node_idx);
             write_proof(&path, &parent);
             let digest = proof_digest(&parent);
@@ -524,7 +768,10 @@ fn main() {
                 "span_id": format!("tree_L{level}_N{node_idx}"),
                 "transport": "filesystem",
                 "radix": radix,
+                "leaf_count": leaf_count,
+                "tree_depth": depth,
                 "reduction_level": level,
+                "nodes_at_level": node_count,
                 "proof_path": path.display().to_string(),
                 "proof_digest_sha256_8": digest,
                 "num_public_inputs": parent.public_inputs.len(),
@@ -542,40 +789,51 @@ fn main() {
         Role::RootCoordinator {
             block_number,
             radix,
+            leaf_count,
             node_idx,
             tx_per_proof,
         } => {
+            // Root level is computed DYNAMICALLY from the actual leaf count N,
+            // not hardcoded to 1. depth = ceil(log_radix(N)); the root is the
+            // single node at that top level.
+            let root_level = tree_depth(leaf_count, radix).max(1);
             info!(
                 "Root coordinator: harvesting root proof for block #{block_number} \
-                 (radix {radix}) from {PROOF_DIR}/"
+                 (radix {radix}, N={leaf_count}, root_level={root_level}) from {PROOF_DIR}/"
             );
 
-            // Single-level pipeline: the root proof is the level-1 parent.
-            let root_level = 1;
             let root_path = tree_proof_path(root_level, node_idx);
             if !root_path.exists() {
                 eprintln!(
-                    "Root proof {} not found. Run the leaf workers and tree node first; \
-                     refusing to fabricate a root proof or settlement.",
+                    "Root proof {} not found (expected the single level-{root_level} node \
+                     for N={leaf_count}, radix={radix}). Run the leaf workers and all \
+                     {root_level} tree level(s) first; refusing to fabricate a root proof \
+                     or settlement.",
                     root_path.display()
                 );
                 std::process::exit(1);
             }
             let root_proof = read_proof(&root_path);
 
-            // Verify the root proof against the tree circuit's VK.
-            let (child_data, _t) = build_batch_leaf_data();
-            let root_data: CircuitData<F, C, D> = if radix == 16 {
-                let circuit = HexadecimalTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
-                circuit.builder.build::<C>()
-            } else {
-                let circuit = BinaryTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
-                circuit.builder.build::<C>()
-            };
+            // Verify the root proof against the level-`root_level` circuit's VK.
+            // For radix-2 depth-1 the binary circuit was used (back-compat); for
+            // every other shape the dynamic-depth Hex node circuit chain is
+            // rebuilt deterministically to the same VK that produced the proof.
             let verify_start = Instant::now();
-            root_data
-                .verify(root_proof.clone())
-                .expect("Root proof failed cryptographic verification");
+            if radix == 2 && root_level == 1 {
+                let (child_data, _t) = build_batch_leaf_data();
+                let circuit = BinaryTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
+                let root_data = circuit.builder.build::<C>();
+                root_data
+                    .verify(root_proof.clone())
+                    .expect("Root proof failed cryptographic verification");
+            } else {
+                let root_node = build_node_circuit_for_level(root_level);
+                root_node
+                    .data
+                    .verify(root_proof.clone())
+                    .expect("Root proof failed cryptographic verification");
+            }
             let verify_ms = verify_start.elapsed().as_millis();
             let digest = proof_digest(&root_proof);
 
@@ -594,6 +852,8 @@ fn main() {
                 "span_id": format!("root_block_{block_number}"),
                 "transport": "filesystem",
                 "radix": radix,
+                "leaf_count": leaf_count,
+                "root_level": root_level,
                 "proof_path": root_path.display().to_string(),
                 "proof_digest_sha256_8": digest,
                 "verification_time_ms": verify_ms,
@@ -626,6 +886,71 @@ fn main() {
 mod tests {
     use super::*;
     use plonky2::util::timing::TimingTree;
+
+    // ── Dynamic tree-geometry helpers (pure, no proving) ──
+
+    #[test]
+    fn test_tree_depth_radix2() {
+        // depth = ceil(log2(N))
+        assert_eq!(tree_depth(1, 2), 0);
+        assert_eq!(tree_depth(2, 2), 1);
+        assert_eq!(tree_depth(3, 2), 2);
+        assert_eq!(tree_depth(4, 2), 2);
+        assert_eq!(tree_depth(5, 2), 3);
+        assert_eq!(tree_depth(8, 2), 3); // exact power must not overshoot
+        assert_eq!(tree_depth(9, 2), 4);
+        assert_eq!(tree_depth(16, 2), 4);
+    }
+
+    #[test]
+    fn test_tree_depth_radix16() {
+        assert_eq!(tree_depth(1, 16), 0);
+        assert_eq!(tree_depth(16, 16), 1);
+        assert_eq!(tree_depth(17, 16), 2);
+        assert_eq!(tree_depth(256, 16), 2); // exact 16^2
+        assert_eq!(tree_depth(257, 16), 3);
+    }
+
+    #[test]
+    fn test_nodes_at_level_radix2_n4() {
+        // N=4, radix=2 => depth 2: level 1 has 2 nodes, level 2 (root) has 1.
+        assert_eq!(nodes_at_level(4, 2, 1), 2);
+        assert_eq!(nodes_at_level(4, 2, 2), 1);
+    }
+
+    #[test]
+    fn test_nodes_at_level_radix2_n8() {
+        // N=8, radix=2 => depth 3: levels have 4, 2, 1 nodes.
+        assert_eq!(nodes_at_level(8, 2, 1), 4);
+        assert_eq!(nodes_at_level(8, 2, 2), 2);
+        assert_eq!(nodes_at_level(8, 2, 3), 1);
+    }
+
+    #[test]
+    fn test_nodes_at_level_radix2_n5_underfull() {
+        // N=5, radix=2 => depth 3: level 1 ceil(5/2)=3, level 2 ceil(5/4)=2, root 1.
+        assert_eq!(tree_depth(5, 2), 3);
+        assert_eq!(nodes_at_level(5, 2, 1), 3);
+        assert_eq!(nodes_at_level(5, 2, 2), 2);
+        assert_eq!(nodes_at_level(5, 2, 3), 1);
+    }
+
+    #[test]
+    fn test_real_children_for_node() {
+        // N=4, radix=2, level 1: node 0 -> leaves {0,1}, node 1 -> leaves {2,3}.
+        assert_eq!(real_children_for_node(4, 2, 1, 0), 2);
+        assert_eq!(real_children_for_node(4, 2, 1, 1), 2);
+        // N=4, radix=2, level 2 (root): one node folding the 2 level-1 nodes.
+        assert_eq!(real_children_for_node(4, 2, 2, 0), 2);
+        // N=5, radix=2, level 1: nodes 0,1 full (2 each), node 2 under-full (1).
+        assert_eq!(real_children_for_node(5, 2, 1, 0), 2);
+        assert_eq!(real_children_for_node(5, 2, 1, 1), 2);
+        assert_eq!(real_children_for_node(5, 2, 1, 2), 1);
+        // N=5, radix=2, level 2: children population = nodes_at_level(5,2,1)=3,
+        // so node 0 folds 2, node 1 folds the leftover 1.
+        assert_eq!(real_children_for_node(5, 2, 2, 0), 2);
+        assert_eq!(real_children_for_node(5, 2, 2, 1), 1);
+    }
 
     // The original sequential implementation for reference
     fn prove_leaf_batch_sequential(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTree) -> Batch<F> {
