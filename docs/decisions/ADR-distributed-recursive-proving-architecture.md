@@ -154,6 +154,16 @@ tuning knob rather than a deployment-time constant.
 
 ### 6. Claim guard — empirically settled (pilot data)
 
+> **CORRECTION (see "Amendment (real prove-time measurement)" below).** The
+> "heavy-tailed" and "irreducible by threshold tuning" framing in this section
+> came from a **simulation**, not a measurement. A later pilot measured the
+> **real circuits** and found them **tight** (CV 0.13–0.25), *not* heavy-tailed.
+> The conclusion of this section — *the idempotent-output guard is mandatory* —
+> **still holds**, but the *reason* changes: the guard is justified by
+> **operational** tail (Spot preemption + noisy-neighbour contention), not by
+> a **circuit-inherent** tail. The original simulated reasoning is retained
+> below for traceability; read it together with the Amendment.
+
 A pilot simulated a queue-plus-worker system under realistic, heavy-tailed prove
 durations (noisy-neighbour Spot behaviour). Results:
 
@@ -168,13 +178,19 @@ durations (noisy-neighbour Spot behaviour). Results:
   asymptotes toward zero but never reaches it, and chasing zero costs ~5-minute
   recovery latency. Concurrent double-writes *will* happen; the idempotent write
   is what prevents torn or corrupt outputs.
+  *[CORRECTED: the real circuits are tight, so on dedicated hardware
+  double-execution is **not** irreducible — threshold tuning alone would keep it
+  rare. The guard remains mandatory for the **operational** tail instead; see
+  the Amendment.]*
 - **Use the GCS native API `ifGenerationMatch=0`** for the atomic write —
   verified to elect exactly one winner (12 racers → 1 success, 11 precondition-
   failed). Do **not** rely on GCS-Fuse `O_EXCL`; Fuse atomicity is unverified.
 - **Set `ack_deadline ≈ 2×P99`** (the sweet spot: ~0.1% double-exec on heavy
   tails, zero for tight or bimodal distributions, ~50 s recovery). **Extend the
   deadline while proving, and ack only after the result is durably committed —
-  never ack on pull.**
+  never ack on pull.** *[UPDATED: real per-circuit `ack_deadline` values
+  (from real 2×P99) are now recorded in the Amendment — leaf/pre-exec ≈ 8 s,
+  radix-2 fold ≈ 6 s, radix-16 fold ≈ 30 s — and are hardware-dependent.]*
 
 ### 7. Autoscaling / capacity
 
@@ -188,6 +204,15 @@ time`, and on SIGTERM a pod finishes its in-flight prove and then acks, so
 scale-down or preemption never kills a mid-prove pod. Note that backlog
 underestimates the **narrow aggregation tail** (few parallel fold tasks exist at
 the upper levels), so **do not scale to zero before the root proof exists.**
+
+> **UPDATED (see Amendment).** "max prove time" can now be grounded in real
+> data: on the measured 32-core EPYC bare-metal host, max observed prove times
+> were ≈ 4.4 s (leaf, contended), ≈ 2.7 s (pre-exec), ≈ 2.2 s (radix-2 fold)
+> and ≈ 12.6 s (radix-16 fold). These are **hardware-dependent** — slower cloud
+> instances scale proportionally, so set `terminationGracePeriodSeconds` from
+> the *target* instance type, not these EPYC figures. The real peak-RSS figures
+> (radix-2 fold ≈ 0.31 GB, radix-16 fold ≈ 2.2 GB) are also recorded in the
+> Amendment for bin-packing the fungible pool.
 
 The block volumetric remains a free, forgiving knob **only if all four
 invariants hold**: (1) fungible pods, (2) pull-based work-stealing, (3)
@@ -214,13 +239,98 @@ than a fixed pod-count assumption.
   means some committed capacity is always paid for; this is the deliberate cost
   of bounded latency and root-completion safety.
 
+## Amendment (real prove-time measurement)
+
+- Status of amendment: empirical update — corrects the *rationale* in §6/§7,
+  not the *decisions*.
+- Date: 2026-06-27
+- Supersedes: the **simulated** "heavy-tailed / irreducible" framing in §6.
+
+The §6 claim-guard reasoning was built on a **simulation** that assumed
+heavy-tailed prove durations. A subsequent pilot measured the **real circuits**
+and found the **opposite shape**: the actual prove-time distributions are
+**tight**, not heavy-tailed. This amendment records the real data and corrects
+the rationale **without** changing the conclusion — the idempotent-output guard
+**remains mandatory**, but for a different reason.
+
+### Real measured prove-time distribution
+
+Hardware/build: **AMD EPYC 7B13, 32-core, x86_64, bare metal, release build.**
+These numbers are **hardware-dependent** — they characterize a fast, dedicated
+32-core host and must be re-derived per target instance type.
+
+| Stage | Circuit | Sample | P50 | P90 | P99 / max | CV | Shape |
+|---|---|---|---|---|---|---|---|
+| Leaf prove (isolated) | `BlockTxCircuit::prove`, `tx_per_proof=1` | clean per-worker, N=30 | 1.91 s | 2.16 s | P99 ≈ 3.26 s (max-proxy at small N); min 1.21 s, mean 1.87 s | **0.22** | **TIGHT** |
+| Leaf prove (bench, pipelined) | same | N=500, contended w/ concurrent chain prover | 0.89 s | 2.74 s | P99 3.42 s, max 4.43 s | **0.60** | wider tail = **contention artifact**, not circuit-inherent |
+| Pre-execution prove | `BlockPreExecutionCircuit::prove`, each leaf-worker runs once | — | 1.71 s | — | max 2.74 s | **0.25** | tight |
+| Fold radix-2 | `BinaryTreeChainCircuit`, 2 children | N=8 (directional) | 2.03 s | — | max 2.23 s | **0.13** | very tight; peak RSS ≈ 0.31 GB |
+| Fold radix-16 | `HexadecimalTreeChainCircuit`, 16 children | N=8 (directional) | 7.47 s | — | max 12.57 s, mean 9.0 s | **0.22** | tight, **mildly bimodal** (~7 s vs ~12 s clusters); ≈ 3× the cost of 2× the leaves vs radix-2; peak RSS ≈ 2.2 GB |
+
+Notes:
+
+- **Witness-gen is negligible (~1 ms)**; leaf time ≈ pure STARK prove.
+- The only fat tail observed (leaf, CV=0.60) appears **only under host
+  contention** (concurrent chain prover on the same box) — it is an operational
+  artifact, not a property of the circuit. A multi-tenant worker host behaves
+  more like this contended view than like the clean isolated view.
+
+### Corrected rationale for the claim guard
+
+1. **The original "irreducible by threshold tuning" claim does NOT transfer to
+   the real circuit on dedicated hardware.** It was a property of the *simulated*
+   heavy-tailed distribution. The real circuits are tight (CV 0.13–0.25, with
+   max/P50 ≈ 1.1–1.7×) and have **no fat tail**. On dedicated hardware, setting
+   `ack_deadline` from real P99 would keep duplicate executions **rare** —
+   threshold tuning alone is effective, so the "irreducible" framing is wrong for
+   this regime.
+2. **The idempotent-output guard nevertheless REMAINS MANDATORY — now justified
+   by OPERATIONAL tail, not circuit-inherent tail:**
+   - **(i) Spot preemption + noisy-neighbour variance.** This bare-metal run
+     cannot capture real cloud Spot behaviour; real Spot would be **more**
+     heavy-tailed, not less.
+   - **(ii) Contention is real.** The contended bench view already shows host
+     concurrency stretching the leaf tail to **CV=0.60 / max÷P50 ≈ 5×**. A
+     multi-tenant worker host behaves like that contended view.
+   - **(iii) radix-16 mild bimodality** (~7 s vs ~12 s clusters) hints the tail
+     is **not perfectly stable**.
+   - The guard therefore stays as **cheap correctness insurance** for the
+     Spot-induced + contention tail — the conclusion of §6 is unchanged.
+
+### Real `ack_deadline` recommendations (from real 2×P99)
+
+Derived as **2×P99** on the measured host. **Hardware-dependent** — re-derive
+per target instance type; slower cloud instances scale proportionally.
+
+| Worker role | Recommended `ack_deadline` |
+|---|---|
+| Leaf prover + pre-exec workers | ≈ **8 s** |
+| radix-2 fold | ≈ **6 s** |
+| radix-16 fold | ≈ **30 s** |
+
+### Confidence
+
+- **HIGH** — "tight on dedicated hardware" (well-sampled leaf/pre-exec, clear CVs).
+- **MEDIUM** — extrapolating to Spot: a single bare-metal machine with **no real
+  preemption variance**, and the fold samples are only **N=8 (directional)**.
+- This dedicated-hardware measurement **partially closes** open item (a)
+  (real-Spot prove-time P99) but does **not fully close** it; a real-Spot
+  measurement is still pending.
+
 ## Open items
 
 These are explicitly **not yet resolved**:
 
-- **(a) Real prove-time P99 on Spot.** `ack_deadline = 2×P99` is currently
-  derived from *simulated* distributions. A measurement spike for real leaf and
-  fold P99 on Spot is in progress and is required to finalize the deadline.
+- **(a) Real prove-time P99 on Spot.** *Partially closed* — see "Amendment
+  (real prove-time measurement)". `ack_deadline = 2×P99` was originally derived
+  from *simulated* distributions; the Amendment records the **real** prove-time
+  distribution measured on **dedicated bare-metal hardware** (32-core EPYC),
+  which is tight (CV 0.13–0.25). This closes the *dedicated-hardware* half of
+  the question. It does **not** close the **real-Spot** half: this run had no
+  real preemption or sustained noisy-neighbour variance, and the fold samples
+  are small (N=8, directional only). A real-Spot prove-time/P99 measurement is
+  therefore **still pending** before the Spot-targeted `ack_deadline` and burst
+  policy are finalized.
 - **(b) Cryptographer review** of: spans-of-spans continuity completeness at
   level ≥ 2; the heterogeneous-VK (Option A) vs cyclic-tree (Option B) choice;
   and dummy/base-proof padding soundness at interior levels. These are the three
