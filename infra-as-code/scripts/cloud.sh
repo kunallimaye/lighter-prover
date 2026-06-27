@@ -964,9 +964,9 @@ case "${1:-}" in
   cloud-admin-undo)              cloud_admin_undo ;;
   cloud-bench-run)               shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" "${4:-default}" "${5:-}" ;;
   cloud-run-distributed-cluster) cloud_run_distributed_cluster ;;
-  cloud-gke-provision)           cloud_gke_provision ;;
-  cloud-gke-bench)               cloud_gke_bench ;;
-  cloud-gke-destroy)             cloud_gke_destroy ;;
+  cloud-gke-provision)           shift; cloud_gke_provision "$@" ;;
+  cloud-gke-bench)               shift; cloud_gke_bench "$@" ;;
+  cloud-gke-destroy)             shift; cloud_gke_destroy "$@" ;;
   cloud-test-t2d-hypothesis)     cloud_test_t2d_hypothesis ;;
   cloud-test-gke-performance-tax) cloud_test_gke_performance_tax ;;
   cloud-test-capstone-matrix)    cloud_test_capstone_matrix ;;
