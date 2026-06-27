@@ -23,6 +23,7 @@ CHUNK ?= 1
 BLOCKS ?= 2
 ENGINE ?= gke
 ARCH ?= c3d
+RADIX ?= 16
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)"
 
