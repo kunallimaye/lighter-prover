@@ -5,6 +5,7 @@
 # Instantiates identical benchmark proving units across ARM Axion (c4a) and AMD Milan (t2d).
 
 module "control_c4a_pod" {
+  count                = var.enable_hypothesis_fleet ? 1 : 0
   source               = "./modules/proving_pod_node_pool"
   orchestration_engine = "mig"
   region               = var.runtime_region != "" ? var.runtime_region : var.region
@@ -19,6 +20,7 @@ module "control_c4a_pod" {
 }
 
 module "hypothesis_t2d_pod" {
+  count                = var.enable_hypothesis_fleet ? 1 : 0
   source               = "./modules/proving_pod_node_pool"
   orchestration_engine = "mig"
   region               = var.runtime_region != "" ? var.runtime_region : var.region

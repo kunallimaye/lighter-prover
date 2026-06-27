@@ -142,3 +142,15 @@ variable "vms" {
   }))
   default = {}
 }
+
+variable "enable_static_vms" {
+  description = "Enable provisioning of static GCE VMs defined in var.vms"
+  type        = bool
+  default     = false
+}
+
+variable "enable_hypothesis_fleet" {
+  description = "Enable provisioning of the Phase 4 A/B hypothesis fleet (MIGs)"
+  type        = bool
+  default     = false
+}
