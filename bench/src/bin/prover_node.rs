@@ -488,6 +488,7 @@ fn main() {
                 digest,
                 start.elapsed()
             );
+            timing.print();
         }
         Role::TreeNode {
             level,
@@ -533,6 +534,7 @@ fn main() {
                  ({digest}) in {:?}",
                 start.elapsed()
             );
+            timing.print();
         }
         Role::RootCoordinator {
             block_number,
@@ -607,6 +609,8 @@ fn main() {
             );
 
             let _ = tx_per_proof;
+
+            timing.print();
 
             // No fabricated bench_summary.json: metrics here describe only the
             // harvest+verify performed in THIS run, not a fake end-to-end TPS.
