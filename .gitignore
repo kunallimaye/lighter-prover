@@ -58,3 +58,13 @@ __pycache__/
 # was a foreign-arch Mach-O arm64 binary that broke stream-bench on
 # Linux x86_64 with Exec format error.
 /bench/bench
+
+# Rendered K8s deployment artifacts (#295) — generated at deploy time by
+# infra-as-code/scripts/render_pod_spec.py from config.toml. Per-level tree
+# Jobs, leaf/root manifests, and the tree.plan.env (cross-level gating geometry)
+# are build outputs, never committed.
+infra-as-code/kubernetes/*-leaf.rendered.yaml
+infra-as-code/kubernetes/*-tree.rendered.yaml
+infra-as-code/kubernetes/*-tree-l*.rendered.yaml
+infra-as-code/kubernetes/*-tree-root.rendered.yaml
+infra-as-code/kubernetes/*-tree.plan.env
