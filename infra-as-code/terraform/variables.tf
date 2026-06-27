@@ -154,3 +154,9 @@ variable "enable_hypothesis_fleet" {
   type        = bool
   default     = false
 }
+
+variable "enable_shared_resources" {
+  description = "Enable provisioning of shared resources (Artifact Registry, IAM)"
+  type        = bool
+  default     = true
+}

@@ -27,6 +27,7 @@
 # build_region rather than introduce a separate runtime_ar_region.
 
 resource "google_artifact_registry_repository" "bench" {
+  count         = var.enable_shared_resources ? 1 : 0
   provider      = google.build
   project       = var.build_project_id
   location      = var.ar_region != "" ? var.ar_region : var.build_region
@@ -52,10 +53,11 @@ resource "google_artifact_registry_repository" "bench" {
 # SA (admin-cloud-init flow) bind the right identity.
 
 resource "google_artifact_registry_repository_iam_member" "builder_writer" {
+  count      = var.enable_shared_resources ? 1 : 0
   provider   = google.build
   project    = var.build_project_id
-  location   = google_artifact_registry_repository.bench.location
-  repository = google_artifact_registry_repository.bench.repository_id
+  location   = var.ar_region != "" ? var.ar_region : var.build_region
+  repository = var.ar_repo
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${var.builder_sa_email}"
 }
@@ -68,11 +70,11 @@ resource "google_artifact_registry_repository_iam_member" "builder_writer" {
 # access via the AR repo's project-level discovery.
 
 resource "google_artifact_registry_repository_iam_member" "runtime_reader" {
-  count      = var.runtime_sa_email == "" ? 0 : 1
+  count      = (var.enable_shared_resources && var.runtime_sa_email != "") ? 1 : 0
   provider   = google.build
   project    = var.build_project_id
-  location   = google_artifact_registry_repository.bench.location
-  repository = google_artifact_registry_repository.bench.repository_id
+  location   = var.ar_region != "" ? var.ar_region : var.build_region
+  repository = var.ar_repo
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${var.runtime_sa_email}"
 }
