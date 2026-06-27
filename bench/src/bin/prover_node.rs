@@ -427,7 +427,10 @@ fn aggregate_level1(
         let circuit = HexadecimalTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
         let target = circuit.target;
         let data = circuit.builder.build::<C>();
-        HexadecimalTreeChainCircuit::prove(&target, &data, &child_proofs, &child_data)
+        // Level-1 children are non-recursive `BatchLeaf` proofs, so empty slots
+        // are padded with `dummy_proof` (padding_proof = None). For recursive
+        // children (level >= 2) the caller must instead supply a real base proof.
+        HexadecimalTreeChainCircuit::prove(&target, &data, &child_proofs, &child_data, None)
             .expect("Radix-16 tree aggregation failed to prove")
     } else {
         let left = read_proof(&leaf_proof_path(2 * node_idx));
