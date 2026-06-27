@@ -106,6 +106,11 @@ def main():
     elif not runtime_email and target_sas:
       runtime_email = build_email
 
+    vms_data = data.get('vms', {})
+    has_vms = False
+    if isinstance(vms_data, dict):
+      has_vms = len([k for k in vms_data.keys() if k != 'default']) > 0
+
     cleaned = {
         'build_project_id': project,
         'runtime_project_id': project,
@@ -124,6 +129,8 @@ def main():
         'builder_sa_email': build_email,
         'runtime_sa_email': runtime_email,
         'build_machine_type': build_machine,
+        'orchestration_engine': data.get('proving_pod', {}).get('defaults', {}).get('engine', 'gke'),
+        'enable_static_vms': has_vms,
     }
     print(json.dumps(cleaned))
 

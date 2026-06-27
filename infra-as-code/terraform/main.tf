@@ -121,3 +121,8 @@ resource "google_compute_instance" "prover_vms" {
     managed = "terraform"
   }
 }
+
+import {
+  to = google_artifact_registry_repository.bench[0]
+  id = "projects/kunal-scratch/locations/us-east4/repositories/lighter-prover-iac"
+}

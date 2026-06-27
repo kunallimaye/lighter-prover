@@ -17,9 +17,9 @@ terraform {
 # PARADIGM 1: GKE Standard Spot Node Pools (ENGINE == "gke")
 # ═══════════════════════════════════════════════════════════════════════════
 
-resource "google_container_node_pool" "leaf_worker_pool" {
+resource "google_container_node_pool" "proving_pool" {
   count    = var.orchestration_engine == "gke" ? 1 : 0
-  name     = "lighter-leaf-${var.silicon_arch}"
+  name     = "lighter-proving-${var.silicon_arch}"
   cluster  = var.cluster_id
   location = var.zone
 
@@ -29,7 +29,7 @@ resource "google_container_node_pool" "leaf_worker_pool" {
 
   autoscaling {
     min_node_count = 0
-    max_node_count = 120
+    max_node_count = 50
   }
 
   management {
@@ -61,7 +61,6 @@ resource "google_container_node_pool" "leaf_worker_pool" {
     }
 
     labels = {
-      role         = "leaf-worker"
       silicon-arch = var.silicon_arch
     }
 
@@ -73,40 +72,6 @@ resource "google_container_node_pool" "leaf_worker_pool" {
   }
 }
 
-resource "google_container_node_pool" "aggregator_pool" {
-  count    = var.orchestration_engine == "gke" ? 1 : 0
-  name     = "lighter-agg-${var.silicon_arch}"
-  cluster  = var.cluster_id
-  location = var.zone
-
-  # Start with 1 node to avoid GKE provisioning-time stockouts.
-  # The GKE Autoscaler will scale up to meet pod demand.
-  initial_node_count = 1
-
-  autoscaling {
-    min_node_count = 0
-    max_node_count = 40
-  }
-
-  node_config {
-    preemptible  = true
-    machine_type = var.agg_machine_type
-    disk_type    = var.agg_disk_type
-    disk_size_gb = var.agg_disk_size_gb
-
-    service_account = var.service_account
-    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
-
-    workload_metadata_config {
-      mode = "GKE_METADATA"
-    }
-
-    labels = {
-      role         = "tree-node"
-      silicon-arch = var.silicon_arch
-    }
-  }
-}
 
 # ═══════════════════════════════════════════════════════════════════════════
 # FUNGIBLE POOL: baseload (committed) + burst (Spot) node pools (issue #302)

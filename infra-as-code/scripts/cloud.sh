@@ -468,6 +468,8 @@ cloud_bench_run() {
     fi
   fi
 
+  local image_tag_only="${image_uri##*:}"
+
   _log_info "Executing remote ZKP proving benchmark on instance '${target_vm}' (${zone}, jobs=${jobs}, tx_per_proof=${tx_per_proof})..."
   _log_info "  Target VM:      ${target_vm} (${zone})"
   _log_info "  Container:      ${image_uri}"
@@ -529,7 +531,7 @@ cloud_bench_run() {
         ts=\$(date +%Y%m%d-%H%M%S)
         dest=\$(echo \"${bench_template}\" | sed -e \"s/{machine_type}/\$machine_type/g\" -e \"s/{instance_id}/\$instance_id/g\" -e \"s/{timestamp}/\$ts/g\" -e \"s/{build_id}/\$ts/g\")
         if [[ -n \"${benchmark_id}\" ]]; then
-          dest=\"benchmark-reports/${benchmark_id}/\$machine_type/\$instance_id/\$ts\"
+          dest=\"benchmark-reports/${benchmark_id}/${image_tag_only}/\$machine_type/\$instance_id/\$ts\"
         fi
         gsutil cp -r /tmp/reports/* \"gs://${bench_bucket}/\$dest/\"
       fi
