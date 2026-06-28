@@ -1,0 +1,190 @@
+# Copyright (c) Elliot Technologies, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# ════════════════════════════════════════════════════════════════════════════
+# Fungible prover pool — autoscaled `prover-node work --transport=pubsub`
+# ════════════════════════════════════════════════════════════════════════════
+#
+# This is the FUNGIBLE-POOL path (issue #302), distinct from the phase-locked
+# per-level Indexed-Job path rendered by render_pod_spec.py (#293/#297). Here ONE
+# pod shape runs the role-per-message dispatch loop (`prover-node work`): each pod
+# pulls a WorkDescriptor (leaf prove OR level-k fold) from a Pub/Sub subscription
+# with flow-control = 1, proves it, commits the proof bytes idempotently to GCS
+# via the native `ifGenerationMatch=0` CAS, acks, and pulls the next ready task —
+# until the dynamic-depth root proof exists. See:
+#   * docs/decisions/ADR-distributed-recursive-proving-architecture.md (§4 fungible
+#     worker pool, §5 transport, §6 claim guard, §7 autoscaling / graceful drain)
+#   * bench/src/bin/prover_node.rs  (the `Work` subcommand + `run_dispatch_loop`)
+#   * bench/src/transport/pubsub.rs (PubSubGcsTransport: the production backend)
+#   * infra-as-code/kubernetes/README.md (fungible vs phase-locked comparison)
+#
+# Autoscaling is driven by the KEDA ScaledObject in keda_scaledobject.yaml, which
+# scales THIS Deployment's burst replicas on Pub/Sub backlog. minReplicaCount =
+# baseload (always-on, committed nodes); maxReplicaCount = baseload + burst (Spot).
+#
+# ── Placeholders (replace before apply; or render via render_pod_spec.py
+#    --emit-fungible) ─────────────────────────────────────────────────────────
+#   PROJECT_ID                GCP project id
+#   GSA_EMAIL                 runtime Google Service Account (Workload Identity)
+#   IMAGE_URI                 e.g. us-docker.pkg.dev/PROJECT/REPO/zkp-prover:TAG
+#   PUBSUB_TOPIC              topic for follow-on fold descriptors
+#   PUBSUB_SUBSCRIPTION       subscription the pool pulls work from
+#   GCS_BUCKET                bucket for committed proof outputs + CAS markers
+#   BASELOAD_REPLICAS         ~60% of PEAK PARALLEL WIDTH (always-on; see ADR §7)
+#
+# NOTE: A real rollout (KEDA install, live Pub/Sub backlog, GKE scheduling on the
+# real node pools, end-to-end proving) is verified-by-construction here and is
+# TODO(confirm-on-live-run) — this slice ships manifests + config only.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prover-sa
+  namespace: default
+  annotations:
+    # Workload Identity: binds the KSA `default/prover-sa` to the runtime GSA.
+    # Mirrors gke_cluster.tf `workload_identity_binding`
+    # (member = serviceAccount:PROJECT.svc.id.goog[default/prover-sa]).
+    iam.gke.io/gcp-service-account: GSA_EMAIL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lighter-fungible-prover
+  labels:
+    app: zkp-prover
+    pool: fungible
+    orchestration: fungible-autoscaled
+spec:
+  # minReplicaCount in the KEDA ScaledObject (= BASELOAD_REPLICAS) is the source
+  # of truth for the floor at runtime; this initial replicas value is a sane
+  # bootstrap and should match BASELOAD_REPLICAS. KEDA owns the replica count
+  # thereafter (it manages the HPA), so do not also pin replicas via GitOps drift.
+  replicas: BASELOAD_REPLICAS
+  selector:
+    matchLabels:
+      app: zkp-prover
+      pool: fungible
+  template:
+    metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+        # Scale-down hint: KEDA/HPA scale-down should prefer deleting IDLE pods.
+        # A pod that is mid-prove lowers its own deletion cost dynamically is not
+        # expressible statically, so the live runner SHOULD patch this annotation
+        # to a high value while a lease is held and back to 0 when idle (the
+        # dispatch loop is the natural place to do that on the live run).
+        # TODO(confirm-on-live-run): have the worker patch
+        # controller.kubernetes.io/pod-deletion-cost on lease acquire/release.
+        controller.kubernetes.io/pod-deletion-cost: "0"
+      labels:
+        app: zkp-prover
+        pool: fungible
+        role: fungible-worker
+    spec:
+      serviceAccountName: prover-sa
+      # ── Graceful drain (ADR §7 — MANDATORY) ──────────────────────────────
+      # terminationGracePeriodSeconds MUST be >= max prove time on the TARGET
+      # instance type. Guidance (hardware-dependent; re-derive per instance):
+      #   leaf prove + pre-exec ≈ 8s ack_deadline (2xP99)
+      #   radix-2 fold          ≈ 6s
+      #   radix-16 fold         ≈ 30s  <-- the long pole; drives this floor
+      # 120s gives comfortable headroom above the 30s radix-16 fold even on a
+      # slower cloud instance. Raise it if the target instance proves slower.
+      # On SIGTERM the dispatch loop (bench::shutdown) stops pulling NEW work,
+      # finishes the in-flight prove, commits + acks, then exits — so a pod is
+      # never killed mid-prove within this window.
+      terminationGracePeriodSeconds: 120
+      nodeSelector:
+        # Schedule onto the prover node pools (baseload committed OR burst spot);
+        # both pools carry these labels. See proving_pod_node_pool module.
+        role: fungible-worker
+      tolerations:
+      # Dedicated prover taint (matches the node pools in the terraform module).
+      - key: "dedicated"
+        operator: "Equal"
+        value: "zkp-prover"
+        effect: "NoSchedule"
+      # Spot/preemptible burst nodes carry the standard GKE spot taint; tolerate
+      # it so burst replicas can land on Spot capacity.
+      - key: "cloud.google.com/gke-spot"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      containers:
+      - name: prover
+        image: IMAGE_URI
+        # The fungible dispatch loop. --transport=pubsub requires the image to be
+        # built with the `pubsub` cargo feature (cargo build --features pubsub);
+        # the default build is cloud-free and would fail fast on --transport=pubsub.
+        command: ["prover-node", "work"]
+        args:
+        - "--transport=pubsub"
+        - "--radix=$(RADIX)"
+        - "--leaf-count=$(LEAF_COUNT)"
+        - "--tx-per-proof=$(TX_PER_PROOF)"
+        - "--ack-deadline=$(ACK_DEADLINE)"
+        # project/topic/subscription/bucket are read from env by the binary
+        # (PROVER_PUBSUB_* fallbacks) so they need not be repeated as flags.
+        env:
+        - name: PROVER_PUBSUB_PROJECT
+          value: "PROJECT_ID"
+        - name: PROVER_PUBSUB_TOPIC
+          value: "PUBSUB_TOPIC"
+        - name: PROVER_PUBSUB_SUBSCRIPTION
+          value: "PUBSUB_SUBSCRIPTION"
+        - name: PROVER_PUBSUB_BUCKET
+          value: "GCS_BUCKET"
+        # Optional per-run object prefix so multiple runs share one bucket safely.
+        - name: PROVER_PUBSUB_OBJECT_PREFIX
+          value: ""
+        # ack_deadline ≈ 2xP99 of the LONGEST role this pool runs (radix-16 fold
+        # ≈ 30s ⇒ ~60s). The lease is also heartbeated (modifyAckDeadline) while
+        # proving. Pub/Sub valid range [10, 600]s.
+        - name: ACK_DEADLINE
+          value: "60"
+        - name: RADIX
+          value: "16"
+        - name: LEAF_COUNT
+          value: "256"
+        - name: TX_PER_PROOF
+          value: "1"
+        - name: RUST_LOG
+          value: "info"
+        # plonky2 recursion needs a large stack on the prover thread.
+        - name: RUST_MIN_STACK
+          value: "4294967296"
+        lifecycle:
+          # Belt-and-suspenders to the in-process SIGTERM handler: a tiny preStop
+          # that simply yields lets Kubernetes deliver SIGTERM to PID 1 (the
+          # binary) and start the grace timer. The actual drain is done by the
+          # binary's SIGTERM handler (stop pulling, finish lease, ack, exit); this
+          # hook just avoids a race where the container is torn down before the
+          # handler is wired. Keep it short relative to terminationGracePeriod.
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 1"]
+        resources:
+          # Sized for the heaviest fungible role (radix-16 fold ≈ 2.2 GB peak RSS
+          # per ADR Amendment; leaf prove is CPU-bound). Tune per target arch.
+          # These are intentionally generous so any role fits one pod.
+          requests:
+            cpu: "16"
+            memory: "32Gi"
+          limits:
+            cpu: "16"
+            memory: "32Gi"
+        volumeMounts:
+        # Proof BYTES are read/written via this GCS Fuse mount. The CLAIM/COMMIT
+        # idempotency guard does NOT use the mount — it uses the GCS native API
+        # (ifGenerationMatch=0) inside PubSubGcsTransport, because gcsfuse O_EXCL
+        # atomicity is REFUTED (ADR §6 / open item (c)). Bytes-via-mount is fine.
+        - name: gcs-volume
+          mountPath: /data/reports
+      volumes:
+      - name: gcs-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: "GCS_BUCKET"
+            mountOptions: "implicit-dirs"

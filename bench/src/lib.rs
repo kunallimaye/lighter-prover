@@ -9,4 +9,5 @@
 //! `prover-node` worker pool consumes — so they can be tested with
 //! `cargo test -p bench` without invoking a binary.
 
+pub mod shutdown;
 pub mod transport;

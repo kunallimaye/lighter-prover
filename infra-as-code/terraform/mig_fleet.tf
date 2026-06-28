@@ -30,4 +30,15 @@ module "proving_pod_fleet" {
   agg_disk_type    = var.silicon_arch == "t2d" ? "pd-balanced" : "hyperdisk-balanced"
   agg_disk_size_gb = 50
   agg_node_count   = 2
+
+  # ── Fungible pool (issue #302): baseload(committed)+burst(spot) for the KEDA-
+  # autoscaled `prover-node work` pool. OFF by default (enable_fungible_pool =
+  # false) so existing topology is unchanged; flip var.enable_fungible_pool to
+  # provision it on the GKE engine. The MIG path ignores these entirely.
+  enable_fungible_pool          = var.enable_fungible_pool
+  fungible_machine_type         = var.silicon_arch == "c4a" ? "c4a-highcpu-32" : (var.silicon_arch == "c3d" ? "c3d-highcpu-30" : (var.silicon_arch == "c4d" ? "c4d-highcpu-32" : "t2d-standard-32"))
+  fungible_disk_type            = var.silicon_arch == "t2d" ? "pd-balanced" : "hyperdisk-balanced"
+  fungible_disk_size_gb         = 100
+  fungible_baseload_node_count  = var.fungible_baseload_node_count
+  fungible_burst_max_node_count = var.fungible_burst_max_node_count
 }
