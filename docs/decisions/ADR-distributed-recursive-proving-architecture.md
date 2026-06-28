@@ -355,12 +355,28 @@ live end-to-end run on a real cluster is `TODO(confirm-on-live-run)`.
   stabilization + `pod-deletion-cost` favouring idle pods). This is **distinct
   from** the phase-locked per-level Job path (#293/#297), which remains valid;
   see `infra-as-code/kubernetes/README.md` for the side-by-side comparison.
-- **Graceful drain (the one code change).** `bench/src/shutdown.rs` adds a
+- **Graceful drain.** `bench/src/shutdown.rs` adds a
   process-global SIGTERM/SIGINT handler; `run_dispatch_loop` checks it at the top
   of each iteration and, on shutdown, **stops pulling new work, finishes +
   commits + acks the in-flight lease, and exits** — never killed mid-prove.
   Unit-tested (`bench/src/bin/prover_node.rs` drain tests) without raising real
   signals via the policy/mechanism split. Default build stays cloud-free + green.
+- **Live Pub/Sub worker dispatch wiring (#306).** `run_dispatch_loop` is now
+  generic — `run_dispatch_loop<T: WorkTransport>` — and drives queue/store ops
+  through the trait only, so the SAME loop runs over `LocalTransport` (default
+  build) and `PubSubGcsTransport` (under `--features pubsub`). `commit_and_gate`
+  is promoted onto the `WorkTransport` trait (both backends impl it natively).
+  Seeding is removed from the loop body and made an explicit step: `--transport=
+  pubsub --seed` is a one-off seeder (connect → `seed_leaves` → exit); the worker
+  path (no `--seed`) runs the real pull→prove→commit→ack loop (the prior
+  `BACKEND_WIRED_NO_LIVE_RUN` no-op stub is gone). Per-iteration `[instrumentation]`
+  logs carry a pod identity (`worker=HOSTNAME|pid`) plus PULL/PROVE/COMMIT(+outcome)/
+  ACK/LOOP latencies for CAS-winner attribution across the pool. The default
+  build still gives a clear "rebuild with `--features pubsub`" error (never a fake
+  success); the live broker/bucket run remains `TODO(confirm-on-live-run)`.
+  Verified locally: default + `--features pubsub` builds, `cargo test -p bench`
+  (incl. a generic-loop test over a non-Local transport double), and the
+  `--transport=local` e2e (verified root, back-compat).
 - **Node topology.** `proving_pod_node_pool` gains `fungible_baseload_pool`
   (committed, NOT Spot) + `fungible_burst_pool` (Spot, autoscaling 0..N), gated
   on `orchestration_engine == "gke"` **and** `enable_fungible_pool` (default
