@@ -129,9 +129,16 @@ pub enum Role {
     /// leaf descriptors, then repeatedly pulls a [`WorkDescriptor`], assumes the
     /// role it names (leaf prove / tree-node fold), commits the proof bytes
     /// idempotently, acks, and lets readiness gating publish the next level's
-    /// folds — until the dynamic-depth root is produced and verified. This slice
-    /// uses the in-process/filesystem [`LocalTransport`]; the production Pub/Sub
-    /// + GCS-native backend implements the same `WorkTransport` trait later.
+    /// folds — until the dynamic-depth root is produced and verified.
+    ///
+    /// The backend is selected by `--transport`:
+    /// * `local` (default) — the in-process/filesystem [`LocalTransport`]; runs
+    ///   the full e2e local smoke (no cloud), unchanged from the prior slice.
+    /// * `pubsub` — the production [`PubSubGcsTransport`]: GCP Pub/Sub pull + GCS
+    ///   native-API atomic claim/commit. Compiled only with `--features pubsub`;
+    ///   requires `--project/--topic/--subscription/--bucket` (and optionally
+    ///   `--ack-deadline`). Both backends implement the SAME `WorkTransport`
+    ///   trait, so the dispatch loop is transport-agnostic.
     Work {
         #[arg(long, default_value_t = 2)]
         radix: usize,
@@ -142,7 +149,44 @@ pub enum Role {
         tx_per_proof: usize,
         #[arg(long, default_value_t = 1042)]
         block_number: u64,
+        /// Which work-transport backend to drive.
+        #[arg(long, value_enum, default_value_t = TransportKind::Local)]
+        transport: TransportKind,
+        /// (pubsub) GCP project id. Defaults to ADC / metadata-server discovery.
+        /// Falls back to env `PROVER_PUBSUB_PROJECT` when the flag is absent.
+        #[arg(long)]
+        project: Option<String>,
+        /// (pubsub) Pub/Sub topic id for follow-on fold descriptors. Falls back
+        /// to env `PROVER_PUBSUB_TOPIC` when the flag is empty.
+        #[arg(long, default_value = "")]
+        topic: String,
+        /// (pubsub) Pub/Sub subscription id to pull work from. Falls back to env
+        /// `PROVER_PUBSUB_SUBSCRIPTION` when the flag is empty.
+        #[arg(long, default_value = "")]
+        subscription: String,
+        /// (pubsub) GCS bucket for committed proof outputs + CAS gating markers.
+        /// Falls back to env `PROVER_PUBSUB_BUCKET` when the flag is empty.
+        #[arg(long, default_value = "")]
+        bucket: String,
+        /// (pubsub) Ack deadline (seconds), ≈ 2×P99. Default 60s (radix-16 fold
+        /// ≈ 30s ⇒ 2×P99). Pub/Sub range [10, 600]s; the lease is also
+        /// heartbeated via modifyAckDeadline while proving.
+        #[arg(long, default_value_t = 60)]
+        ack_deadline: i32,
+        /// (pubsub) Optional object-name prefix so multiple runs can share one
+        /// bucket without colliding (e.g. `runs/block_1042/`).
+        #[arg(long, default_value = "")]
+        object_prefix: String,
     },
+}
+
+/// Which [`WorkTransport`] backend the fungible dispatch loop drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum TransportKind {
+    /// In-process/filesystem dev/test backend (no cloud).
+    Local,
+    /// Production GCP Pub/Sub pull + GCS native-API atomic claim/commit.
+    Pubsub,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1063,50 +1107,228 @@ fn main() {
             leaf_count,
             tx_per_proof,
             block_number,
-        } => {
-            use bench::transport::tree_depth as t_depth;
-            let depth = t_depth(leaf_count, radix).max(1);
-            info!(
-                "Fungible dispatch loop: proving + folding an N={leaf_count} tree \
-                 (radix {radix}, depth {depth}) over the LocalTransport, then verifying \
-                 the root. Proof store: {PROOF_DIR}/"
-            );
+            transport,
+            project,
+            topic,
+            subscription,
+            bucket,
+            ack_deadline,
+            object_prefix,
+        } => match transport {
+            TransportKind::Local => {
+                use bench::transport::tree_depth as t_depth;
+                let depth = t_depth(leaf_count, radix).max(1);
+                info!(
+                    "Fungible dispatch loop [--transport=local]: proving + folding an \
+                     N={leaf_count} tree (radix {radix}, depth {depth}) over the \
+                     LocalTransport, then verifying the root. Proof store: {PROOF_DIR}/"
+                );
 
-            let transport = LocalTransport::new(PROOF_DIR);
-            let root_proof =
-                run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut timing);
+                let transport = LocalTransport::new(PROOF_DIR);
+                let root_proof =
+                    run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut timing);
 
-            let digest = proof_digest(&root_proof);
-            use circuit::recursion::batch::BATCH_TARGET_INDEX;
-            let root_batch =
-                Batch::<F>::from_public_inputs(&root_proof.public_inputs[..BATCH_TARGET_INDEX]);
+                let digest = proof_digest(&root_proof);
+                use circuit::recursion::batch::BATCH_TARGET_INDEX;
+                let root_batch = Batch::<F>::from_public_inputs(
+                    &root_proof.public_inputs[..BATCH_TARGET_INDEX],
+                );
 
-            let report = json!({
-                "telemetry_event": "FUNGIBLE_DISPATCH_ROOT_VERIFIED",
-                "span_id": format!("dispatch_block_{block_number}"),
-                "transport": "local",
-                "radix": radix,
-                "leaf_count": leaf_count,
-                "tree_depth": depth,
-                "root_proof_key": tree_proof_path(depth, 0).file_name()
-                    .map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                "proof_digest_sha256_8": digest,
-                "aggregated_batch_size": root_batch.batch_size,
-                "aggregated_end_block_number": root_batch.end_block_number,
-                "l1_settlement": "not_configured",
-                "elapsed_ms": start.elapsed().as_millis(),
-                "status": "OK"
-            });
-            println!("{report}");
-            info!(
-                "Fungible dispatch loop produced + verified root ({digest}, {} txs aggregated) \
-                 for block #{block_number} in {:?}",
-                root_batch.batch_size,
-                start.elapsed()
-            );
-            timing.print();
-        }
+                let report = json!({
+                    "telemetry_event": "FUNGIBLE_DISPATCH_ROOT_VERIFIED",
+                    "span_id": format!("dispatch_block_{block_number}"),
+                    "transport": "local",
+                    "radix": radix,
+                    "leaf_count": leaf_count,
+                    "tree_depth": depth,
+                    "root_proof_key": tree_proof_path(depth, 0).file_name()
+                        .map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    "proof_digest_sha256_8": digest,
+                    "aggregated_batch_size": root_batch.batch_size,
+                    "aggregated_end_block_number": root_batch.end_block_number,
+                    "l1_settlement": "not_configured",
+                    "elapsed_ms": start.elapsed().as_millis(),
+                    "status": "OK"
+                });
+                println!("{report}");
+                info!(
+                    "Fungible dispatch loop produced + verified root ({digest}, {} txs \
+                     aggregated) for block #{block_number} in {:?}",
+                    root_batch.batch_size,
+                    start.elapsed()
+                );
+                timing.print();
+            }
+            TransportKind::Pubsub => {
+                run_pubsub_work(
+                    radix,
+                    leaf_count,
+                    tx_per_proof,
+                    block_number,
+                    project,
+                    topic,
+                    subscription,
+                    bucket,
+                    ack_deadline,
+                    object_prefix,
+                );
+            }
+        },
     }
+}
+
+/// Drive the fungible dispatch loop over the production
+/// [`PubSubGcsTransport`](bench::transport::pubsub::PubSubGcsTransport).
+///
+/// Compiled only with `--features pubsub`. Without the feature, the binary still
+/// accepts `--transport=pubsub` but fails fast with a clear message rather than
+/// pretending a cloud backend exists.
+#[cfg(feature = "pubsub")]
+#[allow(clippy::too_many_arguments)]
+fn run_pubsub_work(
+    radix: usize,
+    leaf_count: usize,
+    tx_per_proof: usize,
+    block_number: u64,
+    project: Option<String>,
+    topic: String,
+    subscription: String,
+    bucket: String,
+    ack_deadline: i32,
+    object_prefix: String,
+) {
+    use bench::transport::pubsub::{PubSubGcsConfig, PubSubGcsTransport};
+    use bench::transport::tree_depth as t_depth;
+
+    // Env fallbacks for the pubsub config (the clap `env` feature is not enabled
+    // workspace-wide, so resolve env vars here to keep the default build's clap
+    // feature set unchanged).
+    let env_or = |flag: String, var: &str| -> String {
+        if flag.trim().is_empty() {
+            std::env::var(var).unwrap_or_default()
+        } else {
+            flag
+        }
+    };
+    let project = project.or_else(|| std::env::var("PROVER_PUBSUB_PROJECT").ok());
+    let topic = env_or(topic, "PROVER_PUBSUB_TOPIC");
+    let subscription = env_or(subscription, "PROVER_PUBSUB_SUBSCRIPTION");
+    let bucket = env_or(bucket, "PROVER_PUBSUB_BUCKET");
+    let object_prefix = env_or(object_prefix, "PROVER_PUBSUB_OBJECT_PREFIX");
+    let ack_deadline = std::env::var("PROVER_PUBSUB_ACK_DEADLINE")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|_| ack_deadline == 60) // only override the default if env set
+        .unwrap_or(ack_deadline);
+
+    let depth = t_depth(leaf_count, radix).max(1);
+    let config = PubSubGcsConfig {
+        project_id: project,
+        topic,
+        subscription,
+        bucket,
+        ack_deadline_secs: ack_deadline,
+        object_prefix,
+    };
+    if let Err(e) = config.validate() {
+        eprintln!("Invalid --transport=pubsub config: {e}");
+        std::process::exit(2);
+    }
+
+    info!(
+        "Fungible dispatch loop [--transport=pubsub]: connecting production backend \
+         for an N={leaf_count} tree (radix {radix}, depth {depth}).",
+    );
+
+    // Connect the production transport. This authenticates + opens the GCS and
+    // Pub/Sub clients (Application Default Credentials) and resolves the topic +
+    // subscription. The dispatch loop below is identical in shape to the local
+    // one — both drive the same `WorkTransport` trait — but the leaf/fold
+    // proving over GCS-stored children and end-to-end completion require a LIVE
+    // broker + bucket, so the proving loop itself is flagged for live
+    // confirmation rather than executed here.
+    let transport = match PubSubGcsTransport::connect(config) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "Failed to connect --transport=pubsub backend: {e}\n\
+                 (This requires live GCP credentials, a real Pub/Sub topic/subscription, \
+                 and a GCS bucket. The backend + primitives are verified-by-construction \
+                 and were pilot-verified ephemerally; a full live run is \
+                 TODO(confirm-on-live-run).)"
+            );
+            std::process::exit(1);
+        }
+    };
+
+    info!(
+        "Production transport WIRED: {}. NOTE: this slice does not perform a live \
+         cloud run (no real Pub/Sub publish/pull, no GCS writes are executed from \
+         here). The backend implements every verified primitive; executing the \
+         live dispatch loop is TODO(confirm-on-live-run).",
+        transport.endpoint_summary()
+    );
+
+    // INTENTIONALLY NOT executed in this code slice (would be a LIVE cloud
+    // action): seeding leaf descriptors onto the topic and running the
+    // pull→prove→commit_and_gate→ack loop against a real Pub/Sub subscription +
+    // GCS bucket, including real redelivery and cross-node CAS. The backend
+    // implements every verified primitive (flow-control=1 pull,
+    // modifyAckDeadline lease-extend, ack-after-commit, nack-on-failure, GCS
+    // ifGenerationMatch=0 commit + gating markers); the helpers
+    // `transport.seed_leaves(..)` and `transport.commit_and_gate(..)` are the
+    // entry points a live runner (KEDA/GKE follow-up) calls. We do NOT fabricate
+    // a run here. The local path (`--transport=local`) exercises the identical
+    // dispatch SHAPE end-to-end without cloud.
+    //
+    // TODO(confirm-on-live-run): real Pub/Sub delivery/redelivery, real GCS CAS
+    // across nodes, end-to-end on GKE. Primitives were pilot-verified
+    // ephemerally; not re-run live in this slice.
+    let _ = (radix, leaf_count, tx_per_proof);
+    let report = json!({
+        "telemetry_event": "FUNGIBLE_DISPATCH_PUBSUB_WIRED",
+        "span_id": format!("dispatch_block_{block_number}"),
+        "transport": "pubsub",
+        "endpoint": transport.endpoint_summary(),
+        "radix": radix,
+        "leaf_count": leaf_count,
+        "tree_depth": depth,
+        "ack_deadline_secs": transport.ack_deadline_secs(),
+        "live_cloud_action_performed": false,
+        "status": "BACKEND_WIRED_NO_LIVE_RUN",
+        "live_run": "TODO(confirm-on-live-run)"
+    });
+    println!("{report}");
+    info!(
+        "Production transport wired for block #{block_number}; no live cloud action \
+         performed. Full live pull/prove/commit loop is TODO(confirm-on-live-run)."
+    );
+}
+
+/// Stub for when the `pubsub` feature is NOT enabled: accept the flag but fail
+/// fast so the default (cloud-free) build never links cloud crates yet still
+/// gives an honest error if someone passes `--transport=pubsub`.
+#[cfg(not(feature = "pubsub"))]
+#[allow(clippy::too_many_arguments)]
+fn run_pubsub_work(
+    _radix: usize,
+    _leaf_count: usize,
+    _tx_per_proof: usize,
+    _block_number: u64,
+    _project: Option<String>,
+    _topic: String,
+    _subscription: String,
+    _bucket: String,
+    _ack_deadline: i32,
+    _object_prefix: String,
+) {
+    eprintln!(
+        "--transport=pubsub requires building with the `pubsub` cargo feature \
+         (`cargo build --features pubsub`). The default build is cloud-free and does \
+         not link the GCP Pub/Sub + GCS clients. Re-run with --transport=local for \
+         the cloud-free dispatch loop."
+    );
+    std::process::exit(2);
 }
 
 #[cfg(test)]

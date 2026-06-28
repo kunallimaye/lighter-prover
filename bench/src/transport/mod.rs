@@ -42,7 +42,6 @@
 //!
 //! [`commit_output`]: WorkTransport::commit_output
 
-use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -50,6 +49,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+
+/// Backend-agnostic, cloud-free CAS object-store abstraction + readiness-gating
+/// engine. This is the durable, unit-testable core that BOTH the [`LocalTransport`]
+/// (filesystem CAS) and the production [`pubsub::PubSubGcsTransport`] (GCS native
+/// `ifGenerationMatch=0` CAS) drive, so the "publish each fold descriptor exactly
+/// once" invariant is implemented once and tested against an in-memory CAS double
+/// with no network.
+pub mod gating;
+
+/// Production work-transport backend: GCP Pub/Sub (pull) + GCS native-API atomic
+/// claim/commit. Compiled **only** under `--features pubsub`; the default build
+/// stays cloud-free.
+#[cfg(feature = "pubsub")]
+pub mod pubsub;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Work descriptors
@@ -613,10 +626,9 @@ pub fn seed_leaf_descriptors(
         .collect()
 }
 
-// A small helper so callers can record arbitrary key→count maps if they prefer
-// an in-memory gate (kept for completeness / future backends).
-#[allow(dead_code)]
-type GateCounts = HashMap<String, usize>;
+// Re-export the backend-agnostic CAS + gating primitives so callers and the
+// production backend can `use bench::transport::{ObjectStore, GatingEngine, ...}`.
+pub use gating::{CasStore, GatingEngine, GatingOutcome, InMemoryCasStore, Publisher};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tests
