@@ -337,3 +337,46 @@ These are explicitly **not yet resolved**:
   questions posted in discussion #287.
 - **(c) GCS-Fuse atomicity** remains unverified — use the native GCS API
   (`ifGenerationMatch=0`) for the idempotent guard until proven otherwise.
+
+## Implementation status — autoscaling slice (issue #302)
+
+The §7 autoscaling decision is now wired (manifests + Terraform definitions +
+config + the one needed code change), **without any live cloud action** — the
+live end-to-end run on a real cluster is `TODO(confirm-on-live-run)`.
+
+**Landed (verified locally):**
+
+- **Fungible-pool path (Path A).** `infra-as-code/kubernetes/fungible_pool.yaml`
+  (Deployment running `prover-node work --transport=pubsub`, Workload-Identity
+  `prover-sa`, GCS Fuse volume for proof bytes, `nodeSelector`/tolerations for
+  the prover node pools, per-arch resources, Pub/Sub env/flags) and
+  `keda_scaledobject.yaml` (KEDA `gcp-pubsub` backlog trigger, `minReplicaCount`
+  = baseload **> 0**, `maxReplicaCount` = baseload + burst, scale-down
+  stabilization + `pod-deletion-cost` favouring idle pods). This is **distinct
+  from** the phase-locked per-level Job path (#293/#297), which remains valid;
+  see `infra-as-code/kubernetes/README.md` for the side-by-side comparison.
+- **Graceful drain (the one code change).** `bench/src/shutdown.rs` adds a
+  process-global SIGTERM/SIGINT handler; `run_dispatch_loop` checks it at the top
+  of each iteration and, on shutdown, **stops pulling new work, finishes +
+  commits + acks the in-flight lease, and exits** — never killed mid-prove.
+  Unit-tested (`bench/src/bin/prover_node.rs` drain tests) without raising real
+  signals via the policy/mechanism split. Default build stays cloud-free + green.
+- **Node topology.** `proving_pod_node_pool` gains `fungible_baseload_pool`
+  (committed, NOT Spot) + `fungible_burst_pool` (Spot, autoscaling 0..N), gated
+  on `orchestration_engine == "gke"` **and** `enable_fungible_pool` (default
+  off). The MIG path is unchanged. `terraform fmt -check` + `validate` clean.
+- **Rendering.** `render_pod_spec.py --emit-fungible` emits the filled-in
+  Deployment + ScaledObject from `config.toml`; the default (phase-locked) render
+  is unchanged.
+
+**Remaining for the live end-to-end run (`TODO(confirm-on-live-run)`):**
+
+- Install KEDA on the cluster (Helm; documented, not installed here) and bind the
+  scaler's Workload Identity.
+- Provision the GKE cluster + fungible node pools (`enable_fungible_pool = true`,
+  `terraform apply`) and the Pub/Sub topic/subscription + GCS bucket.
+- Run the live pull→prove→commit→ack loop (real redelivery, cross-node GCS CAS),
+  confirm KEDA scales burst on real backlog, and confirm graceful drain on real
+  scale-down + Spot preemption (incl. the live runner patching
+  `pod-deletion-cost` on lease acquire/release).
+- Close open item **(a)** (real-Spot prove-time P99) with this live run.

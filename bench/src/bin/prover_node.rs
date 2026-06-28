@@ -800,13 +800,21 @@ fn verify_root_proof(
 /// verified root proof. Uses `PROOF_DIR` as the shared proof store so the reused
 /// role code (`load_or_prove_leaf`/`aggregate_node`, which read/write
 /// `PROOF_DIR`) and the transport's committed outputs are the same bytes.
+/// Run the fungible dispatch loop to completion (root produced + verified) or
+/// until a graceful shutdown is requested.
+///
+/// Returns `Some(root_proof)` once the dynamic-depth root is committed and
+/// verified, or `None` if the loop drained early due to a graceful shutdown
+/// (SIGTERM) before the root existed — in which case remaining work stays on the
+/// queue for another worker and NO root is fabricated. See
+/// [`bench::shutdown`] for the drain contract.
 fn run_dispatch_loop(
     transport: &LocalTransport,
     radix: usize,
     leaf_count: usize,
     tx_per_proof: usize,
     timing: &mut TimingTree,
-) -> ProofWithPublicInputs<F, C, D> {
+) -> Option<ProofWithPublicInputs<F, C, D>> {
     use bench::transport::{seed_leaf_descriptors, tree_depth as t_depth};
 
     let depth = t_depth(leaf_count, radix).max(1);
@@ -825,6 +833,26 @@ fn run_dispatch_loop(
     // Loop until the root output exists (the dynamic-depth top node is committed)
     // and the queue has drained.
     loop {
+        // ── Graceful drain (ADR §7) ──────────────────────────────────────────
+        // On SIGTERM (KEDA scale-down / Spot preemption) the shutdown flag flips.
+        // We check it HERE, at the top of the iteration, BEFORE pulling the next
+        // message: this stops pulling NEW work while the most-recently-leased
+        // message — if any — has already been proved, committed, and acked at the
+        // BOTTOM of the previous iteration. Breaking here therefore drains
+        // gracefully: no leased message is ever dropped mid-prove. The pod then
+        // exits, letting Kubernetes reclaim it within terminationGracePeriod, and
+        // any not-yet-pulled work stays on the queue for another (or a restarted)
+        // worker. Never scale the WHOLE pool to zero before the root exists — that
+        // is enforced operationally by KEDA `minReplicaCount` = baseload, not here.
+        if bench::shutdown::is_shutdown_requested() {
+            info!(
+                "[dispatch] graceful shutdown requested (SIGTERM): stop pulling new work; \
+                 {processed} descriptor(s) already committed + acked. Draining and exiting \
+                 cleanly without dropping any in-flight lease."
+            );
+            break;
+        }
+
         if transport.output_exists(&root_key) && transport.pull_one().is_none() {
             break;
         }
@@ -906,6 +934,17 @@ fn run_dispatch_loop(
         processed += 1;
     }
 
+    // If we broke out for graceful shutdown before the root was committed, return
+    // `None`: the worker drained cleanly, leaving remaining work on the queue for
+    // another worker — it must NOT pretend a root exists or fabricate one.
+    if !transport.output_exists(&root_key) {
+        info!(
+            "[dispatch] loop exited before root committed ({processed} descriptor(s) done); \
+             graceful drain leaves remaining work on the queue. No root harvested here."
+        );
+        return None;
+    }
+
     info!("[dispatch] tree complete: {processed} descriptors processed; harvesting root");
     let root_bytes = transport
         .read_output(&root_key)
@@ -913,7 +952,7 @@ fn run_dispatch_loop(
     let root_proof: ProofWithPublicInputs<F, C, D> =
         bincode::deserialize(&root_bytes).expect("deserialize root proof");
     verify_root_proof(&root_proof, depth, radix);
-    root_proof
+    Some(root_proof)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1124,9 +1163,42 @@ fn main() {
                      LocalTransport, then verifying the root. Proof store: {PROOF_DIR}/"
                 );
 
+                // Install the graceful-drain signal handler: on SIGTERM (KEDA
+                // scale-down / Spot preemption) or SIGINT the dispatch loop stops
+                // pulling new work, finishes the in-flight lease, acks, and exits
+                // cleanly. Failure to register is non-fatal (loop still runs).
+                if let Err(e) = bench::shutdown::install_handlers() {
+                    info!("[dispatch] could not install SIGTERM handler ({e}); continuing without OS-signal drain");
+                }
+
                 let transport = LocalTransport::new(PROOF_DIR);
-                let root_proof =
-                    run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut timing);
+                let Some(root_proof) =
+                    run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut timing)
+                else {
+                    // Graceful shutdown drained the loop before the root existed.
+                    // Report honestly and exit 0 (clean drain, work left on queue).
+                    let report = json!({
+                        "telemetry_event": "FUNGIBLE_DISPATCH_DRAINED_ON_SHUTDOWN",
+                        "span_id": format!("dispatch_block_{block_number}"),
+                        "transport": "local",
+                        "radix": radix,
+                        "leaf_count": leaf_count,
+                        "tree_depth": depth,
+                        "root_committed": false,
+                        "status": "DRAINED_ON_SIGTERM",
+                        "note": "graceful shutdown: stopped pulling new work, finished + acked \
+                                 the in-flight lease, left remaining work on the queue"
+                    });
+                    println!("{report}");
+                    info!(
+                        "Fungible dispatch loop drained on graceful shutdown for block \
+                         #{block_number} in {:?}; no root harvested (remaining work left on \
+                         the queue for another worker).",
+                        start.elapsed()
+                    );
+                    timing.print();
+                    return;
+                };
 
                 let digest = proof_digest(&root_proof);
                 use circuit::recursion::batch::BATCH_TARGET_INDEX;
@@ -1235,6 +1307,19 @@ fn run_pubsub_work(
         std::process::exit(2);
     }
 
+    // Install the SAME graceful-drain signal handler as the local path. On the
+    // LIVE run (TODO(confirm-on-live-run)) the production pull→prove→commit→ack
+    // loop MUST honour SIGTERM exactly as the local loop does: on KEDA scale-down
+    // or Spot preemption, stop pulling new Pub/Sub messages, finish the in-flight
+    // prove, extend the lease via modifyAckDeadline while proving, ack only AFTER
+    // the GCS `ifGenerationMatch=0` commit, then exit before
+    // terminationGracePeriodSeconds elapses. The handler is wired here so the
+    // contract is in place for the live runner; the live loop itself is NOT run
+    // in this slice.
+    if let Err(e) = bench::shutdown::install_handlers() {
+        info!("[dispatch] could not install SIGTERM handler ({e}); live drain would proceed without OS-signal drain");
+    }
+
     info!(
         "Fungible dispatch loop [--transport=pubsub]: connecting production backend \
          for an N={leaf_count} tree (radix {radix}, depth {depth}).",
@@ -1335,6 +1420,125 @@ fn run_pubsub_work(
 mod tests {
     use super::*;
     use plonky2::util::timing::TimingTree;
+
+    // ── Graceful-shutdown drain contract (no proving, no real signals) ──
+    //
+    // These tests exercise the dispatch loop's "stop pulling new work on
+    // shutdown, finish the current lease, ack, exit" policy WITHOUT raising an OS
+    // signal and WITHOUT running real proofs. The dispatch loop reads exactly one
+    // thing — `bench::shutdown::is_shutdown_requested()` — at the top of each
+    // iteration before pulling, so we model that boundary directly against the
+    // real `LocalTransport` queue. The flag is driven via `request_shutdown()`
+    // (the same store the OS handler performs), so this is a faithful unit test
+    // of the drain logic with deterministic, signal-free control.
+
+    // The graceful-shutdown flag is process-global, so the drain tests must not
+    // race each other. This mutex serialises them (each takes it for its whole
+    // body) so the shared flag is never observed across tests.
+    static DRAIN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Mirror of the dispatch loop's pull-gating decision: returns how many
+    /// messages a loop with this drain contract would pull from `transport`,
+    /// where `set_shutdown_after` is the number of pulls after which a SIGTERM is
+    /// simulated. Each "iteration" first checks the shutdown flag (stop pulling
+    /// if set), then pulls one message and acks it (modelling "finish + ack the
+    /// in-flight lease"). This is the exact shape of `run_dispatch_loop`'s top
+    /// guard, minus the proving.
+    fn drain_pulls(transport: &LocalTransport, set_shutdown_after: usize) -> usize {
+        bench::shutdown::reset_for_test();
+        let mut pulled = 0usize;
+        loop {
+            // Top-of-iteration graceful-drain check (identical to the loop).
+            if bench::shutdown::is_shutdown_requested() {
+                break;
+            }
+            match transport.pull_one() {
+                Some(lease) => {
+                    lease.extend();
+                    // "Finish + ack the in-flight lease" before honouring shutdown.
+                    lease.ack();
+                    pulled += 1;
+                    if pulled == set_shutdown_after {
+                        // Simulate SIGTERM arriving mid-run (after this lease is
+                        // already acked, as in production).
+                        bench::shutdown::request_shutdown();
+                    }
+                }
+                None => break,
+            }
+        }
+        bench::shutdown::reset_for_test();
+        pulled
+    }
+
+    fn tmp_store(tag: &str) -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("prover_node_drain_{tag}_{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn drain_stops_pulling_new_work_after_shutdown() {
+        let _guard = DRAIN_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Seed 5 leaf descriptors; simulate SIGTERM after the 2nd is acked.
+        // The loop must pull exactly 2 (finish the 2nd, then stop pulling), NOT
+        // drain all 5 — proving the "stop pulling new work on SIGTERM" contract.
+        let store = tmp_store("stops");
+        let transport = LocalTransport::new(&store).without_auto_gating();
+        for chunk in 0..5usize {
+            transport.publish(bench::transport::WorkDescriptor::leaf(chunk, 2, 5, 1));
+        }
+        let pulled = drain_pulls(&transport, 2);
+        assert_eq!(
+            pulled, 2,
+            "loop must finish the in-flight lease then stop pulling on shutdown"
+        );
+        std::fs::remove_dir_all(&store).ok();
+    }
+
+    #[test]
+    fn no_shutdown_drains_entire_queue() {
+        let _guard = DRAIN_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // With shutdown never requested, the same loop drains all seeded work —
+        // the drain check is inert on the happy path (no regression to e2e).
+        let store = tmp_store("nodrain");
+        let transport = LocalTransport::new(&store).without_auto_gating();
+        for chunk in 0..4usize {
+            transport.publish(bench::transport::WorkDescriptor::leaf(chunk, 2, 4, 1));
+        }
+        // `usize::MAX` => shutdown is never triggered by the helper.
+        let pulled = drain_pulls(&transport, usize::MAX);
+        assert_eq!(pulled, 4, "without shutdown the loop must drain all work");
+        std::fs::remove_dir_all(&store).ok();
+    }
+
+    #[test]
+    fn shutdown_before_first_pull_pulls_nothing() {
+        let _guard = DRAIN_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // If SIGTERM arrives before any work is pulled (e.g. pod terminated while
+        // idle), the loop pulls zero and exits immediately — clean drain.
+        let store = tmp_store("preempt");
+        let transport = LocalTransport::new(&store).without_auto_gating();
+        for chunk in 0..3usize {
+            transport.publish(bench::transport::WorkDescriptor::leaf(chunk, 2, 3, 1));
+        }
+        bench::shutdown::reset_for_test();
+        bench::shutdown::request_shutdown();
+        // Mirror the loop's top guard once: shutdown set => no pull.
+        let pulled = if bench::shutdown::is_shutdown_requested() {
+            0
+        } else {
+            transport.pull_one().map(|l| l.ack()).is_some() as usize
+        };
+        bench::shutdown::reset_for_test();
+        assert_eq!(pulled, 0, "shutdown before first pull must drain nothing");
+        std::fs::remove_dir_all(&store).ok();
+    }
 
     // ── Dynamic tree-geometry helpers (pure, no proving) ──
 

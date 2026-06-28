@@ -54,6 +54,12 @@ tiny-keccak =  { workspace = true }
 paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
 base64 = "0.21"
+# Graceful-shutdown signal handling for the fungible `prover-node work` dispatch
+# loop (SIGTERM on KEDA scale-down / Spot preemption -> finish in-flight prove,
+# ack, exit). Tiny, cloud-free, std-only crate; compiled in the DEFAULT build so
+# the drain contract holds for both the local and pubsub transports. See
+# `src/shutdown.rs`.
+signal-hook = { version = "0.3", default-features = false }
 
 # ── Production work-transport backend deps (behind the `pubsub` feature only) ──
 # Maintained crates from the `google-cloud-rust` family. rustls-tls avoids the

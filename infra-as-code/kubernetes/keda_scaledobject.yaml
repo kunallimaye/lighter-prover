@@ -1,0 +1,104 @@
+# Copyright (c) Elliot Technologies, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+#
+# ════════════════════════════════════════════════════════════════════════════
+# KEDA ScaledObject — backlog autoscaling for the fungible prover pool
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Scales the `lighter-fungible-prover` Deployment (fungible_pool.yaml) on the
+# Pub/Sub subscription BACKLOG (`num_undelivered_messages`) per ADR §7:
+#   * baseload + burst — NOT scale-to-zero.
+#   * minReplicaCount = BASELOAD_REPLICAS (always-on; ~60% of PEAK PARALLEL
+#     WIDTH, committed/dedicated nodes). NEVER 0: backlog underestimates the
+#     narrow aggregation tail (few parallel folds at upper levels), so the pool
+#     must not scale to zero before the ROOT proof exists.
+#   * maxReplicaCount = BASELOAD_REPLICAS + BURST_REPLICAS (burst tops out on
+#     Spot capacity).
+#
+# ── KEDA is a PREREQUISITE; this slice does NOT install it ────────────────────
+# Install KEDA once per cluster (operator does NOT run this here):
+#   helm repo add kedacore https://kedacore.github.io/charts
+#   helm repo update
+#   helm install keda kedacore/keda --namespace keda --create-namespace
+# The `gcp-pubsub` scaler authenticates via Workload Identity. Bind the KEDA
+# operator KSA (keda/keda-operator) to a GSA with roles/monitoring.viewer +
+# roles/pubsub.viewer, or provide a TriggerAuthentication. See:
+#   https://keda.sh/docs/latest/scalers/gcp-pub-sub/
+#
+# TODO(confirm-on-live-run): real KEDA install, real backlog-driven scale
+# up/down, Workload Identity for the scaler, and HPA behavior on a live cluster.
+# All values below are verified-by-construction (valid YAML + valid KEDA schema
+# shape) but NOT exercised against a running KEDA here.
+#
+# ── Placeholders (replace before apply; or render via render_pod_spec.py) ──────
+#   PROJECT_ID            GCP project id (for the subscription resource name)
+#   PUBSUB_SUBSCRIPTION   the SAME subscription the pool pulls from
+#   BASELOAD_REPLICAS     min (>0), ~60% of peak parallel width
+#   MAX_REPLICAS          BASELOAD_REPLICAS + BURST_REPLICAS
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: lighter-fungible-prover
+  labels:
+    app: zkp-prover
+    pool: fungible
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: lighter-fungible-prover
+  # Baseload is ALWAYS ON (committed nodes). Never 0 — protects the narrow
+  # aggregation tail and root completion (ADR §7).
+  minReplicaCount: BASELOAD_REPLICAS
+  # Baseload + burst. Burst lands on Spot via the node pools / tolerations.
+  maxReplicaCount: MAX_REPLICAS
+  # Time a trigger must stay inactive before scaling toward minReplicaCount.
+  # Long-ish so a briefly-empty backlog (between tree levels) does not thrash the
+  # pool down. Combined with the scale-down stabilization below.
+  cooldownPeriod: 300
+  # How often KEDA polls the Pub/Sub backlog metric.
+  pollingInterval: 15
+  triggers:
+  - type: gcp-pubsub
+    metadata:
+      # Scale on undelivered (backlogged) messages on the work subscription.
+      mode: SubscriptionSize
+      subscriptionName: "PUBSUB_SUBSCRIPTION"
+      # Target backlog PER replica: KEDA aims to keep ~this many undelivered
+      # messages per pod. With flow-control = 1 (one outstanding message per
+      # pod) a value of 1 means "add a replica per backlogged task" up to max.
+      # Tune up (e.g. 2-4) to be less aggressive / cheaper on Spot churn.
+      value: "1"
+      # Below this backlog the trigger is considered inactive (eligible for
+      # scale toward min after cooldownPeriod). Keep at 0 so any backlog keeps
+      # the pool active; the FLOOR is enforced by minReplicaCount, not here.
+      activationValue: "0"
+      projectID: "PROJECT_ID"
+  advanced:
+    # Don't let KEDA delete the underlying HPA on ScaledObject delete; keeps the
+    # baseload floor intact during config churn.
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          # Stabilize scale-down: only act on a sustained low backlog so we don't
+          # kill provers between tree levels (backlog momentarily empties as a
+          # level completes before the next level's folds are published).
+          stabilizationWindowSeconds: 300
+          policies:
+          # Remove at most 1 pod per minute on scale-down. Combined with the
+          # pod-deletion-cost annotation on the Deployment (set high while a pod
+          # holds a lease, 0 when idle — patched by the live runner), this makes
+          # the HPA prefer evicting IDLE pods, so scale-down does NOT kill busy
+          # provers. TODO(confirm-on-live-run): verify deletion-cost ordering.
+          - type: Pods
+            value: 1
+            periodSeconds: 60
+        scaleUp:
+          # Scale up briskly when backlog appears (Spot burst is the point).
+          stabilizationWindowSeconds: 0
+          policies:
+          - type: Pods
+            value: 8
+            periodSeconds: 30

@@ -109,6 +109,132 @@ resource "google_container_node_pool" "aggregator_pool" {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
+# FUNGIBLE POOL: baseload (committed) + burst (Spot) node pools (issue #302)
+# Gated on ENGINE == "gke" AND var.enable_fungible_pool. Both pools carry the
+# `role=fungible-worker` label that fungible_pool.yaml's nodeSelector targets and
+# the `dedicated=zkp-prover:NoSchedule` taint the Deployment tolerates. The MIG
+# path below is UNCHANGED by this addition.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Baseload: COMMITTED / dedicated capacity, always-on (~60% of peak parallel
+# width). preemptible = false (NOT Spot) so the always-on floor never gets
+# preempted; KEDA minReplicaCount keeps pods here.
+resource "google_container_node_pool" "fungible_baseload_pool" {
+  count    = var.orchestration_engine == "gke" && var.enable_fungible_pool ? 1 : 0
+  name     = "lighter-fungible-base-${var.silicon_arch}"
+  cluster  = var.cluster_id
+  location = var.zone
+
+  # Fixed-size committed floor (no autoscaling block => static node_count).
+  node_count = var.fungible_baseload_node_count
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    preemptible  = false # COMMITTED — the always-on baseload must not be Spot.
+    machine_type = var.fungible_machine_type
+    disk_type    = var.fungible_disk_type
+    disk_size_gb = var.fungible_disk_size_gb
+
+    service_account = var.service_account
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+
+    gcfs_config {
+      enabled = true
+    }
+
+    kubelet_config {
+      cpu_manager_policy = "static" # Pin STARK threads exclusively to host cores.
+      cpu_cfs_quota      = false    # Purge CFS period throttling.
+    }
+
+    labels = {
+      role         = "fungible-worker"
+      pool-tier    = "baseload"
+      silicon-arch = var.silicon_arch
+    }
+
+    taint {
+      key    = "dedicated"
+      value  = "zkp-prover"
+      effect = "NO_SCHEDULE"
+    }
+  }
+}
+
+# Burst: SPOT capacity, autoscales 0..N to absorb Pub/Sub backlog bursts cheaply.
+# Carries the same `role=fungible-worker` label so the Deployment schedules here
+# too, plus an explicit spot taint the Deployment tolerates.
+resource "google_container_node_pool" "fungible_burst_pool" {
+  count    = var.orchestration_engine == "gke" && var.enable_fungible_pool ? 1 : 0
+  name     = "lighter-fungible-burst-${var.silicon_arch}"
+  cluster  = var.cluster_id
+  location = var.zone
+
+  initial_node_count = 0
+
+  autoscaling {
+    min_node_count = 0
+    max_node_count = var.fungible_burst_max_node_count
+  }
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    preemptible  = true # SPOT — burst capacity for KEDA-driven scale-out.
+    machine_type = var.fungible_machine_type
+    disk_type    = var.fungible_disk_type
+    disk_size_gb = var.fungible_disk_size_gb
+
+    service_account = var.service_account
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+
+    gcfs_config {
+      enabled = true
+    }
+
+    kubelet_config {
+      cpu_manager_policy = "static"
+      cpu_cfs_quota      = false
+    }
+
+    labels = {
+      role         = "fungible-worker"
+      pool-tier    = "burst"
+      silicon-arch = var.silicon_arch
+    }
+
+    taint {
+      key    = "dedicated"
+      value  = "zkp-prover"
+      effect = "NO_SCHEDULE"
+    }
+
+    # Spot taint so only Spot-tolerant workloads (the fungible Deployment) land
+    # here; mirrors GKE's own spot node taint convention.
+    taint {
+      key    = "cloud.google.com/gke-spot"
+      value  = "true"
+      effect = "NO_SCHEDULE"
+    }
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
 # PARADIGM 2: Bare GCE Managed Instance Groups (ENGINE == "mig")
 # ═══════════════════════════════════════════════════════════════════════════
 

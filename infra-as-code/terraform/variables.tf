@@ -160,3 +160,26 @@ variable "enable_shared_resources" {
   type        = bool
   default     = true
 }
+
+# ─── Fungible Pool autoscaling topology (issue #302) ───────────────────────
+# Drives the baseload(committed)+burst(spot) node pools for the KEDA-autoscaled
+# fungible `prover-node work` pool. OFF by default so this slice changes nothing
+# until opted in (GKE engine only; the MIG path is unaffected).
+
+variable "enable_fungible_pool" {
+  description = "Provision the fungible baseload(committed)+burst(spot) GKE node pools for the KEDA-autoscaled prover-node work pool (#302). Off by default."
+  type        = bool
+  default     = false
+}
+
+variable "fungible_baseload_node_count" {
+  description = "Committed baseload node count (~60% of peak parallel width; always-on, NOT Spot)."
+  type        = number
+  default     = 6
+}
+
+variable "fungible_burst_max_node_count" {
+  description = "Max Spot burst node count (autoscales 0..N on Pub/Sub backlog)."
+  type        = number
+  default     = 80
+}

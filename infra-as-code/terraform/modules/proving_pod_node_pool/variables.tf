@@ -107,3 +107,53 @@ variable "agg_node_count" {
   type        = number
   default     = 2
 }
+
+# ─── Fungible Pool Node Topology (issue #302) ──────────────────────────────
+# The fungible `prover-node work` pool (one pod shape, role-per-message) is
+# autoscaled by KEDA on Pub/Sub backlog (see infra-as-code/kubernetes/
+# fungible_pool.yaml + keda_scaledobject.yaml). Per ADR §7 it runs BASELOAD +
+# BURST, NOT scale-to-zero:
+#   * baseload pool = dedicated/COMMITTED (NOT Spot), always-on (~60% of peak
+#     parallel width). Carries the `dedicated=zkp-prover:NoSchedule` taint and
+#     the `role=fungible-worker` label the Deployment's nodeSelector targets.
+#   * burst pool = SPOT, scales 0..N to absorb backlog bursts cheaply. Carries
+#     the same `role=fungible-worker` label plus the standard GKE spot taint.
+# Both are gated on orchestration_engine == "gke"; the MIG path is unaffected.
+# Set `enable_fungible_pool = false` (the default) to keep these pools off so
+# this slice changes nothing until the operator opts in.
+
+variable "enable_fungible_pool" {
+  description = "Provision the fungible baseload(committed)+burst(spot) node pools (GKE only). Off by default so existing topology is unchanged until opted in."
+  type        = bool
+  default     = false
+}
+
+variable "fungible_machine_type" {
+  description = "Compute machine shape for the fungible prover pool (sized for the heaviest role; e.g. c3d-highcpu-30)"
+  type        = string
+  default     = "c3d-highcpu-30"
+}
+
+variable "fungible_disk_type" {
+  description = "Fungible pool boot disk storage class"
+  type        = string
+  default     = "hyperdisk-balanced"
+}
+
+variable "fungible_disk_size_gb" {
+  description = "Fungible pool boot disk capacity in gigabytes"
+  type        = number
+  default     = 100
+}
+
+variable "fungible_baseload_node_count" {
+  description = "Fixed node count for the COMMITTED baseload pool (~60% of peak parallel width). Always-on, NOT Spot."
+  type        = number
+  default     = 6
+}
+
+variable "fungible_burst_max_node_count" {
+  description = "Max node count for the SPOT burst pool. Autoscales 0..N to absorb Pub/Sub backlog bursts."
+  type        = number
+  default     = 80
+}
