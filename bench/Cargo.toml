@@ -6,6 +6,10 @@ authors = ["Lighter Team"]
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "bench"
+path = "src/lib.rs"
+
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
