@@ -189,8 +189,11 @@ durations (noisy-neighbour Spot behaviour). Results:
   tails, zero for tight or bimodal distributions, ~50 s recovery). **Extend the
   deadline while proving, and ack only after the result is durably committed —
   never ack on pull.** *[UPDATED: real per-circuit `ack_deadline` values
-  (from real 2×P99) are now recorded in the Amendment — leaf/pre-exec ≈ 8 s,
-  radix-2 fold ≈ 6 s, radix-16 fold ≈ 30 s — and are hardware-dependent.]*
+  (from real 2×P99) are now recorded in the Amendments — on the 32-core EPYC
+  pilot leaf/pre-exec ≈ 8 s, radix-2 fold ≈ 6 s, radix-16 fold ≈ 30 s; on the
+  live `c3d-highcpu-16` GKE run (Amendment 2) leaf ≈ 150 s, radix-16 fold
+  ≈ 180 s. **The default is now 180s** (issue #312); all values are
+  hardware-dependent — re-derive per instance type.]*
 
 ### 7. Autoscaling / capacity
 
@@ -205,14 +208,17 @@ scale-down or preemption never kills a mid-prove pod. Note that backlog
 underestimates the **narrow aggregation tail** (few parallel fold tasks exist at
 the upper levels), so **do not scale to zero before the root proof exists.**
 
-> **UPDATED (see Amendment).** "max prove time" can now be grounded in real
-> data: on the measured 32-core EPYC bare-metal host, max observed prove times
+> **UPDATED (see Amendments).** "max prove time" can now be grounded in real
+> data. On the measured 32-core EPYC bare-metal host, max observed prove times
 > were ≈ 4.4 s (leaf, contended), ≈ 2.7 s (pre-exec), ≈ 2.2 s (radix-2 fold)
-> and ≈ 12.6 s (radix-16 fold). These are **hardware-dependent** — slower cloud
-> instances scale proportionally, so set `terminationGracePeriodSeconds` from
-> the *target* instance type, not these EPYC figures. The real peak-RSS figures
-> (radix-2 fold ≈ 0.31 GB, radix-16 fold ≈ 2.2 GB) are also recorded in the
-> Amendment for bin-packing the fungible pool.
+> and ≈ 12.6 s (radix-16 fold). On the **live `c3d-highcpu-16` GKE run**
+> (Amendment 2) they were far higher — leaf max ≈ 73.65 s and radix-16 fold max
+> ≈ 83.26 s — driving `terminationGracePeriodSeconds` to ≈360 s there. These are
+> **hardware-dependent** — slower cloud instances scale proportionally, so set
+> `terminationGracePeriodSeconds` from the *target* instance type, not the EPYC
+> figures. The real peak-RSS figures (radix-2 fold ≈ 0.31 GB, radix-16 fold
+> ≈ 2.2 GB) are also recorded in the first Amendment for bin-packing the
+> fungible pool.
 
 The block volumetric remains a free, forgiving knob **only if all four
 invariants hold**: (1) fungible pods, (2) pull-based work-stealing, (3)
@@ -316,6 +322,78 @@ per target instance type; slower cloud instances scale proportionally.
 - This dedicated-hardware measurement **partially closes** open item (a)
   (real-Spot prove-time P99) but does **not fully close** it; a real-Spot
   measurement is still pending.
+
+## Amendment 2 (live 500-tx GKE run on c3d-highcpu-16)
+
+- Status of amendment: empirical update — the first **real cloud (GKE/Spot)**
+  measurement. Corrects the prove-time / `ack_deadline` *figures* in the first
+  Amendment (which used the 32-core EPYC pilot) for the actual cloud instance
+  type; **decisions unchanged**.
+- Date: 2026-06-28
+- Supersedes: the EPYC-derived `ack_deadline` numbers (leaf ≈8s, radix-2 ≈6s,
+  radix-16 ≈30s) **for the `c3d-highcpu-16` target**. The EPYC figures remain
+  valid as a *fast dedicated-host* data point; they were **optimistic for this
+  instance type**.
+
+### Run shape
+
+A live Phase-1 GKE smoke test: **500 txs → 125 leaves at `tx_per_proof=4`,
+radix-16, 10× `c3d-highcpu-16`** (16 vCPU / 32 GiB) **Spot** workers. This is the
+first measurement on real cloud Spot hardware (vs the bare-metal EPYC pilot).
+
+### Real measured timings (live)
+
+| Metric | Result |
+|---|---|
+| Total wall time | **13.35 min** (800.96s) for the full 500-tx block → verified root; leaf+fold phases **overlapped** (async gating works) |
+| Effective speedup | ≈ **7.5×** (100.6 worker-min of proving in 13.35 wall-min on 10 workers) |
+| Leaf prove (125) | avg **42.55s**, min 12.03s, max **73.65s**; total 88.65 worker-min |
+| Fold prove (9 = 8 L1 + 1 root, radix-16) | avg **79.89s**, min 68.97s, max **83.26s** (CV ≈ 0.06, tight); total 11.98 worker-min |
+| GCS commit + CAS (`commit_and_gate`) | leaf avg 2.17s, fold avg 2.39s; ~4.9 worker-min ≈ **~5% of proving time → negligible** |
+
+Hardware delta: `c3d-highcpu-16` folds are ~**8× slower** than the EPYC pilot
+(~10s → ~80s) and leaves prove ~**20–35×** the pilot's ~2s (fewer cores + the
+prefix-replay tail below).
+
+### The prefix-replay tail is the dominant leaf cost at scale
+
+The wide leaf spread (12s → 74s, vs the tight fold CV ≈ 0.06) is driven by the
+**Option-A prefix-replay tail**, **not** circuit warmup. Under Option-A state
+threading, leaf *i* re-executes chunks `0..i` to reconstruct its pre-state
+before proving, so late leaves replay more prior chunks and grow roughly `O(N)`
+across the block. This is now the **dominant leaf cost at scale**. The mitigation
+lever is the **pre-state corpus** (#243 / #257): precomputing/serving per-leaf
+pre-states removes the replay and flattens the tail. A larger `tx_per_proof`
+(≥4) also shortens the tail by reducing the leaf count (125 at C=4 vs 500 at
+C=1) — `C=4` beat `C=1` at 500 txs.
+
+### Corrected `ack_deadline` recommendations (real cloud 2×P99)
+
+Derived as **2×P99** on the measured `c3d-highcpu-16` run. **Hardware-dependent**
+— re-derive per target instance type.
+
+| Worker role | Measured P99 (c3d-highcpu-16) | Recommended `ack_deadline` (2×P99) |
+|---|---|---|
+| Leaf prover + prefix-replay | ≈ **74 s** | ≈ **150 s** |
+| radix-16 fold | ≈ **83 s** | ≈ **180 s** ← long pole |
+
+**The default `ack_deadline` is raised 60s → 180s** (issue #312). The old 60s
+default was *shorter than* a ≈80s fold: every fold exceeded its base Pub/Sub
+lease and survived only on the `modifyAckDeadline` heartbeat with **zero
+margin** — a single missed/delayed beat → redelivery mid-prove → wasted
+duplicate work. 180s = 2×P99 of the radix-16 fold long pole, still well within
+the Pub/Sub `[10, 600]s` range, and `terminationGracePeriodSeconds` is sized
+accordingly (≈360s). The guard (§6) remains mandatory regardless.
+
+### Confidence
+
+- **HIGH** — the fold distribution is tight and well-characterized (CV ≈ 0.06).
+- **MEDIUM** — leaf P99 is dominated by the prefix-replay tail, which is
+  workload-shape-dependent (it grows with leaf count / block size); re-derive for
+  a different N. This run did not stress real Spot **preemption** mid-prove.
+- This run **substantially closes** open item (a) (real-Spot prove-time P99) for
+  this instance type and workload shape; preemption-variance characterization is
+  the remaining gap.
 
 ## Open items
 

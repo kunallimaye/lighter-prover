@@ -279,7 +279,7 @@ hand-set:
 | `radix` | Tree fan-in (children per node). Circuit max fan-in is 16 (`HEX_RADIX`). **Default 16** (real workload). radix-2 still works when set explicitly. | CLI `--radix` (default 16); cloudbuild `_RADIX` (16); render `--radix` (default 16) |
 | `leaf-count` (N) | **DERIVED** as `ceil(T / C)` per block by `work` — *not* an operator knob there. Still an explicit input for the phase-locked `tree-node`/`root-coordinator` subcommands + `render_pod_spec.py`. | Derived in `work`; CLI `--leaf-count` on `tree-node`/`root-coordinator`; cloudbuild `_LEAF_COUNT`; render `--leaf-count` |
 | depth | **DERIVED**: `ceil(log_radix N)`. **Never set directly.** | Computed in `prover_node.rs` (`tree_depth`) and `render_pod_spec.py` (`tree_depth`) |
-| `ack_deadline` | Pub/Sub lease ≈ 2×P99 prove time. Default 60s. | CLI `--ack-deadline` / `PROVER_PUBSUB_ACK_DEADLINE`; render `--ack-deadline` |
+| `ack_deadline` | Pub/Sub lease ≈ 2×P99 prove time. Default **180s** (radix-16 fold ≈80s on `c3d-highcpu-16`, live 500-tx run; hardware-dependent). | CLI `--ack-deadline` / `PROVER_PUBSUB_ACK_DEADLINE`; render `--ack-deadline` |
 | `baseload` / `burst` | KEDA min / (max-min) replicas. baseload ≈60% of peak width (always-on). | render `--baseload` / `--burst`; Terraform `fungible_baseload_node_count` / `fungible_burst_max_node_count` |
 
 > **`render_pod_spec.py --blocks` is NOT the 3-knob `work --blocks`.** The
@@ -295,22 +295,68 @@ valid `--txs-per-chunk` values are the divisors of 500:
 from the real block), so the in-pod `zip_eq` panic from a short final chunk
 cannot occur.
 
-**`ack_deadline` guidance (hardware-dependent, ADR "Amendment (real prove-time
-measurement)"):**
+**`ack_deadline` guidance (hardware-dependent — re-derive per instance type from
+real 2×P99).** The numbers below are the **measured live 500-tx Phase-1 run** on
+`c3d-highcpu-16` (16 vCPU / 32 GiB), which supersede the earlier 32-core EPYC
+pilot figures (folds were ≈10s there ⇒ a 60s default):
 
-| Worker role | Recommended `ack_deadline` |
-|---|---|
-| leaf / pre-exec | ≈ **8 s** |
-| radix-2 fold | ≈ **6 s** |
-| radix-16 fold | ≈ **30 s** |
+| Worker role | Measured P99 (c3d-highcpu-16) | Recommended `ack_deadline` (2×P99) |
+|---|---|---|
+| leaf / prefix-replay | ≈ **74 s** (max 73.65s) | ≈ **150 s** |
+| radix-16 fold | ≈ **83 s** (max 83.26s) | ≈ **180 s** ← long pole |
 
-The pool default (`60s`) comfortably covers the radix-16 fold long pole; re-derive
-per target instance from real 2×P99. The lease is also heartbeated via
-`modifyAckDeadline` while proving (`WorkLease::extend`).
+The pool default is now **180s** so a single fungible worker image (any role per
+message) never under-leases a radix-16 fold. The lease is *also* heartbeated via
+`modifyAckDeadline` while proving (`WorkLease::extend`) — but the old 60s base
+was *shorter than* a ≈80s fold, leaving **zero margin**: every fold relied
+entirely on the heartbeat, and a single missed/delayed beat → redelivery
+mid-prove → wasted duplicate work. Pub/Sub clamps to `[10, 600]s`. **Re-derive
+this per instance type** — folds here are ~8× slower than the EPYC pilot.
 
 ---
 
-## 5. Cloud (GKE) deployment — requires live infra
+## 5. Measured performance (live 500-tx Phase-1 run)
+
+These are **real measured results** from a live Phase-1 GKE smoke test, not pilot
+extrapolations. Use them to size `ack_deadline`, estimate wall time, and pick
+`tx_per_proof`.
+
+**Run shape:** 500 txs → 125 leaves at `tx_per_proof=4`, **radix-16**, on
+**10× `c3d-highcpu-16`** (16 vCPU / 32 GiB) Spot workers.
+
+| Metric | Result |
+|---|---|
+| **Total wall time** | **13.35 min** (800.96s) for the full 500-tx block → verified root |
+| Effective speedup | ≈ **7.5×** (100.6 worker-min of proving compressed into 13.35 wall-min on 10 workers) |
+| Phase overlap | Leaf and fold phases **overlapped** — async gating works; folds start as soon as their children commit |
+| **Leaf proving** (125 tasks) | avg **42.55s**, min 12.03s, max 73.65s; total 88.65 worker-min |
+| **Fold proving** (9 tasks = 8 L1 + 1 root, radix-16) | avg **79.89s**, min 68.97s, max 83.26s (CV ≈ 0.06, very tight); total 11.98 worker-min |
+| GCS commit + CAS (`commit_and_gate`) | leaf writes avg 2.17s (1.63–3.04s), fold writes avg 2.39s (2.12–3.02s); ~4.9 worker-min ≈ **~5% of proving time → negligible** |
+
+**Why the leaf spread is so wide (12s → 74s) — the prefix-replay tail.** Under
+Option-A state threading, leaf *i* re-executes chunks `0..i` to reconstruct the
+pre-state before proving its own chunk. Late leaves replay more prior chunks, so
+their wall time grows roughly `O(N)` across the block. The spread is therefore an
+**inherent property of prefix replay, NOT circuit warmup** (folds, by contrast,
+are tight at CV ≈ 0.06). This is the dominant leaf cost at scale; the
+**pre-state corpus** (#243 / #257) is the mitigation lever — precomputing/serving
+per-leaf pre-states removes the replay and flattens the tail.
+
+**Pick `tx_per_proof ≥ 4`, not 1, at scale.** A larger chunk means fewer leaves
+for the same block (125 leaves at C=4 vs 500 at C=1), which **shortens the
+prefix-replay tail** (fewer chunks to re-execute, lower max leaf time) and cuts
+fold fan-out work — at the cost of a slightly heavier per-leaf circuit. At 500
+txs, `C=4` clearly beat `C=1`.
+
+**Hardware caveat.** `c3d-highcpu-16` is ~**8× slower per fold** than the earlier
+32-core EPYC pilot (~10s folds there → ~80s here) and leaves prove ~**20–35×**
+the pilot's ~2s (fewer cores + the prefix tail). **Prior pilot timings were
+optimistic for this instance type** — always re-derive `ack_deadline` (2×P99) and
+wall-time estimates from your own measured run.
+
+---
+
+## 6. Cloud (GKE) deployment — requires live infra
 
 > **Every step here is a deliberate live operator action.** Terraform `apply`,
 > image build+push, KEDA install, and `kubectl apply` all touch real cloud. The
@@ -371,9 +417,9 @@ per target instance from real 2×P99. The lease is also heartbeated via
      python3 infra-as-code/scripts/render_pod_spec.py \
        --config config.toml --image default --emit-fungible \
        --arch c3d --radix 16 --leaf-count 256 \
-       --topic prover-folds --subscription prover-work \
-       --baseload 6 --burst 80 --ack-deadline 60
-     # -> *-fungible.rendered.yaml (Deployment) + *-fungible-keda.rendered.yaml (KEDA)
+        --topic prover-folds --subscription prover-work \
+        --baseload 6 --burst 80 --ack-deadline 180
+      # -> *-fungible.rendered.yaml (Deployment) + *-fungible-keda.rendered.yaml (KEDA)
      ```
 
 4. **Install KEDA (fungible path only):**
@@ -398,7 +444,7 @@ per target instance from real 2×P99. The lease is also heartbeated via
 
 ---
 
-## 6. The transport correctness contract (load-bearing)
+## 7. The transport correctness contract (load-bearing)
 
 The `WorkTransport` trait (`bench/src/transport/mod.rs`) is the durable contract
 both backends implement: `LocalTransport` (dev/test) and `PubSubGcsTransport`
@@ -427,7 +473,7 @@ Two more invariants the trait bakes in:
 
 ---
 
-## 7. Where it all plugs in
+## 8. Where it all plugs in
 
 A map from the thing you run to the thing it drives:
 
@@ -453,11 +499,13 @@ image URI and pod resources and writes the manifests.
 
 ---
 
-## 8. Cross-references
+## 9. Cross-references
 
 - **ADR:** `docs/decisions/ADR-distributed-recursive-proving-architecture.md`
   (chain-vs-tree, dynamic depth, transport, autoscaling, the ack_deadline
-  "Amendment (real prove-time measurement)"). See also the companion
+  "Amendment (real prove-time measurement)" for the EPYC pilot and
+  "Amendment 2 (live 500-tx GKE run on c3d-highcpu-16)" for the real cloud
+  numbers + the 180s default). See also the companion
   `docs/decisions/ADR-distributed-gke-topology.md`.
 - **Design discussion:** #287 (architecture review + open cryptographer questions).
 - **Issue trail:** #281 (reduction-tree fixed-VK hardening), #283 (prover-node

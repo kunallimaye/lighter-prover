@@ -38,8 +38,9 @@ drain).
   `orchestration_engine == "gke"` **and** `enable_fungible_pool = true`). Both
   carry `role=fungible-worker` (the Deployment's `nodeSelector`) and the
   `dedicated=zkp-prover:NoSchedule` taint (tolerated by the Deployment).
-- **Graceful drain (MANDATORY, ADR §7):** `terminationGracePeriodSeconds: 120`
-  (≥ max prove time; the radix-16 fold is ≈30s, the long pole) plus an in-binary
+- **Graceful drain (MANDATORY, ADR §7):** `terminationGracePeriodSeconds: 360`
+  (≥ max prove time; the radix-16 fold is ≈83s on `c3d-highcpu-16` per the live
+  500-tx run, the long pole) plus an in-binary
   **SIGTERM handler** (`bench::shutdown`): on scale-down / Spot preemption the
   dispatch loop **stops pulling new work, finishes the in-flight prove, commits +
   acks, then exits** — a pod is never killed mid-prove. The
@@ -77,7 +78,7 @@ python3 infra-as-code/scripts/render_pod_spec.py \
   --config config.toml --image default --emit-fungible \
   --arch c3d --radix 16 --leaf-count 256 \
   --topic prover-folds --subscription prover-work \
-  --baseload 6 --burst 80 --ack-deadline 60
+  --baseload 6 --burst 80 --ack-deadline 180
 # -> *-fungible.rendered.yaml (Deployment) + *-fungible-keda.rendered.yaml (KEDA)
 ```
 
