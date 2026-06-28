@@ -22,6 +22,13 @@ path = "src/bin/prover_node.rs"
 default = ["parallel", "std"]
 parallel = ["plonky2/parallel"]
 std = ["plonky2/std"]
+# Production work-transport backend (GCP Pub/Sub pull + GCS native-API atomic
+# claim/commit). OFF by default so the default build, `cargo test -p bench`, and
+# the LocalTransport dev/test path stay 100% cloud-free with no cloud
+# dependencies compiled in. Enable with `cargo build --features pubsub` to wire
+# the production `PubSubGcsTransport`. TLS is rustls (no OpenSSL/pkg-config
+# system dependency). See `bench/src/transport/pubsub.rs`.
+pubsub = ["dep:google-cloud-storage", "dep:google-cloud-pubsub", "dep:google-cloud-googleapis", "dep:tokio"]
 
 [dependencies]
 num = { workspace = true }
@@ -47,6 +54,15 @@ tiny-keccak =  { workspace = true }
 paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
 base64 = "0.21"
+
+# ── Production work-transport backend deps (behind the `pubsub` feature only) ──
+# Maintained crates from the `google-cloud-rust` family. rustls-tls avoids the
+# OpenSSL/pkg-config system dependency. These are NOT compiled in the default
+# build; `dep:`-gated by the `pubsub` feature above.
+google-cloud-storage = { version = "0.24", default-features = false, features = ["rustls-tls", "auth"], optional = true }
+google-cloud-pubsub = { version = "0.30", default-features = false, features = ["rustls-tls", "auth"], optional = true }
+google-cloud-googleapis = { version = "0.16", optional = true }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
 
 [dev-dependencies]
 flate2 = "1.0"
