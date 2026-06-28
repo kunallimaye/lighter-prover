@@ -35,9 +35,11 @@
 //!    [`PubSubLease::ack`] acks only **after** the output is durably committed;
 //!    [`PubSubLease::nack`] abandons on failure to trigger redelivery.
 //!
-//! 3. **Ack deadline ≈ 2×P99**, hardware-dependent and configurable. Documented
-//!    defaults (real measured P99 from the pilot): leaf + pre-exec ≈ 8s ⇒ ~16s;
-//!    radix-2 fold ≈ 6s ⇒ ~12s; radix-16 fold ≈ 30s ⇒ ~60s. See
+//! 3. **Ack deadline ≈ 2×P99**, hardware-dependent and configurable. Real
+//!    measured P99 from the live 500-tx Phase-1 GKE run (`c3d-highcpu-16`):
+//!    leaf + prefix-replay ≈ 74s ⇒ ~150s; radix-16 fold ≈ 83s ⇒ ~180s (the long
+//!    pole, hence the **180s default**). These are ~8× the earlier 32-core EPYC
+//!    pilot (≈30s fold ⇒ 60s) — re-derive per instance type. See
 //!    [`PubSubGcsConfig::default_ack_deadline_secs`] and the `--ack-deadline`
 //!    flag wired in `prover_node.rs`.
 //!
@@ -96,18 +98,22 @@ pub struct PubSubGcsConfig {
 impl PubSubGcsConfig {
     /// Recommended default ack deadline (seconds), ≈ 2×P99, hardware-dependent.
     ///
-    /// Real measured P99 prove times from the pilot:
-    /// * leaf + pre-exec ≈ 8s  ⇒ ack ≈ 16s
-    /// * radix-2 fold    ≈ 6s  ⇒ ack ≈ 12s
-    /// * radix-16 fold   ≈ 30s ⇒ ack ≈ 60s
+    /// Real measured P99 prove times from the **live 500-tx Phase-1 GKE run**
+    /// (radix-16, `tx_per_proof=4`, 10× `c3d-highcpu-16` Spot workers):
+    /// * leaf + prefix-replay ≈ 74s (P99 ≈ max 73.65s) ⇒ ack ≈ 150s
+    /// * radix-16 fold        ≈ 83s (P99 ≈ max 83.26s) ⇒ ack ≈ 180s
     ///
-    /// We default to the **largest** (60s) so a single worker image that may
+    /// We default to the **largest** (180s) so a single worker image that may
     /// assume any role per message never under-leases a radix-16 fold; operators
-    /// SHOULD tune `--ack-deadline` to their hardware. Pub/Sub clamps to
-    /// [10, 600]s. The lease is additionally heartbeated via
-    /// [`PubSubLease::extend`] while proving, so this is a floor, not a cap.
+    /// SHOULD re-derive `--ack-deadline` per instance type (2×P99 of their own
+    /// measured prove time — this is ≈8× slower per fold than the earlier
+    /// 32-core EPYC pilot, where folds were ≈10s ⇒ a 60s default). Pub/Sub
+    /// clamps to [10, 600]s. The lease is additionally heartbeated via
+    /// [`PubSubLease::extend`] while proving, so this is a floor, not a cap —
+    /// but a 60s base with ≈80s folds left ZERO margin and relied entirely on
+    /// the heartbeat (a missed beat → redelivery mid-prove → duplicate work).
     pub const fn default_ack_deadline_secs() -> i32 {
-        60
+        180
     }
 
     /// Validate the config the way Pub/Sub will: ack deadline in [10, 600]s and
@@ -607,8 +613,9 @@ mod tests {
 
     #[test]
     fn default_ack_deadline_is_radix16_2xp99() {
-        // Largest role P99 (radix-16 fold ≈ 30s) ⇒ 2×P99 ≈ 60s default.
-        assert_eq!(PubSubGcsConfig::default_ack_deadline_secs(), 60);
+        // Largest role P99 from the live 500-tx c3d-highcpu-16 run (radix-16
+        // fold ≈ 83s) ⇒ 2×P99 ≈ 180s default. Stays within Pub/Sub [10, 600]s.
+        assert_eq!(PubSubGcsConfig::default_ack_deadline_secs(), 180);
     }
 
     #[test]

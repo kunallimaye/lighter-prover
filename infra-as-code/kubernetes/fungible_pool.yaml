@@ -85,16 +85,16 @@ spec:
       serviceAccountName: prover-sa
       # ── Graceful drain (ADR §7 — MANDATORY) ──────────────────────────────
       # terminationGracePeriodSeconds MUST be >= max prove time on the TARGET
-      # instance type. Guidance (hardware-dependent; re-derive per instance):
-      #   leaf prove + pre-exec ≈ 8s ack_deadline (2xP99)
-      #   radix-2 fold          ≈ 6s
-      #   radix-16 fold         ≈ 30s  <-- the long pole; drives this floor
-      # 120s gives comfortable headroom above the 30s radix-16 fold even on a
-      # slower cloud instance. Raise it if the target instance proves slower.
+      # instance type. Guidance (hardware-dependent; re-derive per instance).
+      # Measured in the live 500-tx Phase-1 run on c3d-highcpu-16:
+      #   leaf prove + prefix-replay ≈ 74s max (P99) ⇒ ack ≈ 150s (2xP99)
+      #   radix-16 fold              ≈ 83s max (P99) ⇒ ack ≈ 180s  <-- long pole
+      # 360s gives comfortable headroom above the ≈83s radix-16 fold on this
+      # instance type. Raise it if the target instance proves slower.
       # On SIGTERM the dispatch loop (bench::shutdown) stops pulling NEW work,
       # finishes the in-flight prove, commits + acks, then exits — so a pod is
       # never killed mid-prove within this window.
-      terminationGracePeriodSeconds: 120
+      terminationGracePeriodSeconds: 360
       nodeSelector:
         # Schedule onto the prover node pools (baseload committed OR burst spot);
         # both pools carry these labels. See proving_pod_node_pool module.
@@ -139,10 +139,11 @@ spec:
         - name: PROVER_PUBSUB_OBJECT_PREFIX
           value: ""
         # ack_deadline ≈ 2xP99 of the LONGEST role this pool runs (radix-16 fold
-        # ≈ 30s ⇒ ~60s). The lease is also heartbeated (modifyAckDeadline) while
-        # proving. Pub/Sub valid range [10, 600]s.
+        # ≈ 83s on c3d-highcpu-16, live 500-tx run ⇒ ~180s). The lease is also
+        # heartbeated (modifyAckDeadline) while proving, but a 60s base with
+        # ≈80s folds left ZERO margin → redelivery risk. Pub/Sub range [10, 600]s.
         - name: ACK_DEADLINE
-          value: "60"
+          value: "180"
         - name: RADIX
           value: "16"
         - name: LEAF_COUNT

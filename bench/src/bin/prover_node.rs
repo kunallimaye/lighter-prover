@@ -241,10 +241,12 @@ pub enum Role {
         /// Falls back to env `PROVER_PUBSUB_BUCKET` when the flag is empty.
         #[arg(long, default_value = "")]
         bucket: String,
-        /// (pubsub) Ack deadline (seconds), ≈ 2×P99. Default 60s (radix-16 fold
-        /// ≈ 30s ⇒ 2×P99). Pub/Sub range [10, 600]s; the lease is also
-        /// heartbeated via modifyAckDeadline while proving.
-        #[arg(long, default_value_t = 60)]
+        /// (pubsub) Ack deadline (seconds), ≈ 2×P99. Default 180s (radix-16 fold
+        /// ≈ 80s on `c3d-highcpu-16` ⇒ 2×P99 ≈ 180s; measured in the live 500-tx
+        /// Phase-1 run). Hardware-dependent — re-derive per instance type. Pub/Sub
+        /// range [10, 600]s; the lease is also heartbeated via modifyAckDeadline
+        /// while proving.
+        #[arg(long, default_value_t = 180)]
         ack_deadline: i32,
         /// (pubsub) Optional object-name prefix so multiple runs can share one
         /// bucket without colliding (e.g. `runs/block_1042/`).
@@ -1886,7 +1888,7 @@ fn run_pubsub_work(
     let ack_deadline = std::env::var("PROVER_PUBSUB_ACK_DEADLINE")
         .ok()
         .and_then(|v| v.parse::<i32>().ok())
-        .filter(|_| ack_deadline == 60) // only override the default if env set
+        .filter(|_| ack_deadline == 180) // only override the default if env set
         .unwrap_or(ack_deadline);
 
     let depth = t_depth(leaf_count, radix).max(1);
