@@ -245,11 +245,27 @@ def main():
   parser = argparse.ArgumentParser(description="Render dynamic K8s Proving Pod manifest")
   parser.add_argument("--config", default="config.toml", help="Path to config.toml")
   parser.add_argument("--arch", default="", help="Silicon architecture override (c4a, c3d, t2d, c4d)")
-  parser.add_argument("--blocks", type=int, default=2, help="Parallel pipeline blocks")
+  parser.add_argument(
+      "--blocks",
+      type=int,
+      default=2,
+      help="K8s pipeline PARALLELISM (concurrent Job pods per level). NOTE: this "
+           "is DISTINCT from the `prover-node work --blocks` 3-knob REPLAY count "
+           "(issue #310): here it caps Indexed-Job parallelism, it does NOT replay "
+           "the block. Left unchanged for back-compat.",
+  )
   parser.add_argument("--input", default="infra-as-code/kubernetes/prover_pod_unit.yaml", help="Input YAML")
   parser.add_argument("--output", default="infra-as-code/kubernetes/prover_pod_unit.rendered.yaml", help="Output YAML")
   parser.add_argument("--image", required=True, help="Container release tag or 'default'")
-  parser.add_argument("--radix", type=int, default=2, help="Reduction tree radix (fan-in per node)")
+  parser.add_argument(
+      "--radix",
+      type=int,
+      default=16,
+      help="Reduction tree radix (fan-in per node). Default 16 — the real "
+           "workload radix (shallow trees at real N: 100→depth 2, 500→depth 3) "
+           "matching the prover-node CLI default (issue #310). Pass --radix 2 for "
+           "the tiny smoke / back-compat path; radix-2 stays fully supported.",
+  )
   parser.add_argument(
       "--leaf-count",
       type=int,

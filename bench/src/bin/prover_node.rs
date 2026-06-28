@@ -64,8 +64,37 @@ use plonky2::util::timing::TimingTree;
 /// Chain id used by the production bench harness (`bench/src/bin/bench.rs`).
 const CHAIN_ID: u32 = 304;
 
-/// Directory the filesystem proof transport reads from and writes to.
+/// Default directory the filesystem proof transport reads from and writes to.
+/// The effective directory can be overridden per-replay (B>1 namespacing) via
+/// [`set_proof_dir`] / [`proof_dir`]; for B==1 it stays exactly this, preserving
+/// the existing single-run behaviour byte-for-byte.
 const PROOF_DIR: &str = "reports/stark_proofs";
+
+/// Process-global override for the proof store directory. Set per-replay so a
+/// B>1 run namespaces each replay's leaves/folds/gating markers under a distinct
+/// `<PROOF_DIR>/block_<b>/` subtree — identical-content proofs across replays
+/// therefore land under DISTINCT keys and cannot dedup/collide. When unset, the
+/// effective dir is `PROOF_DIR` (the unchanged single-run path).
+static PROOF_DIR_OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// The effective proof store directory (override if set, else `PROOF_DIR`).
+fn proof_dir() -> String {
+    PROOF_DIR_OVERRIDE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("proof-dir override mutex poisoned")
+        .clone()
+        .unwrap_or_else(|| PROOF_DIR.to_string())
+}
+
+/// Set (or clear, with `None`) the per-replay proof store directory override.
+fn set_proof_dir(dir: Option<String>) {
+    *PROOF_DIR_OVERRIDE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("proof-dir override mutex poisoned") = dir;
+}
 
 #[derive(Parser)]
 #[command(
@@ -99,11 +128,11 @@ pub enum Role {
         level: usize,
         #[arg(long)]
         node_idx: usize,
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 16)]
         radix: usize,
         /// Total number of level-0 leaf proofs (N) feeding the tree. Decoupled
         /// from `radix` (fan-in) so N can exceed radix and span multiple levels.
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 16)]
         leaf_count: usize,
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
@@ -112,11 +141,11 @@ pub enum Role {
     RootCoordinator {
         #[arg(long, default_value_t = 1042)]
         block_number: u64,
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 16)]
         radix: usize,
         /// Total number of level-0 leaf proofs (N). The root level is computed
         /// dynamically as `ceil(log_radix(N))` rather than hardcoded.
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 16)]
         leaf_count: usize,
         #[arg(long, default_value_t = 0)]
         node_idx: usize,
@@ -131,6 +160,30 @@ pub enum Role {
     /// idempotently, acks, and lets readiness gating publish the next level's
     /// folds — until the dynamic-depth root is produced and verified.
     ///
+    /// # 3-knob workload UX (issue #310)
+    ///
+    /// The workload is expressed as **three operator-facing knobs**; the fragile
+    /// internals (`leaf_count`, `depth`, node geometry) are DERIVED — the
+    /// operator never hand-sets them:
+    /// * `--blocks B` (default 1): replay the same `bench_test.json` block B
+    ///   times as B INDEPENDENT trees (each its own object-prefix namespace +
+    ///   own verified root). B==1 behaves exactly as a single run; B>1 namespaces
+    ///   each replay (`<prefix>/block_<b>/`) so identical-content proofs don't
+    ///   collide / dedup. This is REPLAY, not a distinct-block corpus.
+    /// * `--txs-per-block T` (default 0 ⇒ ALL of the loaded block's real txs):
+    ///   how many of the block's real transactions to prove per block
+    ///   (`T <= block_tx_count`).
+    /// * `--txs-per-chunk C` (alias `--tx-per-proof`, default 1): transactions
+    ///   per leaf. C must EVENLY DIVIDE T (else the final chunk is short and the
+    ///   in-pod witness gen `zip_eq`-panics).
+    ///
+    /// DERIVED automatically: `leaf_count_per_block = ceil(T / C)` (== T/C since
+    /// C | T), `depth = ceil(log_radix(leaf_count_per_block))`, node geometry.
+    /// All of this is validated **fail-fast at seed time** (on the seeder /
+    /// laptop, NOT in the pod): a non-divisor C, `T > block_tx_count`, an
+    /// out-of-range `leaf_count`, or `B < 1` are rejected with a clear,
+    /// actionable message BEFORE any seed/pod action.
+    ///
     /// The backend is selected by `--transport`:
     /// * `local` (default) — the in-process/filesystem [`LocalTransport`]; runs
     ///   the full e2e local smoke (no cloud), unchanged from the prior slice.
@@ -140,12 +193,23 @@ pub enum Role {
     ///   `--ack-deadline`). Both backends implement the SAME `WorkTransport`
     ///   trait, so the dispatch loop is transport-agnostic.
     Work {
-        #[arg(long, default_value_t = 2)]
+        /// Tree fan-in (children per node). Default 16 (the real workload radix):
+        /// shallow trees at real N (100→depth 2, 500→depth 3) with comfortable
+        /// RAM. Pass `--radix 2` for the tiny smoke / back-compat path.
+        #[arg(long, default_value_t = 16)]
         radix: usize,
-        /// Total number of level-0 leaves N to prove and aggregate.
-        #[arg(long, default_value_t = 4)]
-        leaf_count: usize,
+        /// **Knob 1** — replay the loaded block this many times as independent
+        /// trees (each namespaced + independently verified). Default 1.
         #[arg(long, default_value_t = 1)]
+        blocks: usize,
+        /// **Knob 2** — how many of the block's real transactions to prove per
+        /// block. Default 0 ⇒ ALL of the loaded block's real txs.
+        #[arg(long, default_value_t = 0)]
+        txs_per_block: usize,
+        /// **Knob 3** — transactions per leaf. Canonical flag `--tx-per-proof`;
+        /// `--txs-per-chunk` is an accepted alias. Must evenly divide
+        /// `--txs-per-block`. Default 1.
+        #[arg(long = "tx-per-proof", alias = "txs-per-chunk", default_value_t = 1)]
         tx_per_proof: usize,
         #[arg(long, default_value_t = 1042)]
         block_number: u64,
@@ -256,15 +320,311 @@ fn real_children_for_node(n: usize, radix: usize, level: usize, node_idx: usize)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// 3-knob workload plan: derive the fragile internals + fail-fast validation
+//
+// The operator sets three knobs (blocks B, txs-per-block T, txs-per-chunk C) and
+// `radix`; everything downstream (leaf_count, depth, node geometry) is DERIVED
+// here and VALIDATED before any seed/pod action, so the misconfiguration
+// minefield (#310) is collapsed into one place that fails fast with clear,
+// actionable messages on the seeder/laptop rather than panicking in a pod.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// All divisors of `n` in ascending order. Used to build an actionable error
+/// message ("valid divisors of 500: 1,2,4,5,…") computed from the REAL loaded
+/// block tx count, never hardcoded.
+fn divisors(n: usize) -> Vec<usize> {
+    if n == 0 {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    let mut d = 1usize;
+    while d * d <= n {
+        if n % d == 0 {
+            out.push(d);
+            if d != n / d {
+                out.push(n / d);
+            }
+        }
+        d += 1;
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The fully-derived, validated workload geometry for ONE block (replay).
+///
+/// Built by [`WorkloadPlan::derive`] from the three operator knobs + radix + the
+/// REAL loaded block tx count. The operator never hand-sets `leaf_count` or
+/// `depth`; both are derived here. Construction is the single fail-fast gate:
+/// `derive` returns `Err(message)` for every misconfiguration the issue calls
+/// out, so callers reject BEFORE seeding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkloadPlan {
+    /// Number of replays (B); each replay is an independent, namespaced tree.
+    blocks: usize,
+    /// Transactions proved per block (T), after defaulting 0 ⇒ all real txs.
+    txs_per_block: usize,
+    /// Transactions per leaf (C). Evenly divides `txs_per_block`.
+    txs_per_chunk: usize,
+    /// Tree fan-in.
+    radix: usize,
+    /// The real loaded block's transaction count (e.g. 500).
+    block_tx_count: usize,
+    /// DERIVED: leaves per block = txs_per_block / txs_per_chunk.
+    leaf_count_per_block: usize,
+    /// DERIVED: depth = ceil(log_radix(leaf_count_per_block)).
+    depth: usize,
+}
+
+impl WorkloadPlan {
+    /// Derive + validate the plan from the operator knobs. `txs_per_block == 0`
+    /// is the "all real txs" sentinel (defaults to `block_tx_count`).
+    ///
+    /// Rejects, with a clear actionable message and BEFORE any seed/pod action:
+    /// * `B < 1`,
+    /// * `T > block_tx_count` (the real loaded block size),
+    /// * `C == 0` or `T % C != 0` (non-divisor ⇒ short final chunk ⇒ in-pod
+    ///   `zip_eq` panic),
+    /// * a derived `leaf_count_per_block` that would exceed the available chunks
+    ///   (`ceil(block_tx_count / C)`), i.e. an out-of-range leaf the worker
+    ///   cannot prove (would otherwise panic in-pod on the chunk-index assert).
+    fn derive(
+        blocks: usize,
+        txs_per_block: usize,
+        txs_per_chunk: usize,
+        radix: usize,
+        block_tx_count: usize,
+    ) -> Result<Self, String> {
+        if radix < 2 {
+            return Err(format!(
+                "radix must be >= 2 (got {radix}); the reduction-tree fan-in cannot be < 2."
+            ));
+        }
+        if radix > HEX_RADIX {
+            return Err(format!(
+                "radix {radix} exceeds the reduction-tree node fan-in {HEX_RADIX}; \
+                 use --radix in [2, {HEX_RADIX}] (the two built radixes are 2 and 16)."
+            ));
+        }
+        if blocks < 1 {
+            return Err(format!(
+                "--blocks B must be >= 1 (got {blocks}). B is the replay count: the same \
+                 block is proved B times as B independent, namespaced trees. There is no \
+                 distinct-block corpus on this branch, so B==0 is meaningless."
+            ));
+        }
+        if block_tx_count == 0 {
+            return Err(
+                "the loaded block has 0 transactions; nothing to prove (check bench_test.json)."
+                    .to_string(),
+            );
+        }
+        // Default T (0 sentinel) to the full real block.
+        let t = if txs_per_block == 0 {
+            block_tx_count
+        } else {
+            txs_per_block
+        };
+        if t > block_tx_count {
+            return Err(format!(
+                "--txs-per-block T={t} exceeds the loaded block's real transaction count \
+                 ({block_tx_count}); choose T <= {block_tx_count} (or omit it to prove all \
+                 {block_tx_count})."
+            ));
+        }
+        let c = txs_per_chunk;
+        if c == 0 {
+            return Err(
+                "--txs-per-chunk C must be >= 1 (got 0); each leaf must carry at least one tx."
+                    .to_string(),
+            );
+        }
+        if t % c != 0 {
+            let divs = divisors(t)
+                .into_iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            return Err(format!(
+                "--txs-per-chunk C={c} must evenly divide --txs-per-block T={t}, else the \
+                 final chunk is short and the in-pod witness generation zip_eq-panics. \
+                 Valid divisors of {t}: {divs}."
+            ));
+        }
+        let leaf_count_per_block = t / c;
+        // The worker proves chunks of the REAL block: available chunks =
+        // ceil(block_tx_count / C). A derived leaf_count that exceeds this would
+        // address a non-existent chunk and assert-panic in the pod.
+        let available_chunks = block_tx_count.div_ceil(c);
+        if leaf_count_per_block > available_chunks {
+            return Err(format!(
+                "derived leaf_count_per_block={leaf_count_per_block} (= T/C = {t}/{c}) exceeds \
+                 the available chunks {available_chunks} (= ceil(block_tx_count/C) = \
+                 ceil({block_tx_count}/{c})); the worker would address a non-existent chunk \
+                 and panic in-pod. Reduce T or increase C."
+            ));
+        }
+        let depth = tree_depth(leaf_count_per_block, radix);
+        Ok(Self {
+            blocks,
+            txs_per_block: t,
+            txs_per_chunk: c,
+            radix,
+            block_tx_count,
+            leaf_count_per_block,
+            depth,
+        })
+    }
+
+    /// Total leaves across all replays (B × leaves/block). For telemetry.
+    fn total_leaves(&self) -> usize {
+        self.blocks * self.leaf_count_per_block
+    }
+
+    /// Human-readable EFFECTIVE-plan echo printed on seed (and on worker start)
+    /// so the operator sees exactly what runs. Deterministic + unit-tested.
+    ///
+    /// `transport_summary` is a short tail describing the transport endpoint
+    /// (e.g. `transport=local store=reports/stark_proofs` or
+    /// `transport=pubsub topic=X sub=Y bucket=Z prefix=P`).
+    fn effective_plan_echo(&self, transport_summary: &str) -> String {
+        let coverage = if self.txs_per_block == self.block_tx_count {
+            format!("covering ALL {} txs", self.block_tx_count)
+        } else {
+            format!(
+                "covering {}/{} txs",
+                self.txs_per_block, self.block_tx_count
+            )
+        };
+        format!(
+            "Block has {block} txs. blocks={b}, txs-per-block={t}, txs-per-chunk={c}, \
+             radix={r} → {lpb} leaves/block, depth {d}, {cov}{multi}. {tail}",
+            block = self.block_tx_count,
+            b = self.blocks,
+            t = self.txs_per_block,
+            c = self.txs_per_chunk,
+            r = self.radix,
+            lpb = self.leaf_count_per_block,
+            d = self.depth.max(1),
+            cov = coverage,
+            multi = if self.blocks > 1 {
+                format!(
+                    " ({} independent replays = {} total leaves, namespaced per replay)",
+                    self.blocks,
+                    self.total_leaves()
+                )
+            } else {
+                String::new()
+            },
+            tail = transport_summary,
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Shared run-config: single source of truth to kill seeder↔worker drift
+//
+// The seeder writes this small JSON file capturing the FULL effective plan +
+// transport endpoints; every worker reads it and refuses to run if its own
+// derived geometry (radix / leaf_count / tx_per_proof) doesn't match what was
+// seeded. This is the "one place to look" the operator + workers agree on, so a
+// worker can never silently prove the wrong tree. Mirrors the plan.env pattern
+// (#297). When the file is absent (e.g. a non-shared filesystem, or a worker
+// that started first), the per-descriptor geometry pulled off the queue still
+// governs each fold — so correctness is preserved and the guard is best-effort,
+// fail-fast WHEN a run-config is present.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Default location of the shared run-config. On a real cluster the GCS-fuse
+/// volume is mounted at `/data/reports`, so the seeder + workers share this
+/// path; locally it lands under the proof-store root.
+///
+/// Consumed by the `--transport=pubsub` seeder/worker (drift guard) and the
+/// unit tests; the default (local) build links it but does not exercise the
+/// seeder/worker drift path, hence the targeted `allow(dead_code)`.
+#[allow(dead_code)]
+const RUN_CONFIG_PATH: &str = "reports/run_config.json";
+
+/// The seeded run-config: the single source of truth the seeder writes and every
+/// worker validates against to prevent drift. Used by the pubsub seeder/worker
+/// and the unit tests (drift guard); see [`RUN_CONFIG_PATH`].
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RunConfig {
+    blocks: usize,
+    txs_per_block: usize,
+    txs_per_chunk: usize,
+    radix: usize,
+    leaf_count_per_block: usize,
+    depth: usize,
+    topic: String,
+    subscription: String,
+    bucket: String,
+    object_prefix: String,
+}
+
+#[allow(dead_code)]
+impl RunConfig {
+    /// Persist the run-config to `path` (creating parent dirs). Best-effort:
+    /// returns the IO error so the caller can log+continue rather than abort.
+    fn write_local(&self, path: &str) -> std::io::Result<()> {
+        if let Some(parent) = Path::new(path).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        fs::write(path, json)
+    }
+
+    /// Read a run-config from `path`, or `None` if it is absent/unparseable.
+    fn read_local(path: &str) -> Option<Self> {
+        let bytes = fs::read(path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Validate a worker's derived geometry against the seeded plan. Returns
+    /// `Err(message)` describing the first mismatch so the worker fails fast.
+    fn assert_matches_worker(
+        &self,
+        radix: usize,
+        leaf_count: usize,
+        tx_per_proof: usize,
+    ) -> Result<(), String> {
+        if self.radix != radix {
+            return Err(format!(
+                "radix mismatch: worker derived {radix} but the seeder seeded {} \
+                 (the tree fan-in must agree or folds read the wrong children)",
+                self.radix
+            ));
+        }
+        if self.leaf_count_per_block != leaf_count {
+            return Err(format!(
+                "leaf_count mismatch: worker derived {leaf_count} but the seeder seeded {} \
+                 (different N ⇒ different depth/geometry ⇒ wrong tree or out-of-range node)",
+                self.leaf_count_per_block
+            ));
+        }
+        if self.txs_per_chunk != tx_per_proof {
+            return Err(format!(
+                "txs-per-chunk mismatch: worker derived {tx_per_proof} but the seeder seeded \
+                 {} (different chunking ⇒ leaf proofs cover different tx ranges)",
+                self.txs_per_chunk
+            ));
+        }
+        Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Filesystem proof transport
 // ─────────────────────────────────────────────────────────────────────────
 
 fn leaf_proof_path(idx: usize) -> PathBuf {
-    Path::new(PROOF_DIR).join(format!("leaf_{idx}.proof"))
+    Path::new(&proof_dir()).join(format!("leaf_{idx}.proof"))
 }
 
 fn tree_proof_path(level: usize, node_idx: usize) -> PathBuf {
-    Path::new(PROOF_DIR).join(format!("tree_L{level}_N{node_idx}.proof"))
+    Path::new(&proof_dir()).join(format!("tree_L{level}_N{node_idx}.proof"))
 }
 
 fn write_proof(path: &Path, proof: &ProofWithPublicInputs<F, C, D>) {
@@ -1225,7 +1585,8 @@ fn main() {
         }
         Role::Work {
             radix,
-            leaf_count,
+            blocks,
+            txs_per_block,
             tx_per_proof,
             block_number,
             transport,
@@ -1236,126 +1597,248 @@ fn main() {
             bucket,
             ack_deadline,
             object_prefix,
-        } => match transport {
-            TransportKind::Local => {
-                use bench::transport::{seed_leaf_descriptors, tree_depth as t_depth};
-                let depth = t_depth(leaf_count, radix).max(1);
-                info!(
-                    "Fungible dispatch loop [--transport=local]: proving + folding an \
-                     N={leaf_count} tree (radix {radix}, depth {depth}) over the \
-                     LocalTransport, then verifying the root. Proof store: {PROOF_DIR}/"
-                );
-
-                // Install the graceful-drain signal handler: on SIGTERM (KEDA
-                // scale-down / Spot preemption) or SIGINT the dispatch loop stops
-                // pulling new work, finishes the in-flight lease, acks, and exits
-                // cleanly. Failure to register is non-fatal (loop still runs).
-                if let Err(e) = bench::shutdown::install_handlers() {
-                    info!("[dispatch] could not install SIGTERM handler ({e}); continuing without OS-signal drain");
+        } => {
+            // ── 3-knob workload: derive + FAIL-FAST validate BEFORE any seed/pod
+            //    action (on the seeder/laptop, never in the pod). ──────────────
+            let block_tx_count = load_test_block().txs.len();
+            let plan = match WorkloadPlan::derive(
+                blocks,
+                txs_per_block,
+                tx_per_proof,
+                radix,
+                block_tx_count,
+            ) {
+                Ok(p) => p,
+                Err(msg) => {
+                    eprintln!("Invalid workload config: {msg}");
+                    std::process::exit(2);
                 }
+            };
 
-                let transport = LocalTransport::new(PROOF_DIR);
-
-                // Seed the N leaf descriptors EXPLICITLY here (the dispatch loop
-                // no longer seeds internally — seeding is a separate step so a
-                // worker pod is a pure consumer). For the in-process local
-                // backend the seeder and the worker are the same process, so we
-                // seed inline immediately before the loop; this preserves the
-                // exact end-to-end local behaviour (`--transport=local` produces
-                // a verified root from scratch). The `--seed` flag is accepted
-                // for symmetry with the pubsub path but is a no-op distinction
-                // here because local seeding always precedes the local loop.
-                let seeds = seed_leaf_descriptors(radix, leaf_count, tx_per_proof);
-                let seeded = seeds.len();
-                for d in seeds {
-                    transport.publish(d);
+            match transport {
+                TransportKind::Local => {
+                    run_local_work(&plan, block_number, seed, &mut timing, start);
                 }
-                info!(
-                    "[dispatch] seeded {seeded} leaf descriptor(s) onto LocalTransport \
-                     (radix {radix}, N={leaf_count}, tx_per_proof={tx_per_proof}){}",
-                    if seed {
-                        " [--seed requested: local seeds inline then runs the loop]"
-                    } else {
-                        ""
-                    }
-                );
-
-                let Some(root_proof) =
-                    run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut timing)
-                else {
-                    // Graceful shutdown drained the loop before the root existed.
-                    // Report honestly and exit 0 (clean drain, work left on queue).
-                    let report = json!({
-                        "telemetry_event": "FUNGIBLE_DISPATCH_DRAINED_ON_SHUTDOWN",
-                        "span_id": format!("dispatch_block_{block_number}"),
-                        "transport": "local",
-                        "radix": radix,
-                        "leaf_count": leaf_count,
-                        "tree_depth": depth,
-                        "root_committed": false,
-                        "status": "DRAINED_ON_SIGTERM",
-                        "note": "graceful shutdown: stopped pulling new work, finished + acked \
-                                 the in-flight lease, left remaining work on the queue"
-                    });
-                    println!("{report}");
-                    info!(
-                        "Fungible dispatch loop drained on graceful shutdown for block \
-                         #{block_number} in {:?}; no root harvested (remaining work left on \
-                         the queue for another worker).",
-                        start.elapsed()
+                TransportKind::Pubsub => {
+                    // Effective-plan echo (also printed inside the pubsub seeder).
+                    let summary = transport_summary_pubsub(
+                        &topic,
+                        &subscription,
+                        &bucket,
+                        &object_prefix,
                     );
-                    timing.print();
-                    return;
-                };
-
-                let digest = proof_digest(&root_proof);
-                use circuit::recursion::batch::BATCH_TARGET_INDEX;
-                let root_batch = Batch::<F>::from_public_inputs(
-                    &root_proof.public_inputs[..BATCH_TARGET_INDEX],
-                );
-
-                let report = json!({
-                    "telemetry_event": "FUNGIBLE_DISPATCH_ROOT_VERIFIED",
-                    "span_id": format!("dispatch_block_{block_number}"),
-                    "transport": "local",
-                    "radix": radix,
-                    "leaf_count": leaf_count,
-                    "tree_depth": depth,
-                    "root_proof_key": tree_proof_path(depth, 0).file_name()
-                        .map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-                    "proof_digest_sha256_8": digest,
-                    "aggregated_batch_size": root_batch.batch_size,
-                    "aggregated_end_block_number": root_batch.end_block_number,
-                    "l1_settlement": "not_configured",
-                    "elapsed_ms": start.elapsed().as_millis(),
-                    "status": "OK"
-                });
-                println!("{report}");
-                info!(
-                    "Fungible dispatch loop produced + verified root ({digest}, {} txs \
-                     aggregated) for block #{block_number} in {:?}",
-                    root_batch.batch_size,
-                    start.elapsed()
-                );
-                timing.print();
+                    info!("[plan] {}", plan.effective_plan_echo(&summary));
+                    run_pubsub_work(
+                        &plan,
+                        block_number,
+                        seed,
+                        project,
+                        topic,
+                        subscription,
+                        bucket,
+                        ack_deadline,
+                        object_prefix,
+                    );
+                }
             }
-            TransportKind::Pubsub => {
-                run_pubsub_work(
-                    radix,
-                    leaf_count,
-                    tx_per_proof,
-                    block_number,
-                    seed,
-                    project,
-                    topic,
-                    subscription,
-                    bucket,
-                    ack_deadline,
-                    object_prefix,
-                );
-            }
-        },
+        }
     }
+}
+
+/// A short transport-endpoint summary tail for the effective-plan echo on the
+/// pubsub path (`transport=pubsub topic=X sub=Y bucket=Z prefix=P`). The prefix
+/// shown is the BASE prefix; per-replay namespacing appends `block_<b>/`.
+fn transport_summary_pubsub(topic: &str, subscription: &str, bucket: &str, prefix: &str) -> String {
+    let topic = if topic.is_empty() { "<env>" } else { topic };
+    let subscription = if subscription.is_empty() {
+        "<env>"
+    } else {
+        subscription
+    };
+    let bucket = if bucket.is_empty() { "<env>" } else { bucket };
+    let prefix = if prefix.is_empty() { "<none>" } else { prefix };
+    format!("transport=pubsub topic={topic} sub={subscription} bucket={bucket} prefix={prefix}.")
+}
+
+/// The per-replay object/store namespace for replay `b` (0-indexed) under a base
+/// prefix. For B==1 there is exactly one replay and no extra nesting is needed,
+/// but we still namespace B>1 replays as `<base>block_<b>/` so identical-content
+/// proofs across replays land under DISTINCT keys (no CAS `AlreadyExists`
+/// collapse). Returns the base unchanged when `blocks == 1`.
+///
+/// Used by the pubsub seeder (per-replay object-prefix) and the unit tests; the
+/// local path namespaces via a distinct filesystem store dir instead.
+#[allow(dead_code)]
+fn replay_object_prefix(base: &str, replay_idx: usize, blocks: usize) -> String {
+    if blocks <= 1 {
+        return base.to_string();
+    }
+    if base.is_empty() {
+        format!("block_{replay_idx}/")
+    } else if base.ends_with('/') {
+        format!("{base}block_{replay_idx}/")
+    } else {
+        format!("{base}/block_{replay_idx}/")
+    }
+}
+
+/// Run the fungible dispatch loop over the cloud-free [`LocalTransport`] for the
+/// derived [`WorkloadPlan`], replaying the block `plan.blocks` times. Each replay
+/// is an INDEPENDENT, namespaced tree (its proof store + gating markers live
+/// under a distinct `<PROOF_DIR>/block_<b>/` subtree for B>1) and yields its own
+/// verified root. For B==1 the proof store is exactly `PROOF_DIR`, preserving the
+/// original single-run behaviour byte-for-byte.
+fn run_local_work(
+    plan: &WorkloadPlan,
+    block_number: u64,
+    seed: bool,
+    timing: &mut TimingTree,
+    start: Instant,
+) {
+    use bench::transport::seed_leaf_descriptors;
+
+    let radix = plan.radix;
+    let leaf_count = plan.leaf_count_per_block;
+    let tx_per_proof = plan.txs_per_chunk;
+    let depth = plan.depth.max(1);
+
+    let base_summary = format!("transport=local store={PROOF_DIR}/");
+    info!("[plan] {}", plan.effective_plan_echo(&base_summary));
+
+    // Install the graceful-drain signal handler once: on SIGTERM (KEDA
+    // scale-down / Spot preemption) or SIGINT the dispatch loop stops pulling
+    // new work, finishes the in-flight lease, acks, and exits cleanly. Failure
+    // to register is non-fatal (loop still runs).
+    if let Err(e) = bench::shutdown::install_handlers() {
+        info!("[dispatch] could not install SIGTERM handler ({e}); continuing without OS-signal drain");
+    }
+
+    let mut roots: Vec<(usize, String, u64)> = Vec::with_capacity(plan.blocks);
+
+    for replay in 0..plan.blocks {
+        // Namespace this replay's proof store (B>1). For B==1 this is PROOF_DIR.
+        let store_dir = if plan.blocks <= 1 {
+            PROOF_DIR.to_string()
+        } else {
+            format!("{PROOF_DIR}/block_{replay}")
+        };
+        set_proof_dir(Some(store_dir.clone()));
+
+        info!(
+            "Fungible dispatch loop [--transport=local]: replay {}/{} — proving + folding \
+             an N={leaf_count} tree (radix {radix}, depth {depth}) over the LocalTransport, \
+             then verifying the root. Proof store: {store_dir}/",
+            replay + 1,
+            plan.blocks,
+        );
+
+        let transport = LocalTransport::new(&store_dir);
+
+        // Seed the N leaf descriptors EXPLICITLY (the dispatch loop is a pure
+        // consumer). For the in-process local backend the seeder and worker are
+        // the same process, so we seed inline immediately before the loop; this
+        // preserves the exact end-to-end local behaviour. The `--seed` flag is
+        // accepted for symmetry with the pubsub path.
+        let seeds = seed_leaf_descriptors(radix, leaf_count, tx_per_proof);
+        let seeded = seeds.len();
+        for d in seeds {
+            transport.publish(d);
+        }
+        info!(
+            "[dispatch] seeded {seeded} leaf descriptor(s) onto LocalTransport \
+             (radix {radix}, N={leaf_count}, tx_per_proof={tx_per_proof}){}",
+            if seed {
+                " [--seed requested: local seeds inline then runs the loop]"
+            } else {
+                ""
+            }
+        );
+
+        let Some(root_proof) =
+            run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, timing)
+        else {
+            // Graceful shutdown drained the loop before the root existed.
+            let report = json!({
+                "telemetry_event": "FUNGIBLE_DISPATCH_DRAINED_ON_SHUTDOWN",
+                "span_id": format!("dispatch_block_{block_number}"),
+                "transport": "local",
+                "replay": replay,
+                "radix": radix,
+                "leaf_count": leaf_count,
+                "tree_depth": depth,
+                "root_committed": false,
+                "status": "DRAINED_ON_SIGTERM",
+                "note": "graceful shutdown: stopped pulling new work, finished + acked \
+                         the in-flight lease, left remaining work on the queue"
+            });
+            println!("{report}");
+            info!(
+                "Fungible dispatch loop drained on graceful shutdown for block \
+                 #{block_number} (replay {replay}) in {:?}; no root harvested.",
+                start.elapsed()
+            );
+            timing.print();
+            set_proof_dir(None);
+            return;
+        };
+
+        let digest = proof_digest(&root_proof);
+        use circuit::recursion::batch::BATCH_TARGET_INDEX;
+        let root_batch =
+            Batch::<F>::from_public_inputs(&root_proof.public_inputs[..BATCH_TARGET_INDEX]);
+        let root_key = tree_proof_path(depth, 0)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let report = json!({
+            "telemetry_event": "FUNGIBLE_DISPATCH_ROOT_VERIFIED",
+            "span_id": format!("dispatch_block_{block_number}"),
+            "transport": "local",
+            "replay": replay,
+            "replays_total": plan.blocks,
+            "store_dir": store_dir,
+            "radix": radix,
+            "leaf_count": leaf_count,
+            "txs_per_block": plan.txs_per_block,
+            "txs_per_chunk": plan.txs_per_chunk,
+            "tree_depth": depth,
+            "root_proof_key": root_key,
+            "proof_digest_sha256_8": digest,
+            "aggregated_batch_size": root_batch.batch_size,
+            "aggregated_end_block_number": root_batch.end_block_number,
+            "l1_settlement": "not_configured",
+            "elapsed_ms": start.elapsed().as_millis(),
+            "status": "OK"
+        });
+        println!("{report}");
+        info!(
+            "Fungible dispatch loop produced + verified root ({digest}, {} txs aggregated) \
+             for block #{block_number} replay {}/{} in {:?}",
+            root_batch.batch_size,
+            replay + 1,
+            plan.blocks,
+            start.elapsed()
+        );
+        roots.push((replay, digest, root_batch.batch_size));
+    }
+
+    set_proof_dir(None);
+
+    if plan.blocks > 1 {
+        // Each replay produced an INDEPENDENT, distinctly-namespaced verified
+        // root. Distinct digests are expected per replay only if state differs;
+        // here the same block is replayed, so the per-replay roots are identical
+        // in content but committed under distinct keys (no dedup collapse) and
+        // each is independently verified above.
+        let digests: Vec<&str> = roots.iter().map(|(_, d, _)| d.as_str()).collect();
+        info!(
+            "All {} replays produced independently-verified roots (namespaced per replay): \
+             {:?}",
+            plan.blocks, digests
+        );
+    }
+    timing.print();
 }
 
 /// Drive the fungible dispatch loop over the production
@@ -1367,9 +1850,7 @@ fn main() {
 #[cfg(feature = "pubsub")]
 #[allow(clippy::too_many_arguments)]
 fn run_pubsub_work(
-    radix: usize,
-    leaf_count: usize,
-    tx_per_proof: usize,
+    plan: &WorkloadPlan,
     block_number: u64,
     seed: bool,
     project: Option<String>,
@@ -1382,6 +1863,9 @@ fn run_pubsub_work(
     use bench::transport::pubsub::{PubSubGcsConfig, PubSubGcsTransport};
     use bench::transport::tree_depth as t_depth;
 
+    let radix = plan.radix;
+    let leaf_count = plan.leaf_count_per_block;
+    let tx_per_proof = plan.txs_per_chunk;
     let start = Instant::now();
 
     // Env fallbacks for the pubsub config (the clap `env` feature is not enabled
@@ -1406,6 +1890,12 @@ fn run_pubsub_work(
         .unwrap_or(ack_deadline);
 
     let depth = t_depth(leaf_count, radix).max(1);
+    // Capture resolved endpoint values for the effective-plan echo + run-config
+    // BEFORE `config` is moved into `connect`.
+    let config_topic_for_echo = topic.clone();
+    let config_sub_for_echo = subscription.clone();
+    let config_bucket_for_echo = bucket.clone();
+    let base_object_prefix = object_prefix.clone();
     let config = PubSubGcsConfig {
         project_id: project,
         topic,
@@ -1468,16 +1958,61 @@ fn run_pubsub_work(
 
     if seed {
         // ── Seeder mode: a ONE-OFF bootstrap pod ─────────────────────────────
-        // Publish the N leaf descriptors onto the topic, log what was seeded, and
-        // EXIT. Readiness gating (driven by each worker's `commit_and_gate`) then
-        // publishes the fold descriptors level-by-level as children complete, so
-        // the seeder only ever publishes leaves. Exactly one seeder bootstraps a
-        // run; the worker pods drain it.
+        // Validate the plan again at the seed boundary (defence-in-depth: the
+        // worker path cannot silently seed an invalid plan), echo the EFFECTIVE
+        // plan, write a shared run-config (drift guard), then publish the N leaf
+        // descriptors per replay (namespaced for B>1) onto the topic and EXIT.
+        // Readiness gating publishes the fold descriptors level-by-level as
+        // children commit; the seeder only ever publishes leaves.
         //
         // TODO(confirm-on-live-run): real Pub/Sub publish of the N leaves to a
         // live topic. The publish primitive is verified-by-construction
         // (`PubSubPublisher`); not re-run live in this slice.
-        transport.seed_leaves(radix, leaf_count, tx_per_proof);
+        let summary = transport_summary_pubsub(
+            &config_topic_for_echo,
+            &config_sub_for_echo,
+            &config_bucket_for_echo,
+            &base_object_prefix,
+        );
+        info!("[plan] (seed) {}", plan.effective_plan_echo(&summary));
+
+        // Write the single-source-of-truth run-config so workers cannot drift
+        // from what was seeded (radix / leaf_count / tx_per_proof / topic / sub /
+        // bucket / object_prefix). Mirrors the plan.env pattern (#297).
+        let run_config = RunConfig {
+            blocks: plan.blocks,
+            txs_per_block: plan.txs_per_block,
+            txs_per_chunk: plan.txs_per_chunk,
+            radix,
+            leaf_count_per_block: leaf_count,
+            depth,
+            topic: config_topic_for_echo.clone(),
+            subscription: config_sub_for_echo.clone(),
+            bucket: config_bucket_for_echo.clone(),
+            object_prefix: base_object_prefix.clone(),
+        };
+        if let Err(e) = run_config.write_local(RUN_CONFIG_PATH) {
+            info!("[seed] could not persist run-config to {RUN_CONFIG_PATH} ({e}); continuing");
+        } else {
+            info!("[seed] wrote shared run-config to {RUN_CONFIG_PATH} (drift guard)");
+        }
+
+        // Seed each replay's leaves. For B>1 each replay is namespaced under a
+        // distinct object-prefix (`<base>block_<b>/`) so identical-content proofs
+        // across replays land under DISTINCT GCS keys and cannot dedup/collapse.
+        let mut total_seeded = 0usize;
+        for replay in 0..plan.blocks {
+            let prefix = replay_object_prefix(&base_object_prefix, replay, plan.blocks);
+            transport.seed_leaves_with_prefix(&prefix, radix, leaf_count, tx_per_proof);
+            total_seeded += leaf_count;
+            info!(
+                "[seed] replay {}/{}: published {leaf_count} leaf descriptor(s) under \
+                 object-prefix '{prefix}'",
+                replay + 1,
+                plan.blocks
+            );
+        }
+
         let report = json!({
             "telemetry_event": "FUNGIBLE_DISPATCH_PUBSUB_SEEDED",
             "span_id": format!("dispatch_block_{block_number}"),
@@ -1485,19 +2020,48 @@ fn run_pubsub_work(
             "mode": "seeder",
             "endpoint": transport.endpoint_summary(),
             "radix": radix,
-            "leaf_count": leaf_count,
+            "blocks": plan.blocks,
+            "leaf_count_per_block": leaf_count,
+            "txs_per_block": plan.txs_per_block,
+            "txs_per_chunk": plan.txs_per_chunk,
             "tree_depth": depth,
-            "seeded_leaf_descriptors": leaf_count,
+            "seeded_leaf_descriptors": total_seeded,
+            "run_config_path": RUN_CONFIG_PATH,
             "status": "SEEDED_AND_EXITING",
             "live_run": "TODO(confirm-on-live-run)"
         });
         println!("{report}");
         info!(
-            "Seeder published {leaf_count} leaf descriptor(s) for block \
-             #{block_number}; exiting (workers will drain the queue). Live publish \
-             is TODO(confirm-on-live-run)."
+            "Seeder published {total_seeded} leaf descriptor(s) across {} replay(s) for \
+             block #{block_number}; exiting (workers will drain the queue). Live publish \
+             is TODO(confirm-on-live-run).",
+            plan.blocks
         );
         return;
+    }
+
+    // ── Worker drift guard (kill seeder↔worker config drift) ─────────────────
+    // If the seeder persisted a shared run-config, the worker validates that its
+    // OWN derived geometry (radix / leaf_count / tx_per_proof) matches what was
+    // seeded and REFUSES to run on mismatch, rather than silently proving the
+    // wrong tree (or panicking in-pod). When no run-config is present (e.g. a
+    // worker started before the seeder wrote it, or a non-shared filesystem),
+    // this is a no-op — the per-descriptor geometry pulled from the queue still
+    // governs each fold, so correctness is preserved either way.
+    if let Some(seeded) = RunConfig::read_local(RUN_CONFIG_PATH) {
+        if let Err(msg) = seeded.assert_matches_worker(radix, leaf_count, tx_per_proof) {
+            eprintln!(
+                "Worker config drift detected against the seeded run-config: {msg}\n\
+                 Refusing to run — re-run the worker with flags matching the seeder \
+                 (or re-seed). Seeded plan: radix={}, leaf_count={}, tx_per_proof={}.",
+                seeded.radix, seeded.leaf_count_per_block, seeded.txs_per_chunk
+            );
+            std::process::exit(2);
+        }
+        info!(
+            "[worker] run-config drift check OK (radix={radix}, leaf_count={leaf_count}, \
+             tx_per_proof={tx_per_proof} match the seeded plan)."
+        );
     }
 
     // ── Worker mode: the REAL fungible dispatch loop ─────────────────────────
@@ -1573,9 +2137,7 @@ fn run_pubsub_work(
 #[cfg(not(feature = "pubsub"))]
 #[allow(clippy::too_many_arguments)]
 fn run_pubsub_work(
-    _radix: usize,
-    _leaf_count: usize,
-    _tx_per_proof: usize,
+    _plan: &WorkloadPlan,
     _block_number: u64,
     _seed: bool,
     _project: Option<String>,
@@ -1981,6 +2543,197 @@ mod tests {
         bench::shutdown::reset_for_test();
         assert_eq!(pulled, 0, "shutdown before first pull must drain nothing");
         std::fs::remove_dir_all(&store).ok();
+    }
+
+    // ── 3-knob workload plan: derivation + fail-fast validation (issue #310) ──
+    //
+    // All pure (no proving, no cloud, no network), driven against a synthetic
+    // 500-tx block size to mirror the real `bench_test.json`.
+
+    const BLOCK_TXS: usize = 500; // matches bench/bench_test.json
+
+    #[test]
+    fn divisors_of_500_are_correct() {
+        // The actionable error message lists exactly these (computed from the
+        // REAL block tx count, never hardcoded).
+        assert_eq!(
+            divisors(500),
+            vec![1, 2, 4, 5, 10, 20, 25, 50, 100, 125, 250, 500]
+        );
+        assert_eq!(divisors(1), vec![1]);
+        assert_eq!(divisors(0), Vec::<usize>::new());
+        assert_eq!(divisors(7), vec![1, 7]); // prime
+    }
+
+    #[test]
+    fn plan_accepts_divisor_chunk_size_5() {
+        // C=5 evenly divides T=500 ⇒ accepted; derives 100 leaves, depth 2 @ r16.
+        let plan = WorkloadPlan::derive(1, 0, 5, 16, BLOCK_TXS).expect("C=5 must be accepted");
+        assert_eq!(plan.txs_per_block, 500); // T defaulted to all real txs
+        assert_eq!(plan.leaf_count_per_block, 100); // 500 / 5
+        assert_eq!(plan.depth, 2); // ceil(log16(100)) = 2
+        assert_eq!(plan.radix, 16);
+    }
+
+    #[test]
+    fn plan_rejects_nondivisor_chunk_size_7() {
+        // C=7 does NOT divide T=500 ⇒ rejected with a clear, divisor-listing msg
+        // (this is the in-pod `zip_eq` panic the seed-time gate prevents).
+        let err = WorkloadPlan::derive(1, 0, 7, 16, BLOCK_TXS)
+            .expect_err("C=7 must be rejected (not a divisor of 500)");
+        assert!(err.contains("must evenly divide"), "got: {err}");
+        // Lists the real divisors of 500, computed not hardcoded.
+        assert!(err.contains("1,2,4,5,10,20,25,50,100,125,250,500"), "got: {err}");
+    }
+
+    #[test]
+    fn plan_rejects_txs_per_block_exceeding_block_size() {
+        // T > block_tx_count ⇒ rejected (can't prove more txs than exist).
+        let err = WorkloadPlan::derive(1, 600, 5, 16, BLOCK_TXS)
+            .expect_err("T=600 > 500 must be rejected");
+        assert!(err.contains("exceeds the loaded block"), "got: {err}");
+    }
+
+    #[test]
+    fn plan_rejects_leaf_count_exceeding_available_chunks() {
+        // Construct a case where T/C > ceil(block_tx_count/C): with a small block
+        // of 10 txs, T=10, C=1 ⇒ leaf_count=10, available=10 (OK). To force the
+        // bound, prove all of a 10-tx block at C=1 but with a block of only 8:
+        // T=10 already > 8 is caught earlier, so we exercise the dedicated bound
+        // via T==block, C=1 on a tiny block where it's exactly at the limit, then
+        // a deliberately over-derived case is impossible through T<=block + C|T,
+        // so we assert the bound is satisfied at the limit (no false reject).
+        let plan = WorkloadPlan::derive(1, 8, 1, 2, 8).expect("at-limit must be accepted");
+        assert_eq!(plan.leaf_count_per_block, 8);
+        // And the transport-crate guard rejects an explicit over-count.
+        let guard = bench::transport::validate_seed_plan(2, 9, 1, 8);
+        assert!(guard.is_err(), "leaf_count 9 > available 8 must be rejected");
+        assert!(
+            guard.unwrap_err().contains("exceeds available chunks"),
+            "guard message must be actionable"
+        );
+    }
+
+    #[test]
+    fn plan_rejects_blocks_below_one() {
+        let err =
+            WorkloadPlan::derive(0, 0, 5, 16, BLOCK_TXS).expect_err("B=0 must be rejected");
+        assert!(err.contains("--blocks B must be >= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn plan_rejects_chunk_size_zero() {
+        let err = WorkloadPlan::derive(1, 0, 0, 16, BLOCK_TXS).expect_err("C=0 must be rejected");
+        assert!(err.contains("--txs-per-chunk C must be >= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn plan_rejects_radix_out_of_range() {
+        assert!(WorkloadPlan::derive(1, 0, 5, 1, BLOCK_TXS).is_err(), "radix 1 rejected");
+        assert!(
+            WorkloadPlan::derive(1, 0, 5, 17, BLOCK_TXS).is_err(),
+            "radix 17 > HEX_RADIX rejected"
+        );
+    }
+
+    #[test]
+    fn depth_derivation_from_t_c_radix() {
+        // depth = ceil(log_radix(ceil(T/C))).
+        // 500 txs, C=5 ⇒ 100 leaves: r16 ⇒ depth 2; r2 ⇒ ceil(log2(100)) = 7.
+        assert_eq!(WorkloadPlan::derive(1, 500, 5, 16, BLOCK_TXS).unwrap().depth, 2);
+        assert_eq!(WorkloadPlan::derive(1, 500, 5, 2, BLOCK_TXS).unwrap().depth, 7);
+        // 500 txs, C=1 ⇒ 500 leaves: r16 ⇒ ceil(log16(500)) = 3.
+        assert_eq!(WorkloadPlan::derive(1, 500, 1, 16, BLOCK_TXS).unwrap().depth, 3);
+        // T=100, C=10 ⇒ 10 leaves: r16 ⇒ depth 1.
+        assert_eq!(WorkloadPlan::derive(1, 100, 10, 16, BLOCK_TXS).unwrap().depth, 1);
+    }
+
+    #[test]
+    fn b_gt_1_replays_are_namespaced_with_distinct_prefixes() {
+        // Each replay must get a DISTINCT object-prefix so identical-content
+        // proofs don't dedup/collide. B==1 leaves the base unchanged.
+        assert_eq!(replay_object_prefix("runs/", 0, 1), "runs/");
+        let p0 = replay_object_prefix("runs/", 0, 3);
+        let p1 = replay_object_prefix("runs/", 1, 3);
+        let p2 = replay_object_prefix("runs/", 2, 3);
+        assert_eq!(p0, "runs/block_0/");
+        assert_eq!(p1, "runs/block_1/");
+        assert_eq!(p2, "runs/block_2/");
+        // Distinctness is the load-bearing property.
+        assert_ne!(p0, p1);
+        assert_ne!(p1, p2);
+        assert_ne!(p0, p2);
+        // Empty base still namespaces per replay for B>1.
+        assert_eq!(replay_object_prefix("", 1, 2), "block_1/");
+        // Base without trailing slash gets one inserted.
+        assert_eq!(replay_object_prefix("runs", 1, 2), "runs/block_1/");
+    }
+
+    #[test]
+    fn effective_plan_echo_is_clear_and_complete() {
+        let plan = WorkloadPlan::derive(1, 500, 5, 16, BLOCK_TXS).unwrap();
+        let echo = plan.effective_plan_echo("transport=local store=reports/stark_proofs/");
+        // Mirrors the issue's example phrasing.
+        assert!(echo.contains("Block has 500 txs"), "got: {echo}");
+        assert!(echo.contains("blocks=1"), "got: {echo}");
+        assert!(echo.contains("txs-per-block=500"), "got: {echo}");
+        assert!(echo.contains("txs-per-chunk=5"), "got: {echo}");
+        assert!(echo.contains("radix=16"), "got: {echo}");
+        assert!(echo.contains("100 leaves/block"), "got: {echo}");
+        assert!(echo.contains("depth 2"), "got: {echo}");
+        assert!(echo.contains("covering ALL 500 txs"), "got: {echo}");
+        assert!(echo.contains("transport=local"), "got: {echo}");
+    }
+
+    #[test]
+    fn effective_plan_echo_reports_partial_coverage_and_replays() {
+        let plan = WorkloadPlan::derive(3, 100, 5, 16, BLOCK_TXS).unwrap();
+        let echo = plan.effective_plan_echo("transport=pubsub topic=X sub=Y bucket=Z prefix=P.");
+        assert!(echo.contains("blocks=3"), "got: {echo}");
+        assert!(echo.contains("covering 100/500 txs"), "got: {echo}");
+        assert!(echo.contains("3 independent replays"), "got: {echo}");
+        // total leaves = 3 * (100/5) = 60.
+        assert!(echo.contains("60 total leaves"), "got: {echo}");
+        assert!(echo.contains("transport=pubsub"), "got: {echo}");
+    }
+
+    #[test]
+    fn run_config_round_trips_and_detects_drift() {
+        let plan = WorkloadPlan::derive(1, 500, 5, 16, BLOCK_TXS).unwrap();
+        let cfg = RunConfig {
+            blocks: plan.blocks,
+            txs_per_block: plan.txs_per_block,
+            txs_per_chunk: plan.txs_per_chunk,
+            radix: plan.radix,
+            leaf_count_per_block: plan.leaf_count_per_block,
+            depth: plan.depth,
+            topic: "t".into(),
+            subscription: "s".into(),
+            bucket: "b".into(),
+            object_prefix: "runs/".into(),
+        };
+        // JSON round-trip (write/read via a temp file).
+        let dir = std::env::temp_dir().join(format!("runcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run_config.json");
+        let path_str = path.to_string_lossy().to_string();
+        cfg.write_local(&path_str).unwrap();
+        let back = RunConfig::read_local(&path_str).expect("must read back");
+        assert_eq!(cfg, back);
+
+        // A matching worker passes the drift guard.
+        assert!(back.assert_matches_worker(16, 100, 5).is_ok());
+        // A drifted worker (wrong radix / N / chunk) is rejected with a clear msg.
+        assert!(back.assert_matches_worker(2, 100, 5).unwrap_err().contains("radix mismatch"));
+        assert!(back
+            .assert_matches_worker(16, 50, 5)
+            .unwrap_err()
+            .contains("leaf_count mismatch"));
+        assert!(back
+            .assert_matches_worker(16, 100, 1)
+            .unwrap_err()
+            .contains("txs-per-chunk mismatch"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── Dynamic tree-geometry helpers (pure, no proving) ──
