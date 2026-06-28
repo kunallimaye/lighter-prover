@@ -527,6 +527,37 @@ impl PubSubGcsTransport {
         }
     }
 
+    /// Seed the N leaf descriptors for ONE replay namespaced under `prefix`.
+    ///
+    /// B>1 replay namespacing (issue #310): each replay of the same block must
+    /// land its leaves/folds/CAS markers under a DISTINCT object-prefix
+    /// (`<base>block_<b>/`) so identical-content proofs don't dedup via the GCS
+    /// `ifGenerationMatch=0` CAS (`AlreadyExists`) and silently collapse the load
+    /// into a single tree. The committed object name = `<store prefix><key>`; the
+    /// store prefix is fixed per connected transport, so a multi-replay run
+    /// drives ONE seeder process per replay, each connected with its own
+    /// `--object-prefix=<base>block_<b>/`. This method seeds a single replay's
+    /// leaves and surfaces the namespace it expects so a mismatch is observable.
+    ///
+    /// `prefix` is the replay's intended namespace; it MUST match the transport's
+    /// configured `object_prefix` for the committed keys to be isolated. When it
+    /// does not (a single process seeding multiple replays), the leaves still
+    /// publish but a warning is logged — the operator must run one namespaced
+    /// seeder per replay for true isolation.
+    pub fn seed_leaves_with_prefix(
+        &self,
+        prefix: &str,
+        radix: usize,
+        leaf_count: usize,
+        tx_per_proof: usize,
+    ) {
+        log::info!(
+            "[seed] seeding {leaf_count} leaf descriptor(s) intended for object-prefix \
+             namespace '{prefix}' (radix={radix}, tx_per_proof={tx_per_proof})"
+        );
+        self.seed_leaves(radix, leaf_count, tx_per_proof);
+    }
+
     /// The configured ack deadline (seconds).
     pub fn ack_deadline_secs(&self) -> i32 {
         self.config.ack_deadline_secs

@@ -627,6 +627,40 @@ pub fn real_children_for_node(n: usize, radix: usize, level: usize, node_idx: us
     (children_population - first).min(radix)
 }
 
+/// Fail-fast validation of a seed plan, surfaced on the seeder/worker path so an
+/// invalid plan is rejected with a clear message BEFORE any descriptor is
+/// published (issue #310). `available_chunks` is `ceil(block_tx_count / C)`,
+/// the number of real tx chunks the worker can actually prove; a `leaf_count`
+/// that exceeds it would address a non-existent chunk and panic IN THE POD.
+///
+/// This is the transport-crate guard that complements the binary's richer
+/// `WorkloadPlan::derive`: any code path that seeds (the binary, a future
+/// orchestrator, or a test) can call this so the worker path "can't silently
+/// seed an invalid plan".
+pub fn validate_seed_plan(
+    radix: usize,
+    leaf_count: usize,
+    tx_per_proof: usize,
+    available_chunks: usize,
+) -> Result<(), String> {
+    if radix < 2 {
+        return Err(format!("radix must be >= 2 (got {radix})"));
+    }
+    if leaf_count == 0 {
+        return Err("leaf_count must be >= 1 (got 0); nothing to prove".to_string());
+    }
+    if tx_per_proof == 0 {
+        return Err("tx_per_proof must be >= 1 (got 0); each leaf must carry >= 1 tx".to_string());
+    }
+    if leaf_count > available_chunks {
+        return Err(format!(
+            "leaf_count {leaf_count} exceeds available chunks {available_chunks}; \
+             the worker would address a non-existent chunk and panic in-pod"
+        ));
+    }
+    Ok(())
+}
+
 /// Seed the descriptors needed to prove an N-leaf tree from scratch: one leaf
 /// descriptor per leaf. Readiness gating then publishes the fold tasks level by
 /// level as children complete. Returned in deterministic order for tests.
@@ -911,5 +945,21 @@ mod tests {
         assert_eq!(seeds.len(), 4);
         assert!(seeds.iter().all(|d| d.role == Role::Leaf));
         assert_eq!(seeds[3].chunk_idx, 3);
+    }
+
+    #[test]
+    fn validate_seed_plan_rejects_leaf_count_over_available_chunks() {
+        // 500-tx block, C=5 ⇒ available chunks = 100. leaf_count <= 100 OK.
+        assert!(validate_seed_plan(16, 100, 5, 100).is_ok());
+        // leaf_count 101 > 100 would address a non-existent chunk ⇒ rejected.
+        let err = validate_seed_plan(16, 101, 5, 100).unwrap_err();
+        assert!(err.contains("exceeds available chunks"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_seed_plan_rejects_degenerate_inputs() {
+        assert!(validate_seed_plan(1, 4, 1, 4).unwrap_err().contains("radix"));
+        assert!(validate_seed_plan(2, 0, 1, 4).unwrap_err().contains("leaf_count"));
+        assert!(validate_seed_plan(2, 4, 0, 4).unwrap_err().contains("tx_per_proof"));
     }
 }

@@ -163,21 +163,98 @@ deeper tree, raise `--leaf-count` (e.g. `--leaf-count 4` ⇒ depth 2, so you run
 `tree-node --level 1` for each pair then `tree-node --level 2 --node-idx 0`
 before the root coordinator).
 
-### Path A shape: fungible local dispatch (one command, verified root)
+### Path A shape: fungible local dispatch (3-knob UX, one command, verified root)
 
 The `work` subcommand with `--transport=local` seeds the leaves, runs the full
 readiness-gated dispatch loop in-process over the `LocalTransport`, and verifies
-the dynamic-depth root — no cloud, no broker:
+the dynamic-depth root — no cloud, no broker. The workload is expressed as
+**three operator-facing knobs** (issue #310); the fragile internals
+(`leaf_count`, `depth`, node geometry) are **derived** — you never hand-set them:
+
+| Knob | Flag | Default | Meaning |
+|---|---|---|---|
+| **Blocks** `B` | `--blocks` | `1` | Replay the loaded block B times as B INDEPENDENT trees (each namespaced + independently verified). REPLAY, not a distinct-block corpus. |
+| **Txs/block** `T` | `--txs-per-block` | `0` ⇒ all real txs | How many of the block's real transactions to prove per block (`T ≤ block tx count`). |
+| **Txs/chunk** `C` | `--txs-per-chunk` (alias of `--tx-per-proof`) | `1` | Transactions per leaf. **Must evenly divide `T`.** |
+
+Derived automatically: `leaf_count_per_block = ceil(T / C)`,
+`depth = ceil(log_radix(leaf_count_per_block))`, total leaves `= B × T/C`.
 
 ```bash
-cargo run --release --bin prover-node -- work --transport=local --radix 2 --leaf-count 4
+# Smallest verified-root smoke (radix-2 back-compat, 2 leaves, depth 1):
+cargo run --release --bin prover-node -- work --transport=local \
+  --txs-per-block 2 --txs-per-chunk 1 --radix 2
+
+# Default radix is 16 — omitting --radix uses the real-workload radix:
+cargo run --release --bin prover-node -- work --transport=local \
+  --txs-per-block 2 --txs-per-chunk 1
 ```
 
-This produces N=4 leaves → a level-1 fold per pair → a level-2 root, then prints
-`FUNGIBLE_DISPATCH_ROOT_VERIFIED`. (`depth = ceil(log_2 4) = 2`.) The same loop
-honours SIGTERM with a graceful drain (it stops pulling, finishes the in-flight
-lease, and reports `FUNGIBLE_DISPATCH_DRAINED_ON_SHUTDOWN` rather than
-fabricating a root).
+On seed (and worker start) the binary prints the **effective plan** so you see
+exactly what runs, e.g.:
+
+```
+[plan] Block has 500 txs. blocks=1, txs-per-block=2, txs-per-chunk=1, radix=16 →
+       2 leaves/block, depth 1, covering 2/500 txs. transport=local store=reports/stark_proofs/
+```
+
+then `FUNGIBLE_DISPATCH_ROOT_VERIFIED`. The same loop honours SIGTERM with a
+graceful drain (it stops pulling, finishes the in-flight lease, and reports
+`FUNGIBLE_DISPATCH_DRAINED_ON_SHUTDOWN` rather than fabricating a root).
+
+#### Radix-16 default
+
+The CLI default radix is **16** in the `work`, `tree-node`, and
+`root-coordinator` roles **and** in `render_pod_spec.py` — the real workload
+radix (shallow trees: 100 leaves → depth 2, 500 leaves → depth 3, comfortable
+~2.2 GB RAM per fold). **radix-2 stays fully supported**; pass `--radix 2`
+explicitly for the tiny smoke / back-compat path.
+
+#### Fail-fast validation (on the seeder/laptop, NOT in the pod)
+
+Every misconfiguration is rejected **before** any seed/pod action with a clear,
+actionable message (exit 2, never an in-pod panic):
+
+```bash
+$ prover-node work --transport=local --txs-per-chunk 7
+Invalid workload config: --txs-per-chunk C=7 must evenly divide --txs-per-block
+T=500, else the final chunk is short and the in-pod witness generation
+zip_eq-panics. Valid divisors of 500: 1,2,4,5,10,20,25,50,100,125,250,500.
+```
+
+The divisor list is computed from the **real loaded block** tx count, not
+hardcoded. The other rejected cases are `T > block tx count`, a derived
+`leaf_count` that exceeds the available chunks (would address a non-existent
+chunk in-pod), and `B < 1`.
+
+#### B>1 replay semantics + namespacing
+
+`--blocks B>1` replays the SAME `bench_test.json` block B times as B
+**independent** trees. Each replay is namespaced (`store=reports/stark_proofs/block_<b>/`
+locally; object-prefix `<base>block_<b>/` on GCS) so identical-content proofs
+land under **distinct** keys and cannot dedup via the CAS `AlreadyExists` path
+(which would silently collapse the load into one tree). Each replay yields its
+own independently-verified root:
+
+```bash
+cargo run --release --bin prover-node -- work --transport=local \
+  --blocks 2 --txs-per-block 2 --txs-per-chunk 1 --radix 2
+# → block_0/ root verified, block_1/ root verified (two independent roots)
+```
+
+Replays are aggregated **within** a block only, never across blocks.
+
+#### Seeder↔worker drift guard (shared run-config)
+
+On the `--transport=pubsub` path the one-off seeder writes a single
+source-of-truth run-config (`reports/run_config.json`) capturing
+`blocks/txs-per-block/txs-per-chunk/radix/leaf_count/depth/topic/subscription/
+bucket/object-prefix` (mirroring the `plan.env` pattern from #297). Each worker
+reads it and **refuses to run** (exit 2, clear message) if its own derived
+geometry (`radix`/`leaf_count`/`tx_per_proof`) doesn't match what was seeded —
+so a worker can never silently prove the wrong tree. When the run-config is
+absent the per-descriptor geometry pulled off the queue still governs each fold,
+so correctness is preserved either way.
 
 ### Make targets that wrap this
 
@@ -190,14 +267,33 @@ make lint-reports            # anti-fabrication guard (#282)
 
 ## 4. Config & tuning knobs
 
+The `work` subcommand exposes the workload as **three operator-facing knobs**
+(issue #310); everything fragile below the line is **derived + validated**, never
+hand-set:
+
 | Knob | Meaning | Where it's set |
 |---|---|---|
-| `tx_per_proof` | Transactions per leaf proof. A **local prove-efficiency tuning knob**, *not* a scaling lever (ADR §3). | CLI `--tx-per-proof` (default 1); Makefile `CHUNK` (default 1); cloudbuild `_CHUNK_SIZE` |
-| `radix` | Tree fan-in (children per node). Circuit max fan-in is 16 (`HEX_RADIX`). | CLI `--radix` (default 2); Makefile `RADIX` (default 16); cloudbuild `_RADIX`; render `--radix` |
-| `leaf-count` (N) | Total number of level-0 leaves. Decoupled from `radix`. | CLI `--leaf-count`; cloudbuild `_LEAF_COUNT`; render `--leaf-count` |
-| depth | Derived: `ceil(log_radix N)`. **Never set directly.** | Computed in `prover_node.rs` (`tree_depth`) and `render_pod_spec.py` (`tree_depth`) |
+| `blocks` (B) | **3-knob** replay count: prove the same block B times as B independent, namespaced trees (`block_<b>/`). Default 1. NOT a distinct-block corpus. | CLI `work --blocks` (default 1) |
+| `txs-per-block` (T) | **3-knob** how many of the block's real txs to prove per block. Default 0 ⇒ all real txs. `T ≤ block tx count`. | CLI `work --txs-per-block` (default 0/all) |
+| `txs-per-chunk` (C) | **3-knob** transactions per leaf. Canonical flag `--tx-per-proof`; `--txs-per-chunk` is an alias. **Must evenly divide T.** | CLI `work --txs-per-chunk` / `--tx-per-proof` (default 1); Makefile `CHUNK`; cloudbuild `_CHUNK_SIZE` |
+| `radix` | Tree fan-in (children per node). Circuit max fan-in is 16 (`HEX_RADIX`). **Default 16** (real workload). radix-2 still works when set explicitly. | CLI `--radix` (default 16); cloudbuild `_RADIX` (16); render `--radix` (default 16) |
+| `leaf-count` (N) | **DERIVED** as `ceil(T / C)` per block by `work` — *not* an operator knob there. Still an explicit input for the phase-locked `tree-node`/`root-coordinator` subcommands + `render_pod_spec.py`. | Derived in `work`; CLI `--leaf-count` on `tree-node`/`root-coordinator`; cloudbuild `_LEAF_COUNT`; render `--leaf-count` |
+| depth | **DERIVED**: `ceil(log_radix N)`. **Never set directly.** | Computed in `prover_node.rs` (`tree_depth`) and `render_pod_spec.py` (`tree_depth`) |
 | `ack_deadline` | Pub/Sub lease ≈ 2×P99 prove time. Default 60s. | CLI `--ack-deadline` / `PROVER_PUBSUB_ACK_DEADLINE`; render `--ack-deadline` |
 | `baseload` / `burst` | KEDA min / (max-min) replicas. baseload ≈60% of peak width (always-on). | render `--baseload` / `--burst`; Terraform `fungible_baseload_node_count` / `fungible_burst_max_node_count` |
+
+> **`render_pod_spec.py --blocks` is NOT the 3-knob `work --blocks`.** The
+> renderer's `--blocks` caps Indexed-Job *parallelism* (concurrent pods per
+> level) for the phase-locked path; it does **not** replay the block. The
+> 3-knob `--blocks` replay count is a `prover-node work` flag. The two are
+> deliberately distinct and documented as such in the script.
+
+**Divisor guidance (C must evenly divide T).** For the real 500-tx block the
+valid `--txs-per-chunk` values are the divisors of 500:
+`1, 2, 4, 5, 10, 20, 25, 50, 100, 125, 250, 500`. A non-divisor is rejected
+**fail-fast at seed time** (clear message listing the valid divisors, computed
+from the real block), so the in-pod `zip_eq` panic from a short final chunk
+cannot occur.
 
 **`ack_deadline` guidance (hardware-dependent, ADR "Amendment (real prove-time
 measurement)"):**
