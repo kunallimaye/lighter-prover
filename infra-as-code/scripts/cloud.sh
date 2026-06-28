@@ -731,11 +731,29 @@ _cloud_gke_provision_arch() {
   local builder_sa="$3"
   local runtime_sa="$4"
   local build_machine="$5"
+  # Fungible-pool flags (#308). Empty == not supplied → omitted from the
+  # substitutions string so the cloudbuild/Terraform variable defaults apply.
+  local enable_fungible_pool="${6:-}"
+  local fungible_baseload_node_count="${7:-}"
+  local fungible_burst_max_node_count="${8:-}"
 
   _log_info "Provisioning GKE cluster for arch=${arch}..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
   substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_TF_STATE_PREFIX=lighter-prover-perf-${arch}"
+
+  # Only thread the fungible-pool substitutions when the operator set the flag;
+  # an absent flag defers to the cloudbuild-provision.yaml defaults (which in
+  # turn match the Terraform variable defaults).
+  if [[ -n "${enable_fungible_pool}" ]]; then
+    substitutions="${substitutions},_ENABLE_FUNGIBLE_POOL=${enable_fungible_pool}"
+  fi
+  if [[ -n "${fungible_baseload_node_count}" ]]; then
+    substitutions="${substitutions},_FUNGIBLE_BASELOAD_NODE_COUNT=${fungible_baseload_node_count}"
+  fi
+  if [[ -n "${fungible_burst_max_node_count}" ]]; then
+    substitutions="${substitutions},_FUNGIBLE_BURST_MAX_NODE_COUNT=${fungible_burst_max_node_count}"
+  fi
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
@@ -757,10 +775,17 @@ _cloud_gke_provision_arch() {
 
 cloud_gke_provision() {
   local arch="all"
+  # Fungible-pool flags (#308). Left empty/unset by default so existing callers
+  # are unaffected and Terraform's own variable defaults apply. They are only
+  # threaded into the substitutions string when explicitly provided.
+  local enable_fungible_pool="" fungible_baseload_node_count="" fungible_burst_max_node_count=""
   for arg in "$@"; do
     case "$arg" in
-      --arch=*)   arch="${arg#*=}" ;;
-      *)          arch="$arg" ;;
+      --arch=*)                          arch="${arg#*=}" ;;
+      --enable-fungible-pool=*)          enable_fungible_pool="${arg#*=}" ;;
+      --fungible-baseload-node-count=*)  fungible_baseload_node_count="${arg#*=}" ;;
+      --fungible-burst-max-node-count=*) fungible_burst_max_node_count="${arg#*=}" ;;
+      *)                                 arch="$arg" ;;
     esac
   done
 
@@ -779,14 +804,14 @@ cloud_gke_provision() {
 
   if [[ "${arch}" == "all" ]]; then
     _log_info "Provisioning ALL GKE clusters (t2d, c3d, c4a, c4d) in parallel..."
-    _cloud_gke_provision_arch "t2d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
-    _cloud_gke_provision_arch "c3d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
-    _cloud_gke_provision_arch "c4a" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
-    _cloud_gke_provision_arch "c4d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" &
+    _cloud_gke_provision_arch "t2d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${enable_fungible_pool}" "${fungible_baseload_node_count}" "${fungible_burst_max_node_count}" &
+    _cloud_gke_provision_arch "c3d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${enable_fungible_pool}" "${fungible_baseload_node_count}" "${fungible_burst_max_node_count}" &
+    _cloud_gke_provision_arch "c4a" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${enable_fungible_pool}" "${fungible_baseload_node_count}" "${fungible_burst_max_node_count}" &
+    _cloud_gke_provision_arch "c4d" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${enable_fungible_pool}" "${fungible_baseload_node_count}" "${fungible_burst_max_node_count}" &
     wait
     _log_ok "All GKE clusters provisioned."
   else
-    _cloud_gke_provision_arch "${arch}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}"
+    _cloud_gke_provision_arch "${arch}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${enable_fungible_pool}" "${fungible_baseload_node_count}" "${fungible_burst_max_node_count}"
   fi
 }
 

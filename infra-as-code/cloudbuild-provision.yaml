@@ -87,6 +87,12 @@ steps:
       - 'TF_VAR_ar_repo=${_AR_REPO}'
       - 'TF_VAR_silicon_arch=${_ARCH}'
       - 'TF_VAR_orchestration_engine=${_ENGINE}'
+      # Fungible-pool topology (#308 / #302). Defaults below match the Terraform
+      # variable defaults, so an unset cloud.sh flag is a no-op; cloud.sh only
+      # overrides these substitutions when the operator passes the matching flag.
+      - 'TF_VAR_enable_fungible_pool=${_ENABLE_FUNGIBLE_POOL}'
+      - 'TF_VAR_fungible_baseload_node_count=${_FUNGIBLE_BASELOAD_NODE_COUNT}'
+      - 'TF_VAR_fungible_burst_max_node_count=${_FUNGIBLE_BURST_MAX_NODE_COUNT}'
 
 substitutions:
   _ENGINE: 'gke'
@@ -106,6 +112,12 @@ substitutions:
   _AR_REPO: 'lighter-prover-iac'
   _BENCHMARK_ID: ''
   _IMAGE: 'latest'
+  # Fungible-pool topology (#308 / #302). Defaults mirror the Terraform variable
+  # defaults in terraform/variables.tf so the static fleet stays OFF unless
+  # cloud.sh threads an explicit --enable-fungible-pool / --fungible-* override.
+  _ENABLE_FUNGIBLE_POOL: 'false'
+  _FUNGIBLE_BASELOAD_NODE_COUNT: '6'
+  _FUNGIBLE_BURST_MAX_NODE_COUNT: '80'
 
 options:
   logging: CLOUD_LOGGING_ONLY

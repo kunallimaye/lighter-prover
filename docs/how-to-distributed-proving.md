@@ -234,6 +234,22 @@ per target instance from real 2×P99. The lease is also heartbeated via
    Apply is a deliberate live step (`make cloud-gke-provision`, or the Terraform
    apply step inside `cloudbuild-distributed.yaml`).
 
+   `cloud-gke-provision` forwards the fungible-pool variables straight through
+   to Terraform (`cloud.sh` flag → `cloudbuild-provision.yaml` substitution →
+   `TF_VAR_*`). The smoke-test (Phase-1 static fleet) command is:
+   ```bash
+   bash infra-as-code/scripts/cloud.sh cloud-gke-provision \
+     --arch=c3d \
+     --enable-fungible-pool=true \
+     --fungible-baseload-node-count=10 \
+     --fungible-burst-max-node-count=0
+   ```
+   Omitting a flag leaves the corresponding Terraform variable at its default
+   (the fungible pools stay OFF), so the no-flags `make cloud-gke-provision` and
+   `--arch=all` paths are unchanged. The flags map to
+   `TF_VAR_enable_fungible_pool`, `TF_VAR_fungible_baseload_node_count`, and
+   `TF_VAR_fungible_burst_max_node_count`.
+
 2. **Build + push the image.** `make cloud-zkp-build` builds via
    `Dockerfile.zkp` (amd64) / `Dockerfile.zkp-arm64` (arm64), shipping the
    `prover-node` and `bench` binaries.
