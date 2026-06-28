@@ -500,15 +500,14 @@ impl WorkTransport for PubSubGcsTransport {
     fn read_output(&self, key: &str) -> Option<Vec<u8>> {
         self.gcs.read(key).ok().flatten()
     }
-}
 
-impl PubSubGcsTransport {
     /// Commit a child's output via GCS-native CAS **and** advance readiness
     /// gating, publishing the parent fold exactly once when the parent's child
-    /// quota is met. The production analogue of `LocalTransport::commit_and_gate`,
-    /// driving the shared [`GatingEngine`] over the GCS CAS store + Pub/Sub
-    /// publisher.
-    pub fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome {
+    /// quota is met. The production analogue of `LocalTransport`'s
+    /// `commit_and_gate`, driving the shared [`GatingEngine`] over the GCS CAS
+    /// store + Pub/Sub publisher. Implemented as the [`WorkTransport`] trait
+    /// method so the generic dispatch loop drives it.
+    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome {
         let outcome = self.commit_output(&descriptor.output_key(), bytes);
         let engine = GatingEngine::new(&self.gcs, &self.publisher);
         // A gate error here is a genuine transport failure; surface it loudly so
@@ -518,7 +517,9 @@ impl PubSubGcsTransport {
             .unwrap_or_else(|e| panic!("readiness gating failed for {}: {e}", descriptor.output_key()));
         outcome
     }
+}
 
+impl PubSubGcsTransport {
     /// Seed the N leaf descriptors onto the topic (the dispatch loop's bootstrap).
     pub fn seed_leaves(&self, radix: usize, leaf_count: usize, tx_per_proof: usize) {
         for d in super::seed_leaf_descriptors(radix, leaf_count, tx_per_proof) {

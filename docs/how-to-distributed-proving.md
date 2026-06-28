@@ -92,6 +92,12 @@ One pod shape, role-per-message, pull-based, KEDA-autoscaled:
   (leaf prove **or** level-`k` fold) with flow-control = 1, proves it, commits
   the proof bytes idempotently to GCS via the native `ifGenerationMatch=0` CAS,
   acks, then pulls the next ready task — until the dynamic-depth root exists.
+- **Bootstrap (seeder):** a worker pod is a pure consumer — it does **not** seed.
+  Exactly one one-off seeder publishes the N leaf descriptors with
+  `prover-node work --transport=pubsub --seed` (connect → `seed_leaves` → exit);
+  readiness gating then publishes the fold tasks level-by-level as children
+  commit. For `--transport=local` the seed is performed inline before the loop,
+  so the local smoke is self-contained.
 - **Readiness gating in the data:** committing a child output advances its
   parent's completion count and publishes the parent fold descriptor exactly
   once when the parent's real-child quota is met (`commit_and_gate`).

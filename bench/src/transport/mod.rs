@@ -252,6 +252,21 @@ pub trait WorkTransport: Send + Sync {
 
     /// Read previously committed bytes for `key`, if present.
     fn read_output(&self, key: &str) -> Option<Vec<u8>>;
+
+    /// Commit a child's output **and** advance readiness gating in one call:
+    /// commits `bytes` under `descriptor.output_key()` via the atomic
+    /// [`commit_output`](Self::commit_output) CAS, then (only if this caller won
+    /// the CAS) publishes the parent fold descriptor exactly once when the
+    /// parent's real-child quota is met. This is the single primitive the
+    /// fungible dispatch loop uses, so a generic `run_dispatch_loop<T:
+    /// WorkTransport>` drives ANY backend (the [`LocalTransport`] filesystem CAS
+    /// or the production GCS-native CAS) through the same trait method.
+    ///
+    /// Each backend implements this with its native gating engine (filesystem
+    /// markers for [`LocalTransport`], GCS-native `ifGenerationMatch=0` CAS
+    /// markers for the production backend) so the "publish each fold exactly
+    /// once" invariant holds across pods.
+    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome;
 }
 
 /// A leased message. Holds the [`WorkDescriptor`] and the consumption verbs.
@@ -552,15 +567,14 @@ impl WorkTransport for LocalTransport {
     fn read_output(&self, key: &str) -> Option<Vec<u8>> {
         fs::read(self.output_path(key)).ok()
     }
-}
 
-impl LocalTransport {
     /// Commit a child's output **and** advance readiness gating in one call:
     /// commits `bytes` under `descriptor.output_key()`, then (if this caller won
     /// the CAS) publishes the parent fold once the parent's child quota is met.
     /// This is the primitive the dispatch loop uses so that completing the last
-    /// child of a node automatically enqueues that node's fold.
-    pub fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome {
+    /// child of a node automatically enqueues that node's fold. Implemented as
+    /// the [`WorkTransport`] trait method so the generic dispatch loop drives it.
+    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome {
         let outcome = self.commit_output(&descriptor.output_key(), bytes);
         self.maybe_publish_parent(descriptor, outcome == CommitOutcome::Committed);
         outcome
