@@ -40,6 +40,9 @@ use clap::{Parser, Subcommand};
 use log::{Level, LevelFilter, info};
 use serde_json::json;
 
+use bench::transport::{
+    CommitOutcome, LocalTransport, Role as WorkRole, WorkLease, WorkTransport,
+};
 use circuit::binary_tree_chain_constraints::BinaryTreeChainCircuit;
 use circuit::block::Block;
 use circuit::block_pre_execution::BlockPreExec;
@@ -119,6 +122,26 @@ pub enum Role {
         node_idx: usize,
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
+    },
+    /// Fungible role-per-message dispatch loop over a work transport.
+    ///
+    /// ONE pod = one dispatch loop = any role per message. The loop seeds the N
+    /// leaf descriptors, then repeatedly pulls a [`WorkDescriptor`], assumes the
+    /// role it names (leaf prove / tree-node fold), commits the proof bytes
+    /// idempotently, acks, and lets readiness gating publish the next level's
+    /// folds — until the dynamic-depth root is produced and verified. This slice
+    /// uses the in-process/filesystem [`LocalTransport`]; the production Pub/Sub
+    /// + GCS-native backend implements the same `WorkTransport` trait later.
+    Work {
+        #[arg(long, default_value_t = 2)]
+        radix: usize,
+        /// Total number of level-0 leaves N to prove and aggregate.
+        #[arg(long, default_value_t = 4)]
+        leaf_count: usize,
+        #[arg(long, default_value_t = 1)]
+        tx_per_proof: usize,
+        #[arg(long, default_value_t = 1042)]
+        block_number: u64,
     },
 }
 
@@ -694,6 +717,162 @@ fn aggregate_node(
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Fungible role-per-message dispatch loop
+//
+// Reuses the SAME role-execution code as the explicit subcommands
+// (`load_or_prove_leaf`, `aggregate_node`, the root verify) — it does NOT
+// reimplement proving. It routes each pulled `WorkDescriptor` to that code,
+// commits the proof bytes through the transport's atomic `commit_output`
+// (idempotent-output guard), and lets readiness gating publish the next level's
+// fold tasks via `commit_and_gate`. One loop = any role per message.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Verify a level-`root_level` root proof against its rebuilt circuit VK. Mirrors
+/// the `RootCoordinator` verification (binary circuit for the radix-2 depth-1
+/// back-compat case, the dynamic Hex node chain otherwise).
+fn verify_root_proof(
+    root_proof: &ProofWithPublicInputs<F, C, D>,
+    root_level: usize,
+    radix: usize,
+) {
+    if radix == 2 && root_level == 1 {
+        let (child_data, _t) = build_batch_leaf_data();
+        let circuit = BinaryTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
+        let root_data = circuit.builder.build::<C>();
+        root_data
+            .verify(root_proof.clone())
+            .expect("Root proof failed cryptographic verification");
+    } else {
+        let root_node = build_node_circuit_for_level(root_level);
+        root_node
+            .data
+            .verify(root_proof.clone())
+            .expect("Root proof failed cryptographic verification");
+    }
+}
+
+/// Run the fungible dispatch loop to completion over `transport`: prove every
+/// leaf, fold every tree level, and verify the dynamic-depth root. Returns the
+/// verified root proof. Uses `PROOF_DIR` as the shared proof store so the reused
+/// role code (`load_or_prove_leaf`/`aggregate_node`, which read/write
+/// `PROOF_DIR`) and the transport's committed outputs are the same bytes.
+fn run_dispatch_loop(
+    transport: &LocalTransport,
+    radix: usize,
+    leaf_count: usize,
+    tx_per_proof: usize,
+    timing: &mut TimingTree,
+) -> ProofWithPublicInputs<F, C, D> {
+    use bench::transport::{seed_leaf_descriptors, tree_depth as t_depth};
+
+    let depth = t_depth(leaf_count, radix).max(1);
+    let root_key = tree_proof_path(depth, 0)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+
+    // Seed the N leaf descriptors. Readiness gating publishes folds from there.
+    for d in seed_leaf_descriptors(radix, leaf_count, tx_per_proof) {
+        transport.publish(d);
+    }
+
+    let mut processed = 0usize;
+    // Loop until the root output exists (the dynamic-depth top node is committed)
+    // and the queue has drained.
+    loop {
+        if transport.output_exists(&root_key) && transport.pull_one().is_none() {
+            break;
+        }
+        let Some(lease) = transport.pull_one() else {
+            // Nothing pullable but root not yet committed: the gating either
+            // hasn't published the next level or work is still in flight. With a
+            // single in-process loop this means we're done seeding but a commit
+            // race left no visible work — re-check the root then bail.
+            if transport.output_exists(&root_key) {
+                break;
+            }
+            panic!(
+                "dispatch loop stalled: no work pullable but root {root_key} not committed \
+                 (processed {processed} descriptors)"
+            );
+        };
+
+        let d = lease.descriptor().clone();
+        // Heartbeat the lease while we do the (potentially long) proving work.
+        lease.extend();
+
+        // The transport's `commit_output` is the SINGLE writer of each proof
+        // into the shared store (`PROOF_DIR`); the reused role code reads from
+        // the same store. We therefore prove in-memory here and let the
+        // transport commit — we do NOT call the FS-writing helpers
+        // (`load_or_prove_leaf` / a redundant `write_proof`), which would create
+        // the file before the transport CAS and turn every commit into an
+        // `AlreadyExists` no-win that never advances readiness gating.
+        let bytes = match d.role {
+            WorkRole::Leaf => {
+                info!("[dispatch] leaf chunk {} -> {}", d.chunk_idx, d.output_key());
+                // Reuse the exact leaf execution: real batch + verified batch leaf.
+                let batch = prove_leaf_batch(d.chunk_idx, d.tx_per_proof, timing);
+                let proof = prove_batch_leaf(&batch);
+                bincode::serialize(&proof).expect("serialize leaf proof")
+            }
+            WorkRole::TreeNode => {
+                info!(
+                    "[dispatch] fold level {} node {} (radix {}, N={}) -> {}",
+                    d.level,
+                    d.node_idx,
+                    d.radix,
+                    d.leaf_count,
+                    d.output_key()
+                );
+                // `aggregate_node` reads its children from the shared store
+                // (written there by the transport commit of the prior level) and
+                // returns the parent proof; the transport commit below persists
+                // it for the next level's readers.
+                let parent = aggregate_node(
+                    d.level,
+                    d.node_idx,
+                    d.radix,
+                    d.leaf_count,
+                    d.tx_per_proof,
+                    timing,
+                );
+                bincode::serialize(&parent).expect("serialize parent proof")
+            }
+            WorkRole::RootCoordinator => {
+                // Not seeded by this loop (the loop verifies the root itself);
+                // ack and continue if one ever appears.
+                lease.ack();
+                continue;
+            }
+        };
+
+        // Atomic idempotent commit + readiness gating (publishes the parent fold
+        // when this node completes its parent's last child).
+        let outcome = transport.commit_and_gate(&d, &bytes);
+        match outcome {
+            CommitOutcome::Committed => {}
+            CommitOutcome::AlreadyExists => {
+                info!("[dispatch] {} already committed (idempotent)", d.output_key());
+            }
+        }
+        // Ack only AFTER the output is durably committed.
+        lease.ack();
+        processed += 1;
+    }
+
+    info!("[dispatch] tree complete: {processed} descriptors processed; harvesting root");
+    let root_bytes = transport
+        .read_output(&root_key)
+        .expect("root output must exist after dispatch loop completes");
+    let root_proof: ProofWithPublicInputs<F, C, D> =
+        bincode::deserialize(&root_bytes).expect("deserialize root proof");
+    verify_root_proof(&root_proof, depth, radix);
+    root_proof
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -878,6 +1057,54 @@ fn main() {
             // No fabricated bench_summary.json: metrics here describe only the
             // harvest+verify performed in THIS run, not a fake end-to-end TPS.
             std::process::exit(0);
+        }
+        Role::Work {
+            radix,
+            leaf_count,
+            tx_per_proof,
+            block_number,
+        } => {
+            use bench::transport::tree_depth as t_depth;
+            let depth = t_depth(leaf_count, radix).max(1);
+            info!(
+                "Fungible dispatch loop: proving + folding an N={leaf_count} tree \
+                 (radix {radix}, depth {depth}) over the LocalTransport, then verifying \
+                 the root. Proof store: {PROOF_DIR}/"
+            );
+
+            let transport = LocalTransport::new(PROOF_DIR);
+            let root_proof =
+                run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut timing);
+
+            let digest = proof_digest(&root_proof);
+            use circuit::recursion::batch::BATCH_TARGET_INDEX;
+            let root_batch =
+                Batch::<F>::from_public_inputs(&root_proof.public_inputs[..BATCH_TARGET_INDEX]);
+
+            let report = json!({
+                "telemetry_event": "FUNGIBLE_DISPATCH_ROOT_VERIFIED",
+                "span_id": format!("dispatch_block_{block_number}"),
+                "transport": "local",
+                "radix": radix,
+                "leaf_count": leaf_count,
+                "tree_depth": depth,
+                "root_proof_key": tree_proof_path(depth, 0).file_name()
+                    .map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                "proof_digest_sha256_8": digest,
+                "aggregated_batch_size": root_batch.batch_size,
+                "aggregated_end_block_number": root_batch.end_block_number,
+                "l1_settlement": "not_configured",
+                "elapsed_ms": start.elapsed().as_millis(),
+                "status": "OK"
+            });
+            println!("{report}");
+            info!(
+                "Fungible dispatch loop produced + verified root ({digest}, {} txs aggregated) \
+                 for block #{block_number} in {:?}",
+                root_batch.batch_size,
+                start.elapsed()
+            );
+            timing.print();
         }
     }
 }
