@@ -126,7 +126,7 @@ resource "google_compute_instance" "prover_vms" {
 
 data "google_pubsub_topic" "work_topic" {
   provider = google-beta.runtime_beta
-  name     = "stark-proofs-topic"
+  name     = "prover-work-topic"
   project  = var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id
 }
 
