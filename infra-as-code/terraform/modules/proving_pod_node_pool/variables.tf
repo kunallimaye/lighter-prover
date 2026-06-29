@@ -128,32 +128,26 @@ variable "enable_fungible_pool" {
   default     = false
 }
 
-variable "fungible_machine_type" {
-  description = "Compute machine shape for the fungible prover pool (sized for the heaviest role; e.g. c3d-highcpu-30)"
+variable "fungible_leaf_machine_type" {
+  description = "Compute machine shape for the GKE fungible leaf worker pool (e.g. c3d-highcpu-30)"
   type        = string
   default     = "c3d-highcpu-30"
 }
 
-variable "fungible_disk_type" {
-  description = "Fungible pool boot disk storage class"
+variable "fungible_leaf_node_count" {
+  description = "Static node count for the GKE fungible leaf worker pool (each node runs 2 pods)."
+  type        = number
+  default     = 8
+}
+
+variable "fungible_agg_machine_type" {
+  description = "Compute machine shape for the GKE fungible aggregator pool (e.g. c3d-highcpu-60)"
   type        = string
-  default     = "hyperdisk-balanced"
+  default     = "c3d-highcpu-60"
 }
 
-variable "fungible_disk_size_gb" {
-  description = "Fungible pool boot disk capacity in gigabytes"
+variable "fungible_agg_node_count" {
+  description = "Static node count for the GKE fungible aggregator pool (each node runs 1 pod)."
   type        = number
-  default     = 100
-}
-
-variable "fungible_baseload_node_count" {
-  description = "Fixed node count for the COMMITTED baseload pool (~60% of peak parallel width). Always-on, NOT Spot."
-  type        = number
-  default     = 6
-}
-
-variable "fungible_burst_max_node_count" {
-  description = "Max node count for the SPOT burst pool. Autoscales 0..N to absorb Pub/Sub backlog bursts."
-  type        = number
-  default     = 80
+  default     = 2
 }

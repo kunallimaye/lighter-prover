@@ -122,3 +122,51 @@ resource "google_compute_instance" "prover_vms" {
   }
 }
 
+# ─── Pub/Sub Work Queues with Role Filtering ──────────────────────────
+
+data "google_pubsub_topic" "work_topic" {
+  provider = google-beta.runtime_beta
+  name     = "stark-proofs-topic"
+  project  = var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id
+}
+
+resource "google_pubsub_subscription" "leaf_sub" {
+  provider = google-beta.runtime_beta
+  name     = "prover-leaf-work-sub"
+  topic    = data.google_pubsub_topic.work_topic.name
+  project  = data.google_pubsub_topic.work_topic.project
+
+  # 180s ack deadline (matching default ack_deadline in config.toml)
+  ack_deadline_seconds = 180
+
+  # Only route leaf proving tasks to this subscription
+  filter = "attributes.role = \"leaf\""
+
+  # Retain acked messages for 1 day for safety/debugging
+  retain_acked_messages = true
+  message_retention_duration = "86400s"
+
+  expiration_policy {
+    ttl = "" # Never expire
+  }
+}
+
+resource "google_pubsub_subscription" "agg_sub" {
+  provider = google-beta.runtime_beta
+  name     = "prover-agg-work-sub"
+  topic    = data.google_pubsub_topic.work_topic.name
+  project  = data.google_pubsub_topic.work_topic.project
+
+  ack_deadline_seconds = 180
+
+  # Route folding tasks (both L1 folds and the L2 root fold) here
+  filter = "attributes.role = \"tree-node\""
+
+  retain_acked_messages = true
+  message_retention_duration = "86400s"
+
+  expiration_policy {
+    ttl = "" # Never expire
+  }
+}
+

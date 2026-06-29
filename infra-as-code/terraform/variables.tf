@@ -172,14 +172,26 @@ variable "enable_fungible_pool" {
   default     = false
 }
 
-variable "fungible_baseload_node_count" {
-  description = "Committed baseload node count (~60% of peak parallel width; always-on, NOT Spot)."
-  type        = number
-  default     = 6
+variable "fungible_leaf_machine_type" {
+  description = "Compute machine shape for the GKE fungible leaf worker pool (e.g. c3d-highcpu-30)"
+  type        = string
+  default     = "c3d-highcpu-30"
 }
 
-variable "fungible_burst_max_node_count" {
-  description = "Max Spot burst node count (autoscales 0..N on Pub/Sub backlog)."
+variable "fungible_leaf_node_count" {
+  description = "Static node count for the GKE fungible leaf worker pool."
   type        = number
-  default     = 80
+  default     = 8
+}
+
+variable "fungible_agg_machine_type" {
+  description = "Compute machine shape for the GKE fungible aggregator pool (e.g. c3d-highcpu-60)"
+  type        = string
+  default     = "c3d-highcpu-60"
+}
+
+variable "fungible_agg_node_count" {
+  description = "Static node count for the GKE fungible aggregator pool."
+  type        = number
+  default     = 2
 }

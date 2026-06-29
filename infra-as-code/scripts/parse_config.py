@@ -106,6 +106,20 @@ def main():
     elif not runtime_email and target_sas:
       runtime_email = build_email
 
+    proving_pod = data.get('proving_pod', {})
+    pp_defaults = proving_pod.get('defaults', {}) if isinstance(proving_pod, dict) else {}
+    arch = str(pp_defaults.get('arch', 'c3d'))
+    engine = str(pp_defaults.get('engine', 'gke'))
+
+    arch_cfg = proving_pod.get(arch, {}) if isinstance(proving_pod, dict) else {}
+    leaf_cfg = arch_cfg.get('leaf_worker', {}) if isinstance(arch_cfg, dict) else {}
+    agg_cfg = arch_cfg.get('aggregator', {}) if isinstance(arch_cfg, dict) else {}
+
+    fungible_leaf_machine = str(leaf_cfg.get('machine_type', 'c3d-highcpu-30'))
+    fungible_leaf_nodes = int(leaf_cfg.get('node_count', 8))
+    fungible_agg_machine = str(agg_cfg.get('machine_type', 'c3d-highcpu-60'))
+    fungible_agg_nodes = int(agg_cfg.get('node_count', 2))
+
     vms_data = data.get('vms', {})
     has_vms = False
     if isinstance(vms_data, dict):
@@ -129,8 +143,13 @@ def main():
         'builder_sa_email': build_email,
         'runtime_sa_email': runtime_email,
         'build_machine_type': build_machine,
-        'orchestration_engine': data.get('proving_pod', {}).get('defaults', {}).get('engine', 'gke'),
+        'orchestration_engine': engine,
+        'silicon_arch': arch,
         'enable_static_vms': has_vms,
+        'fungible_leaf_machine_type': fungible_leaf_machine,
+        'fungible_leaf_node_count': fungible_leaf_nodes,
+        'fungible_agg_machine_type': fungible_agg_machine,
+        'fungible_agg_node_count': fungible_agg_nodes,
     }
     print(json.dumps(cleaned))
 

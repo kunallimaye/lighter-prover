@@ -324,8 +324,12 @@ impl Publisher for PubSubPublisher {
         // was pilot-verified ephemerally; not re-run live here.
         self.rt.block_on(async move {
             let publisher = topic.new_publisher(None);
+            let mut attributes = std::collections::HashMap::new();
+            attributes.insert("role".to_string(), descriptor.role.as_str().to_string());
+
             let msg = PubsubMessage {
                 data,
+                attributes,
                 ..Default::default()
             };
             let awaiter = publisher.publish(msg).await;

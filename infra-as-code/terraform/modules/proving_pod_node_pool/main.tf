@@ -84,14 +84,15 @@ resource "google_container_node_pool" "proving_pool" {
 # Baseload: COMMITTED / dedicated capacity, always-on (~60% of peak parallel
 # width). preemptible = false (NOT Spot) so the always-on floor never gets
 # preempted; KEDA minReplicaCount keeps pods here.
-resource "google_container_node_pool" "fungible_baseload_pool" {
+# Leaf Workers: Spot capacity, static node count.
+# Carries the `role=fungible-leaf` label that the leaf Deployment targets.
+resource "google_container_node_pool" "fungible_leaf_pool" {
   count    = var.orchestration_engine == "gke" && var.enable_fungible_pool ? 1 : 0
-  name     = "lighter-fungible-base-${var.silicon_arch}"
+  name     = "lighter-fungible-leaf-${var.silicon_arch}"
   cluster  = var.cluster_id
   location = var.zone
 
-  # Fixed-size committed floor (no autoscaling block => static node_count).
-  node_count = var.fungible_baseload_node_count
+  node_count = var.fungible_leaf_node_count
 
   management {
     auto_repair  = true
@@ -99,67 +100,10 @@ resource "google_container_node_pool" "fungible_baseload_pool" {
   }
 
   node_config {
-    preemptible  = true # Modified to TRUE for the Phase 1 Spot VM smoke test
-    machine_type = var.fungible_machine_type
-    disk_type    = var.fungible_disk_type
-    disk_size_gb = var.fungible_disk_size_gb
-
-    service_account = var.service_account
-    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
-
-    workload_metadata_config {
-      mode = "GKE_METADATA"
-    }
-
-    gcfs_config {
-      enabled = true
-    }
-
-    kubelet_config {
-      cpu_manager_policy = "static" # Pin STARK threads exclusively to host cores.
-      cpu_cfs_quota      = false    # Purge CFS period throttling.
-    }
-
-    labels = {
-      role         = "fungible-worker"
-      pool-tier    = "baseload"
-      silicon-arch = var.silicon_arch
-    }
-
-    taint {
-      key    = "dedicated"
-      value  = "zkp-prover"
-      effect = "NO_SCHEDULE"
-    }
-  }
-}
-
-# Burst: SPOT capacity, autoscales 0..N to absorb Pub/Sub backlog bursts cheaply.
-# Carries the same `role=fungible-worker` label so the Deployment schedules here
-# too, plus an explicit spot taint the Deployment tolerates.
-resource "google_container_node_pool" "fungible_burst_pool" {
-  count    = var.orchestration_engine == "gke" && var.enable_fungible_pool ? 1 : 0
-  name     = "lighter-fungible-burst-${var.silicon_arch}"
-  cluster  = var.cluster_id
-  location = var.zone
-
-  initial_node_count = 0
-
-  autoscaling {
-    min_node_count = 0
-    max_node_count = var.fungible_burst_max_node_count
-  }
-
-  management {
-    auto_repair  = true
-    auto_upgrade = true
-  }
-
-  node_config {
-    preemptible  = true # SPOT — burst capacity for KEDA-driven scale-out.
-    machine_type = var.fungible_machine_type
-    disk_type    = var.fungible_disk_type
-    disk_size_gb = var.fungible_disk_size_gb
+    preemptible  = true # SPOT
+    machine_type = var.fungible_leaf_machine_type
+    disk_type    = var.leaf_disk_type
+    disk_size_gb = var.leaf_disk_size_gb
 
     service_account = var.service_account
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
@@ -178,8 +122,7 @@ resource "google_container_node_pool" "fungible_burst_pool" {
     }
 
     labels = {
-      role         = "fungible-worker"
-      pool-tier    = "burst"
+      role         = "fungible-leaf"
       silicon-arch = var.silicon_arch
     }
 
@@ -189,8 +132,62 @@ resource "google_container_node_pool" "fungible_burst_pool" {
       effect = "NO_SCHEDULE"
     }
 
-    # Spot taint so only Spot-tolerant workloads (the fungible Deployment) land
-    # here; mirrors GKE's own spot node taint convention.
+    taint {
+      key    = "cloud.google.com/gke-spot"
+      value  = "true"
+      effect = "NO_SCHEDULE"
+    }
+  }
+}
+
+# Aggregators: Spot capacity, static node count.
+# Carries the `role=fungible-agg` label that the aggregator Deployment targets.
+resource "google_container_node_pool" "fungible_agg_pool" {
+  count    = var.orchestration_engine == "gke" && var.enable_fungible_pool ? 1 : 0
+  name     = "lighter-fungible-agg-${var.silicon_arch}"
+  cluster  = var.cluster_id
+  location = var.zone
+
+  node_count = var.fungible_agg_node_count
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    preemptible  = true # SPOT
+    machine_type = var.fungible_agg_machine_type
+    disk_type    = var.agg_disk_type
+    disk_size_gb = var.agg_disk_size_gb
+
+    service_account = var.service_account
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    workload_metadata_config {
+      mode = "GKE_METADATA"
+    }
+
+    gcfs_config {
+      enabled = true
+    }
+
+    kubelet_config {
+      cpu_manager_policy = "static"
+      cpu_cfs_quota      = false
+    }
+
+    labels = {
+      role         = "fungible-agg"
+      silicon-arch = var.silicon_arch
+    }
+
+    taint {
+      key    = "dedicated"
+      value  = "zkp-prover"
+      effect = "NO_SCHEDULE"
+    }
+
     taint {
       key    = "cloud.google.com/gke-spot"
       value  = "true"
