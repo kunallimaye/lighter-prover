@@ -44,6 +44,21 @@ steps:
             --event-subscription="${_EVENT_SUBSCRIPTION}"
         fi
 
+  # 1.5 Clean old GKE resources and wait for full termination to avoid race conditions
+  - id: delete-old-gke-resources
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
+          
+          echo "[INFO] Cleaning old GKE resources..."
+          kubectl delete deployment/lighter-fungible-prover deployment/lighter-active-coordinator deployment/lighter-redis service/redis-service job/lighter-seeder job/lighter-coordinator --ignore-not-found=true
+        fi
+
   # 2. Clean GCS bucket before run to avoid stale proofs
   - id: clean-gcs
     name: 'gcr.io/cloud-builders/gsutil'
@@ -53,12 +68,7 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Cleaning GCS stark_proofs directory..."
-          if [ -f gcs_prefix.txt ]; then
-            GCS_PREFIX=$(cat gcs_prefix.txt)
-            gsutil -m rm -rf "$${GCS_PREFIX}/stark_proofs/*" || true
-          else
-            echo "[WARNING] gcs_prefix.txt not found, skipping clean."
-          fi
+          gsutil -m rm -rf "gs://${_TF_STATE_BUCKET}/benchmark-reports/${_BENCHMARK_ID}/${_IMAGE}/${_ARCH}/stark_proofs/*" || true
         fi
 
   # 2.5 Clean Pub/Sub subscriptions to avoid stale tasks/events
@@ -86,16 +96,6 @@ steps:
         if [ "${_ENGINE}" = "gke" ]; then
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
           gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
-          
-          echo "[INFO] Cleaning old GKE resources..."
-          kubectl delete deployment/lighter-fungible-prover deployment/lighter-active-coordinator deployment/lighter-redis service/redis-service job/lighter-seeder job/lighter-coordinator --ignore-not-found=true --wait=false
-          for i in {1..30}; do
-            if ! kubectl get job/lighter-seeder job/lighter-coordinator &>/dev/null; then
-              break
-            fi
-            echo "[INFO] Waiting for old resources to be deleted..."
-            sleep 2
-          done
           
           echo "[INFO] Deploying Redis..."
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-redis.rendered.yaml
@@ -139,7 +139,12 @@ steps:
         if [ "${_ENGINE}" = "gke" ]; then
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
           gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
-          python3 infra-as-code/scripts/extract_gke_telemetry.py --arch="${_ARCH}" --coordinator-log=coordinator.log --config=config.toml
+          python3 infra-as-code/scripts/extract_gke_telemetry.py \
+            --arch="${_ARCH}" \
+            --coordinator-log=coordinator.log \
+            --config=config.toml \
+            --benchmark-id="${_BENCHMARK_ID}" \
+            --image="${_IMAGE}"
         fi
 
 substitutions:

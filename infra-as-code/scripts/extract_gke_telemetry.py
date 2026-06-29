@@ -166,32 +166,30 @@ def main():
   parser.add_argument("--arch", required=True, help="Silicon architecture (t2d, c4d, etc.)")
   parser.add_argument("--coordinator-log", default="coordinator.log", help="Path to coordinator log")
   parser.add_argument("--config", default="config.toml", help="Path to config.toml")
+  parser.add_argument("--benchmark-id", required=True, help="Benchmark ID")
+  parser.add_argument("--image", required=True, help="Image tag (code release)")
   args = parser.parse_args()
 
-  # 1. Read GCS prefix
-  if not os.path.exists("gcs_prefix.txt"):
-    print("[ERROR] gcs_prefix.txt not found. Run render_pod_spec.py first.", file=sys.stderr)
-    sys.exit(1)
+  # Resolve GCS bucket and aggregator machine type from config.toml
+  gcs_bucket = "kunal-scratch-tfstate"
+  agg_machine = "unknown"
+  if os.path.exists(args.config):
+    try:
+      with open(args.config, "rb") as f:
+        cfg_data = tomllib.load(f)
+      gcs_bucket = cfg_data.get("gcp", {}).get("bench", {}).get("bucket", "kunal-scratch-tfstate")
+      agg_machine = cfg_data.get("proving_pod", {}).get(args.arch, {}).get("aggregator", {}).get("machine_type", "unknown")
+    except Exception as e:
+      print(f"[WARNING] Failed to parse config.toml: {e}", file=sys.stderr)
 
-  with open("gcs_prefix.txt", "r") as f:
-    gcs_uri = f.read().strip()
+  gcs_prefix = f"benchmark-reports/{args.benchmark_id}/{args.image}/{args.arch}"
+  gcs_uri = f"gs://{gcs_bucket}/{gcs_prefix}"
 
   print(f"[INFO] Target GCS URI: {gcs_uri}")
 
-  match = re.match(r"gs://([^/]+)/(.+)", gcs_uri)
-  if not match:
-    print(f"[ERROR] Invalid GCS URI in gcs_prefix.txt: {gcs_uri}", file=sys.stderr)
-    sys.exit(1)
-  
-  gcs_prefix = match.group(2)
-  parts = gcs_prefix.split("/")
-  if len(parts) < 4 or parts[0] != "benchmark-reports":
-    print(f"[ERROR] GCS prefix does not match expected structure: {gcs_prefix}", file=sys.stderr)
-    sys.exit(1)
-  
-  benchmark_id = parts[1]
-  code_release = parts[2]
-  leaf_machine = parts[3]
+  benchmark_id = args.benchmark_id
+  code_release = args.image
+  leaf_machine = args.arch
 
   # 2. Query GKE Seeder Job for start time
   print("[INFO] Querying GKE Seeder Job for start time...")
@@ -240,16 +238,6 @@ def main():
   print(f"  Avg  : {metrics['node_gcs']['avg']:.2f}")
   print(f"  Total: {metrics['node_gcs']['total']:.2f}")
   print("===================================\n")
-
-  # 4. Resolve Aggregator Machine Type from config.toml
-  agg_machine = "unknown"
-  if os.path.exists(args.config):
-    try:
-      with open(args.config, "rb") as f:
-        cfg_data = tomllib.load(f)
-      agg_machine = cfg_data.get("proving_pod", {}).get(args.arch, {}).get("aggregator", {}).get("machine_type", "unknown")
-    except Exception as e:
-      print(f"[WARNING] Failed to read aggregator machine type from config.toml: {e}", file=sys.stderr)
 
   # 5. Construct bench_summary.json
   # Maintain backward compatibility for top-level keys, but inject rich stats
