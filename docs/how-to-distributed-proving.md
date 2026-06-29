@@ -31,12 +31,40 @@ pre-execution ──▶ leaf proving ──▶ dynamic-depth tree aggregation �
  (BlockPreExec)   (N leaf proofs)   (depth = ceil(log_radix N) levels)  (1 root)
 ```
 
-1. **Leaf proving (Option A, fast pre-execution).** A leaf worker runs the
-   witness-gen prefix (`BlockPreExecutionCircuit`) over chunks `0..i`, threads
-   the real pre-state into `BlockTxCircuit`, proves the single chunk `i`,
-   derives the real `Batch` aggregate from the proven public inputs, wraps it in
-   a `BatchTarget`-shaped leaf proof, **verifies it**, and persists it to
-   `reports/stark_proofs/leaf_{i}.proof`.
+1. **Leaf proving (corpus pre-state read).** A leaf worker obtains chunk `i`'s
+   authentic pre-state, threads it into `BlockTxCircuit`, proves the single
+   chunk `i`, derives the real `Batch` aggregate from the proven public inputs,
+   wraps it in a `BatchTarget`-shaped leaf proof, **verifies it**, and persists
+   it to `reports/stark_proofs/leaf_{i}.proof`.
+
+   **Pre-state: corpus READ replaces prefix replay (issue #316).** Chunk `i`'s
+   pre-state is the ledger state having applied all PRIOR chunks' txs. The
+   previous implementation recomputed it by re-proving (witness-gen) every
+   prefix chunk `0..i` on **every** leaf — an **O(N²)** tail across the tree
+   (leaf `i` re-does `i` prefixes, so the leaf phase grows quadratically in the
+   chunk count). The leaf worker now **reads** that pre-state directly from a
+   committed per-tx positional **pre-state corpus**: `at_chunk(C, i)` is the
+   snapshot `snapshots[C·i]`, the exact state the prefix replay would have
+   reproduced. A pilot confirmed the read path is **bit-identical** to the
+   replayed state (identical `old/new_state_root`, `old/new_account_delta_tree_root`,
+   `new_validium_root`) and **~21× faster** across the leaf phase.
+
+   Because we **replay the same committed block**, no corpus regeneration is
+   ever needed for a normal run — the read path plus the committed dataset
+   suffice. The corpus is the committed dataset
+   `bench/corpus/cap-block/captured_corpus.gz` (the per-tx pre-state of the
+   bundled `bench/bench_test.json` cap block; see
+   `bench/corpus/cap-block/README.md`). The generation/harvest code that mints a
+   **new** corpus is intentionally **not** in this branch — it lives on the
+   `parallel-v0.0.1-alpha` branch and is only needed if `bench_test.json` itself
+   changes or the corpus schema MAJOR bumps.
+
+   **Honest fallback.** If the corpus cannot be loaded (missing file, corrupt
+   bytes, incompatible schema MAJOR — the loader returns an error, **never** a
+   fabricated snapshot) or the requested chunk index is absent, the leaf falls
+   back to the original prefix-replay path and logs which path it took. The
+   `Batch` is identical on either path. `BlockPreExecutionCircuit` is still
+   proven on both paths to obtain the block's `new_validium_root`.
 2. **Tree aggregation (dynamic depth).** A tree node folds up to `radix` child
    proofs into one parent. Depth is computed at runtime as
    `depth = ceil(log_radix(N))` for `N` leaves — level 1 folds leaf proofs;
@@ -277,6 +305,7 @@ hand-set:
 | `txs-per-block` (T) | **3-knob** how many of the block's real txs to prove per block. Default 0 ⇒ all real txs. `T ≤ block tx count`. | CLI `work --txs-per-block` (default 0/all) |
 | `txs-per-chunk` (C) | **3-knob** transactions per leaf. Canonical flag `--tx-per-proof`; `--txs-per-chunk` is an alias. **Must evenly divide T.** | CLI `work --txs-per-chunk` / `--tx-per-proof` (default 1); Makefile `CHUNK`; cloudbuild `_CHUNK_SIZE` |
 | `radix` | Tree fan-in (children per node). Circuit max fan-in is 16 (`HEX_RADIX`). **Default 16** (real workload). radix-2 still works when set explicitly. | CLI `--radix` (default 16); cloudbuild `_RADIX` (16); render `--radix` (default 16) |
+| `prestate-corpus-path` | Path to the committed per-tx **pre-state corpus** each leaf reads its chunk's pre-state from instead of re-proving every prefix chunk (issue #316; replaces the O(N²) prefix-replay tail). On a corpus miss the leaf **falls back to prefix replay** — pre-state is never fabricated. | CLI `work --prestate-corpus-path`; env `LIGHTER_PRESTATE_CORPUS`; **default** `bench/corpus/cap-block/captured_corpus.gz` (with `/data` + `bench/`-relative fallbacks) |
 | `leaf-count` (N) | **DERIVED** as `ceil(T / C)` per block by `work` — *not* an operator knob there. Still an explicit input for the phase-locked `tree-node`/`root-coordinator` subcommands + `render_pod_spec.py`. | Derived in `work`; CLI `--leaf-count` on `tree-node`/`root-coordinator`; cloudbuild `_LEAF_COUNT`; render `--leaf-count` |
 | depth | **DERIVED**: `ceil(log_radix N)`. **Never set directly.** | Computed in `prover_node.rs` (`tree_depth`) and `render_pod_spec.py` (`tree_depth`) |
 | `ack_deadline` | Pub/Sub lease ≈ 2×P99 prove time. Default **180s** (radix-16 fold ≈80s on `c3d-highcpu-16`, live 500-tx run; hardware-dependent). | CLI `--ack-deadline` / `PROVER_PUBSUB_ACK_DEADLINE`; render `--ack-deadline` |
@@ -287,6 +316,33 @@ hand-set:
 > level) for the phase-locked path; it does **not** replay the block. The
 > 3-knob `--blocks` replay count is a `prover-node work` flag. The two are
 > deliberately distinct and documented as such in the script.
+
+**Pre-state corpus (issue #316 — replaces the O(N²) prefix-replay tail).** Each
+leaf needs the ledger pre-state after all prior chunks' txs. Rather than
+recompute it by re-proving every prefix chunk on every leaf (an **O(N²)** leaf
+phase), the leaf **reads** that pre-state from a committed per-tx positional
+corpus and proves only its own chunk. The corpus is S-independent: `at_chunk(C,
+i) = snapshots[C·i]`, so the same per-tx array serves every `--txs-per-chunk`.
+Pilot result: **bit-identical** leaf state, **~21× faster** leaf phase.
+
+- **Default / where it is.** `bench/corpus/cap-block/captured_corpus.gz` (the
+  per-tx pre-state of the bundled `bench/bench_test.json` cap block;
+  gzip-framed JSON, schema 1.1; see `bench/corpus/cap-block/README.md`).
+  Override with `--prestate-corpus-path` or `LIGHTER_PRESTATE_CORPUS`; the
+  default resolves with `/data` (mounted) and `bench/`-relative fallbacks.
+- **No regeneration to replay the same block.** A normal run **replays the same
+  committed block**, so the committed corpus + the read path are all you need —
+  there is **nothing to regenerate**.
+- **When a NEW corpus IS needed** (only if `bench/bench_test.json` itself
+  changes, or the corpus schema **MAJOR** bumps): the corpus *generation /
+  harvest* code (the serial S=1 sweep that proves each single-tx step, plus the
+  empty-index sibling-path harvester) is intentionally **not** in this branch —
+  it lives on the **`parallel-v0.0.1-alpha`** branch. Only the read path is
+  ported here. Regenerate per `bench/corpus/cap-block/README.md`.
+- **Honest fallback.** A missing / corrupt / schema-MAJOR-incompatible corpus
+  makes the loader return an error (never a fabricated snapshot); the leaf then
+  falls back to prefix replay and logs which path it took. The `Batch` is
+  identical on either path.
 
 **Divisor guidance (C must evenly divide T).** For the real 500-tx block the
 valid `--txs-per-chunk` values are the divisors of 500:

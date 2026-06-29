@@ -474,3 +474,47 @@ live end-to-end run on a real cluster is `TODO(confirm-on-live-run)`.
   scale-down + Spot preemption (incl. the live runner patching
   `pod-deletion-cost` on lease acquire/release).
 - Close open item **(a)** (real-Spot prove-time P99) with this live run.
+
+## Amendment 3 (prefix-replay tail mitigated by a corpus READ path — issue #316)
+
+The **prefix-replay tail** identified in Amendment 2 (§"The prefix-replay tail
+is the dominant leaf cost at scale") as the **dominant leaf cost at scale** — the
+Option-A behaviour where leaf *i* re-executes chunks `0..i` to reconstruct its
+pre-state, growing `O(N)` per leaf and `O(N²)` across the block — is now
+**mitigated** by the corpus mechanism that amendment named as the lever.
+
+**What landed (read path only).** The leaf worker no longer replays the prefix.
+It **reads** chunk *i*'s authentic pre-state from a committed per-tx positional
+**pre-state corpus** (`at_chunk(C, i) = snapshots[C·i]`) and proves only its own
+chunk. The corpus is the committed dataset
+`bench/corpus/cap-block/captured_corpus.gz` (the per-tx pre-state of the bundled
+`bench/bench_test.json` cap block; schema 1.1). Because a normal run **replays
+the same committed block**, the read path plus the committed dataset suffice —
+**no corpus regeneration**.
+
+**Scope deliberately minimal.** Only the **READ** path was ported (from
+`parallel-v0.0.1-alpha`): the in-memory snapshot types
+(`bench::prestate::{ChunkPreState, EmptyIndexSiblingPaths, PreStateSnapshots}`)
+and the load-only deserializer
+(`bench::prestate_store::load_prestate_corpus_from_path`). The corpus
+**generation / harvest** code (the serial S=1 sweep that proves each single-tx
+step; the empty-index sibling-path harvester) is **excluded** — it stays on
+`parallel-v0.0.1-alpha` and is needed only to mint a NEW corpus (i.e. if
+`bench_test.json` changes or the schema MAJOR bumps). **Zero circuit-crate
+changes** were required.
+
+**Pilot result.** Bit-identical leaf state on the read path vs the replay path
+(identical `old/new_state_root`, `old/new_account_delta_tree_root`,
+`new_validium_root`), and **~21× faster** leaf phase.
+
+**Honest fallback.** A missing / corrupt / schema-MAJOR-incompatible corpus
+makes the loader return an error (never a fabricated snapshot); the leaf falls
+back to the original prefix replay and logs which path it took. The resulting
+`Batch` is identical on either path, so the mechanism is a pure speedup with no
+soundness change.
+
+**Soundness validation.** A cheap gate proves corpus == replay at chunk indices
+`{1, 3}` (the equivalence is a property of the mechanism, not the index); a
+deeper `{5, 60, 124}` gate exists but is `#[ignore]`d because the *replay* ground
+truth it compares against re-proves all prefixes (`O(N)` per index) and is too
+slow to run inline — it is for on-demand / CI deep validation.

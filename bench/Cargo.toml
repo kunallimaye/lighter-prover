@@ -59,6 +59,11 @@ tiny-keccak =  { workspace = true }
 paste = { workspace = true }
 circuit = { path = "../circuit", default-features = true }
 base64 = "0.21"
+# gzip framing for the per-tx pre-state corpus READ path (issue #316). Moved
+# from [dev-dependencies] to a production dependency because the corpus loader
+# (`bench::prestate_store::load_prestate_corpus_from_path`) now runs in the
+# `prover-node` leaf-proving path, not just in tests.
+flate2 = "1.0"
 # Graceful-shutdown signal handling for the fungible `prover-node work` dispatch
 # loop (SIGTERM on KEDA scale-down / Spot preemption -> finish in-flight prove,
 # ack, exit). Tiny, cloud-free, std-only crate; compiled in the DEFAULT build so
@@ -78,7 +83,6 @@ redis = { version = "0.24", default-features = false, features = ["tokio-comp"],
 futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
-flate2 = "1.0"
 criterion = { version = "0.5.1", default-features = false }
 num_cpus = { version = "1.14.0", default-features = false }
 rand = { workspace = true, features = [
