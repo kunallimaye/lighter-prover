@@ -70,10 +70,10 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Purging Pub/Sub subscriptions..."
-          # Seek to 10 seconds in the future to discard all unacked messages
-          FUTURE_TIME=$(date -u -d "+10 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+10s +%Y-%m-%dT%H:%M:%SZ)
-          gcloud pubsub subscriptions seek "${_WORK_SUBSCRIPTION}" --time="$${FUTURE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
-          gcloud pubsub subscriptions seek "${_EVENT_SUBSCRIPTION}" --time="$${FUTURE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          # Seek to 10 seconds in the past to discard all old unacked messages safely without purging new ones
+          PURGE_TIME=$(date -u -d "-10 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-10s +%Y-%m-%dT%H:%M:%SZ)
+          gcloud pubsub subscriptions seek "${_WORK_SUBSCRIPTION}" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          gcloud pubsub subscriptions seek "${_EVENT_SUBSCRIPTION}" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
         fi
 
   # 3. Deploy GKE Proving Pipeline (Fungible Pool)
