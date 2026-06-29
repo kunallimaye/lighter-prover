@@ -325,11 +325,18 @@ corpus and proves only its own chunk. The corpus is S-independent: `at_chunk(C,
 i) = snapshots[C·i]`, so the same per-tx array serves every `--txs-per-chunk`.
 Pilot result: **bit-identical** leaf state, **~21× faster** leaf phase.
 
-- **Default / where it is.** `bench/corpus/cap-block/captured_corpus.gz` (the
-  per-tx pre-state of the bundled `bench/bench_test.json` cap block;
-  gzip-framed JSON, schema 1.1; see `bench/corpus/cap-block/README.md`).
-  Override with `--prestate-corpus-path` or `LIGHTER_PRESTATE_CORPUS`; the
-  default resolves with `/data` (mounted) and `bench/`-relative fallbacks.
+- **Default / where it is.** In the repo: `bench/corpus/cap-block/captured_corpus.gz`
+  (gzip-framed JSON, ≈5 MB, the source of truth) and its decompressed twin
+  `bench/corpus/cap-block/captured_corpus.json` (RAW, ≈33.6 MB) — both the per-tx
+  pre-state of the bundled `bench/bench_test.json` cap block, schema 1.1; see
+  `bench/corpus/cap-block/README.md`. **In the container (issue #318):** the
+  image bakes the **RAW** `/data/captured_corpus.json` so the in-pod load pays
+  **no gunzip** (latency measurement is critical here). The loader
+  **auto-detects framing by extension** — `.json` → raw (zero-decompress),
+  `.gz` → gzip — so either artifact works. Override with `--prestate-corpus-path`
+  or `LIGHTER_PRESTATE_CORPUS`; the default probe resolves
+  `/data/captured_corpus.json` (raw, preferred) → `/data/captured_corpus.gz` →
+  the `bench/`-relative `.gz`.
 - **No regeneration to replay the same block.** A normal run **replays the same
   committed block**, so the committed corpus + the read path are all you need —
   there is **nothing to regenerate**.
@@ -339,10 +346,16 @@ Pilot result: **bit-identical** leaf state, **~21× faster** leaf phase.
   empty-index sibling-path harvester) is intentionally **not** in this branch —
   it lives on the **`parallel-v0.0.1-alpha`** branch. Only the read path is
   ported here. Regenerate per `bench/corpus/cap-block/README.md`.
-- **Honest fallback.** A missing / corrupt / schema-MAJOR-incompatible corpus
-  makes the loader return an error (never a fabricated snapshot); the leaf then
-  falls back to prefix replay and logs which path it took. The `Batch` is
-  identical on either path.
+- **Honest fallback + loud load-latency log (issue #318).** A missing / corrupt
+  / schema-MAJOR-incompatible corpus makes the loader return an error (never a
+  fabricated snapshot); the leaf then falls back to prefix replay. On **every**
+  load the worker emits a LOUD `[prestate][LOAD]` line carrying `SOURCE=`
+  (`corpus` vs `replay-fallback`), `framing=` (`raw-json (zero-decompress)` vs
+  `gzip (decompress)`), `load_latency_ms=` (the load+deserialize time), and
+  `snapshot_count=`. This makes both the corpus-vs-replay choice **and** the
+  load latency visible — `SOURCE=replay-fallback` in cluster logs is the
+  symptom that the corpus did not load and the leaf is on the slow O(N²) path.
+  The `Batch` is identical on either path.
 
 **Divisor guidance (C must evenly divide T).** For the real 500-tx block the
 valid `--txs-per-chunk` values are the divisors of 500:
@@ -448,11 +461,49 @@ wall-time estimates from your own measured run.
    `TF_VAR_enable_fungible_pool`, `TF_VAR_fungible_baseload_node_count`, and
    `TF_VAR_fungible_burst_max_node_count`.
 
-2. **Build + push the image.** `make cloud-zkp-build` builds via
-   `Dockerfile.zkp` (amd64) / `Dockerfile.zkp-arm64` (arm64), shipping the
-   `prover-node` and `bench` binaries.
+ 2. **Build + push the image.** `make cloud-zkp-build` builds via
+    `Dockerfile.zkp` (amd64) / `Dockerfile.zkp-arm64` (arm64), shipping the
+    `prover-node` and `bench` binaries.
 
-   > **Important:** the Dockerfiles build the **default (cloud-free)** binary
+    > **Corpus ships IN the image (issue #318).** Both Dockerfiles
+    > `COPY bench/corpus/cap-block/captured_corpus.json /data/captured_corpus.json`
+    > in the runtime stage — right next to the existing
+    > `COPY bench/bench_test.json /data/bench_test.json` block fixture. So a GKE
+    > leaf worker finds its pre-state corpus on disk and reads it instead of
+    > **silently** falling back to the O(N²) prefix replay. **It is baked RAW
+    > (uncompressed JSON), NOT the `.gz`** — the in-pod load then pays **no
+    > gunzip cost**, which matters because **latency measurement is critical to
+    > this project**: a per-startup `gunzip` would pollute the measured numbers.
+    > The committed `.gz` (≈5 MB) stays in the repo as the smaller source of
+    > truth; the RAW `.json` (≈33.6 MB) is the artifact the image bakes.
+    >
+    > **Loader auto-detects framing by extension.**
+    > `prestate_store::load_prestate_corpus_from_path` sends `*.json` to
+    > `from_json_bytes` (zero-decompress) and `*.gz` to `from_gzip_bytes`
+    > (existing gzip path). The binary's `/data/` probe prefers
+    > `/data/captured_corpus.json` (raw) **first**, then `/data/captured_corpus.gz`,
+    > then the `bench/`-relative default — so in-pod it loads the RAW file with
+    > zero gunzip. `cloud-gke-bench` flows this **automatically**: the image
+    > bakes the file and the binary probes it; no operator flag is required.
+    > For robustness the rendered fungible **worker** manifest also sets
+    > `LIGHTER_PRESTATE_CORPUS=/data/captured_corpus.json` explicitly.
+    >
+    > **Schema-1.1 paths-bearing is REQUIRED.** The committed corpus is schema
+    > `1.1` (carries per-position `sibling_paths`). The obsolete schema-1.0
+    > roots-only / "witnessless" corpus is **not** valid here: it fails
+    > mid-block with the `0 != -1` partition error. Only `1.1` is supported.
+    >
+    > **Loud corpus-load-latency log (issue #318).** On every corpus load the
+    > worker emits a `[prestate][LOAD]` line with `SOURCE=` (corpus vs
+    > replay-fallback), `framing=` (`raw-json (zero-decompress)` vs
+    > `gzip (decompress)`), `load_latency_ms=`, and `snapshot_count=`. This makes
+    > **both** the corpus-vs-replay choice **and** the load latency VISIBLE and
+    > MEASURABLE — never silent. **Replay-fallback symptom:** if you see
+    > `SOURCE=replay-fallback` in the worker logs, the corpus was missing /
+    > corrupt / wrong-schema and the leaf is on the slow O(N²) path — check that
+    > the image actually baked `/data/captured_corpus.json`.
+
+    > **Important:** the Dockerfiles build the **default (cloud-free)** binary
    > (`cargo build --release --bin bench --bin prover-node`). The fungible
    > `--transport=pubsub` path requires the image to be built with the `pubsub`
    > cargo feature (`cargo build --features pubsub`); the default build accepts

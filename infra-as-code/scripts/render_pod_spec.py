@@ -157,6 +157,15 @@ spec:
           value: "info"
         - name: RUST_MIN_STACK
           value: "4294967296"
+        # Issue #318: pin the leaf workers' pre-state corpus to the RAW
+        # (uncompressed) artifact baked into the image at /data/captured_corpus.json.
+        # The binary already probes this path first, but setting it explicitly
+        # makes the abstraction robust (no operator flag; cloud-gke-bench flows
+        # it automatically) and guarantees workers read the corpus rather than
+        # silently falling back to the O(N²) prefix replay. RAW (not .gz) avoids
+        # per-pod gunzip latency — latency measurement is critical to this project.
+        - name: LIGHTER_PRESTATE_CORPUS
+          value: "/data/captured_corpus.json"
         lifecycle:
           preStop:
             exec:

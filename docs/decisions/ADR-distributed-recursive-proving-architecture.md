@@ -415,6 +415,14 @@ These are explicitly **not yet resolved**:
   questions posted in discussion #287.
 - **(c) GCS-Fuse atomicity** remains unverified — use the native GCS API
   (`ifGenerationMatch=0`) for the idempotent guard until proven otherwise.
+- **(d) Runtime data-delivery (NOT built).** Baking the block + pre-state corpus
+  into the image (issue #318, Amendment 4) is a **test-harness** pattern.
+  Production proving needs workers to fetch the **real, continuously-arriving**
+  block + pre-state **by reference** from a sequencer / state store at runtime,
+  not a frozen fixture per image layer. That path — descriptor-carried data
+  references, a pre-state service/store, locality/caching, and the
+  freshness/consistency contract — is **unbuilt**. See Amendment 4 §"Honest
+  known-gap". Cross-ref #316, #318.
 
 ## Implementation status — autoscaling slice (issue #302)
 
@@ -518,3 +526,66 @@ soundness change.
 deeper `{5, 60, 124}` gate exists but is `#[ignore]`d because the *replay* ground
 truth it compares against re-proves all prefixes (`O(N)` per index) and is too
 slow to run inline — it is for on-demand / CI deep validation.
+
+## Amendment 4 (corpus wired into the GKE image as a RAW artifact — issue #318)
+
+Amendment 3 landed the corpus **read path** but the corpus only worked
+**locally**: `bench/corpus/cap-block/captured_corpus.gz` was committed yet **not
+copied into the runtime container**, so GKE leaf worker pods missed the file,
+the binary's `/data/` probe failed, and **each leaf silently fell back to the
+O(N²) prefix replay** — the ~21× win was lost on the cluster (the very tail
+Amendment 2 named as the dominant cost). This amendment closes that.
+
+**Decision — bake the corpus into the image, RAW (uncompressed).** Both
+`Dockerfile.zkp` and `Dockerfile.zkp-arm64` now
+`COPY bench/corpus/cap-block/captured_corpus.json /data/captured_corpus.json` in
+the runtime stage, mirroring the existing block-fixture COPY. The artifact is
+shipped **RAW (uncompressed JSON, ≈33.6 MB), NOT the `.gz`**, so the in-pod load
+pays **no `gunzip` cost**. This is a deliberate, latency-driven choice:
+**latency measurement is a first-class concern of this project**, and a
+per-startup decompress would pollute the measured numbers. The committed `.gz`
+(≈5 MB) is retained as the smaller source-of-truth artifact in the repo.
+
+**Loader auto-detects framing.** `prestate_store::load_prestate_corpus_from_path`
+routes `*.json` to a new `from_json_bytes` (zero-decompress `serde_json`) and
+`*.gz` to the existing `from_gzip_bytes` (gzip). The binary's corpus-path
+resolver probes `/data/captured_corpus.json` (raw, preferred) → then
+`/data/captured_corpus.gz` → then the `bench/`-relative default. `cloud-gke-bench`
+flows the corpus **automatically** (no operator flag); for robustness the
+rendered fungible worker manifest also sets
+`LIGHTER_PRESTATE_CORPUS=/data/captured_corpus.json`.
+
+**Measured load-latency delta (local, release, same machine).** RAW `.json`
+load ≈ **150 ms**; `.gz` load ≈ **213 ms** — the RAW path saves the ≈60 ms
+gunzip cost per load (the delta is larger in debug builds, ≈570 ms). The raw==gz
+equivalence (501 snapshots, identical state roots at every position) is asserted
+by a cheap unit test.
+
+**Loud, never-silent instrumentation.** Every corpus load now emits a
+`[prestate][LOAD]` line carrying `SOURCE=` (corpus vs replay-fallback),
+`framing=` (raw-json vs gzip), `load_latency_ms=`, and `snapshot_count=`. The
+honest replay fallback from Amendment 3 is unchanged — just made visible and
+timed.
+
+**Zero circuit-crate changes** (Dockerfiles, loader, binary probe, render
+script, docs only).
+
+### Honest known-gap — baked-in fixture is a TEST-HARNESS pattern, not production
+
+Recording this explicitly so the honesty ledger is accurate: baking **both** the
+block (`/data/bench_test.json`) **and** the pre-state corpus
+(`/data/captured_corpus.json`) into the image, and signaling workers which slice
+to prove, is a **TEST-HARNESS** pattern. It is correct and sufficient for the
+benchmark (replaying one committed cap block) but it is **not** how production
+proving works.
+
+**Real production needs RUNTIME data-delivery, which is NOT built.** In
+production, leaf workers must fetch the **real, continuously-arriving** block
+and its pre-state **by reference** from a sequencer / state store (e.g. pull a
+block id + a pre-state pointer off the work descriptor, then read the actual
+data from durable storage), rather than every pod carrying a frozen fixture in
+its image layer. That runtime data-delivery path — descriptor-carried data
+references, a pre-state service/store, cache/locality strategy, and the
+freshness/consistency contract — is **unbuilt**. Until it exists, the
+distributed path is a faithful **benchmark harness**, not a production prover.
+Tracked as a known gap (cross-ref #316, #318, this ADR §"Open items").

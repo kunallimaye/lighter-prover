@@ -149,9 +149,21 @@ fn prestate_corpus_path() -> String {
         }
     }
     // Bundled-default fallbacks, mirroring `load_test_block`.
-    let data_mount = "/data/captured_corpus.gz";
-    if Path::new(data_mount).exists() {
-        return data_mount.to_string();
+    //
+    // Issue #318: prefer the RAW (uncompressed) `/data/captured_corpus.json`
+    // baked into the runtime image FIRST — loading it pays NO gunzip cost, which
+    // matters because latency measurement is critical to this project (a
+    // per-startup decompress would pollute the numbers). Then fall back to the
+    // gzip `/data/captured_corpus.gz`, then the `bench/`-relative committed
+    // default. The loader auto-detects framing by extension
+    // (`prestate_store::load_prestate_corpus_from_path`).
+    let data_mount_raw = "/data/captured_corpus.json";
+    if Path::new(data_mount_raw).exists() {
+        return data_mount_raw.to_string();
+    }
+    let data_mount_gz = "/data/captured_corpus.gz";
+    if Path::new(data_mount_gz).exists() {
+        return data_mount_gz.to_string();
     }
     if Path::new(PRESTATE_CORPUS_DEFAULT).exists() {
         return PRESTATE_CORPUS_DEFAULT.to_string();
@@ -798,13 +810,43 @@ fn load_chunk_pre_state_from_corpus(
     tx_per_proof: usize,
 ) -> (Option<ChunkPreState>, PreStateSource) {
     let path = prestate_corpus_path();
-    match load_prestate_corpus_from_path(&path) {
+    // LATENCY-CRITICAL (issue #318): time the corpus load+deserialize so the
+    // cost is VISIBLE and MEASURABLE, never silent. The framing is auto-detected
+    // by extension — RAW `.json` (zero-decompress, the baked-in image artifact)
+    // vs gzip `.gz`. We log the framing + the load latency in ms so a reader can
+    // see (a) which pre-state SOURCE won (corpus vs replay) AND (b) what the
+    // load itself cost — a per-startup gunzip would show up here, which is
+    // exactly why the image bakes the RAW `.json` (no decompress) variant.
+    let framing = if path.to_ascii_lowercase().ends_with(".json") {
+        "raw-json (zero-decompress)"
+    } else if path.to_ascii_lowercase().ends_with(".gz") {
+        "gzip (decompress)"
+    } else {
+        "gzip (decompress, by default)"
+    };
+    let load_started = Instant::now();
+    let loaded = load_prestate_corpus_from_path(&path);
+    let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+    match loaded {
         Ok(snaps) => match snaps.at_chunk(tx_per_proof, chunk_idx) {
-            Some(pre) => (Some(pre.clone()), PreStateSource::Corpus),
+            Some(pre) => {
+                // LOUD success line: SOURCE=corpus, framing, load-latency-ms,
+                // snapshot_count. This is the key datum for latency analysis.
+                info!(
+                    "[prestate][LOAD] SOURCE=corpus framing={framing} path='{path}' \
+                     load_latency_ms={load_ms:.3} snapshot_count={} position={} \
+                     (chunk {chunk_idx} at S={tx_per_proof}) — fast path, NO O(N²) replay",
+                    snaps.len(),
+                    tx_per_proof * chunk_idx,
+                );
+                (Some(pre.clone()), PreStateSource::Corpus)
+            }
             None => {
                 log::warn!(
-                    "[prestate] corpus '{path}' loaded ({} snapshots) but has no position {} \
-                     for chunk {chunk_idx} at S={tx_per_proof}; falling back to replay",
+                    "[prestate][LOAD] SOURCE=replay-fallback framing={framing} path='{path}' \
+                     load_latency_ms={load_ms:.3} snapshot_count={} — corpus loaded but has NO \
+                     position {} for chunk {chunk_idx} at S={tx_per_proof}; falling back to \
+                     O(N²) prefix REPLAY",
                     snaps.len(),
                     tx_per_proof * chunk_idx,
                 );
@@ -813,9 +855,11 @@ fn load_chunk_pre_state_from_corpus(
         },
         Err(e) => {
             log::warn!(
-                "[prestate] could not load pre-state corpus '{path}': {e}; falling back to \
-                 prefix REPLAY (corpus is the committed dataset — see \
-                 bench/corpus/cap-block/README.md)"
+                "[prestate][LOAD] SOURCE=replay-fallback framing={framing} path='{path}' \
+                 load_latency_ms={load_ms:.3} — could NOT load pre-state corpus: {e}; falling \
+                 back to O(N²) prefix REPLAY (corpus is the committed dataset — see \
+                 bench/corpus/cap-block/README.md). On GKE the image should bake \
+                 /data/captured_corpus.json (issue #318)"
             );
             (None, PreStateSource::Replay)
         }

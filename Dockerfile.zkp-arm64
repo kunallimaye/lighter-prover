@@ -44,6 +44,13 @@ COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/bench /usr/loc
 COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/prover-node /usr/local/bin/prover-node
 COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/lighter-coordinator /usr/local/bin/lighter-coordinator
 COPY bench/bench_test.json /data/bench_test.json
+# Bake the per-tx pre-state corpus into the image so distributed leaf workers
+# read it instead of silently falling back to the O(N²) prefix replay (issue
+# #318). Shipped RAW (uncompressed) — NOT the .gz — so the in-pod load pays NO
+# gunzip cost; latency measurement is critical to this project and a per-startup
+# decompress would pollute it. The binary probes /data/captured_corpus.json
+# first (see prover_node.rs `prestate_corpus_path`).
+COPY bench/corpus/cap-block/captured_corpus.json /data/captured_corpus.json
 
 ENV RUST_LOG=info
 
