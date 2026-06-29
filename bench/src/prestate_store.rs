@@ -244,6 +244,20 @@ impl PreStateCorpus {
         dec.read_to_end(&mut json)?;
         Ok(serde_json::from_slice(&json)?)
     }
+
+    /// Deserialize from RAW (uncompressed) JSON bytes — issue #318.
+    ///
+    /// This is the ZERO-DECOMPRESS load path: it feeds the bytes straight to
+    /// `serde_json::from_slice` with NO [`GzDecoder`] in the way. Baking the
+    /// corpus into the runtime image as RAW JSON (`/data/captured_corpus.json`)
+    /// and loading it through this path removes the per-startup gunzip cost,
+    /// which is critical because LATENCY MEASUREMENT is a first-class concern of
+    /// this project — a per-pod gunzip would pollute the measured numbers. The
+    /// gzip path ([`from_gzip_bytes`]) is retained for the smaller committed
+    /// `.gz` source-of-truth artifact.
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, CorpusError> {
+        Ok(serde_json::from_slice(bytes)?)
+    }
 }
 
 /// Errors from corpus deserialization and load. Honest-failure: a missing /
@@ -307,13 +321,124 @@ impl From<std::io::Error> for CorpusError {
     }
 }
 
-/// Load a gzip-framed JSON corpus from a LOCAL DISK path back into a
-/// [`PreStateSnapshots`]. Honest-failure: a missing / corrupt / incompatible
-/// file returns `Err` — the caller must fall back to the replay path, never
-/// fabricate snapshots.
+/// Load a per-tx pre-state corpus from a LOCAL DISK path back into a
+/// [`PreStateSnapshots`], AUTO-DETECTING the wire framing by extension
+/// (issue #318):
+///
+///   * `*.json` → [`PreStateCorpus::from_json_bytes`] — RAW, ZERO-DECOMPRESS.
+///     This is the path the baked-in `/data/captured_corpus.json` runtime
+///     artifact uses, so an in-pod load pays NO gunzip cost (latency
+///     measurement is critical to this project — a per-startup gunzip would
+///     pollute it).
+///   * `*.gz` (or anything not ending in `.json`) → [`PreStateCorpus::from_gzip_bytes`]
+///     — the existing gzip path for the smaller committed `.gz` source artifact.
+///
+/// Honest-failure: a missing / corrupt / incompatible file returns `Err` — the
+/// caller must fall back to the replay path, never fabricate snapshots.
 pub fn load_prestate_corpus_from_path(
     path: impl AsRef<Path>,
 ) -> Result<PreStateSnapshots, CorpusError> {
+    let path = path.as_ref();
     let bytes = std::fs::read(path)?;
-    PreStateCorpus::from_gzip_bytes(&bytes)?.into_snapshots()
+    let is_raw_json = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+    let corpus = if is_raw_json {
+        PreStateCorpus::from_json_bytes(&bytes)?
+    } else {
+        PreStateCorpus::from_gzip_bytes(&bytes)?
+    };
+    corpus.into_snapshots()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The committed cap-block corpus artifacts (issue #318). Resolved relative
+    /// to the crate root (`bench/`) so the test runs from `cargo test -p bench`.
+    fn corpus_gz_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("corpus/cap-block/captured_corpus.gz")
+    }
+    fn corpus_json_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("corpus/cap-block/captured_corpus.json")
+    }
+
+    /// Cheap, fast (no proving) validation that the RAW `.json` load path
+    /// (issue #318) yields the SAME snapshots as the existing `.gz` path,
+    /// auto-detects framing by extension, and that `at_chunk` resolves. Also
+    /// reports the raw-vs-gz LOAD LATENCY — the key datum justifying baking the
+    /// RAW artifact into the image (latency measurement is critical here; a
+    /// per-startup gunzip would pollute it).
+    #[test]
+    fn raw_json_load_equals_gzip_load_and_resolves_at_chunk() {
+        let gz = corpus_gz_path();
+        let json = corpus_json_path();
+        if !gz.exists() || !json.exists() {
+            eprintln!(
+                "skipping: corpus artifact(s) absent (gz={}, json={})",
+                gz.display(),
+                json.display()
+            );
+            return;
+        }
+
+        // --- gz path (with decompress) ---
+        let t0 = std::time::Instant::now();
+        let snaps_gz = load_prestate_corpus_from_path(&gz).expect("gz corpus must load");
+        let gz_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        // --- raw json path (zero decompress) ---
+        let t1 = std::time::Instant::now();
+        let snaps_json = load_prestate_corpus_from_path(&json).expect("raw json corpus must load");
+        let json_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        // Same shape (501 snapshots: 500 txs + 1 trailing post-state).
+        assert_eq!(snaps_gz.len(), 501, "gz corpus snapshot count");
+        assert_eq!(snaps_json.len(), 501, "raw json corpus snapshot count");
+        assert_eq!(
+            snaps_gz.len(),
+            snaps_json.len(),
+            "raw json and gz must yield identical snapshot counts"
+        );
+
+        // at_chunk(4, 3) -> position 12 must be populated (roots present).
+        let c_gz = snaps_gz.at_chunk(4, 3).expect("gz at_chunk(4,3)");
+        let c_json = snaps_json.at_chunk(4, 3).expect("raw json at_chunk(4,3)");
+
+        // Identical roots prove raw-load == gz-load (the corpus is the same
+        // dataset, just a different on-disk framing). Compare every snapshot's
+        // four state roots field-by-field (ChunkPreState has no PartialEq).
+        for (i, (a, b)) in snaps_gz
+            .snapshots()
+            .iter()
+            .zip(snaps_json.snapshots().iter())
+            .enumerate()
+        {
+            assert_eq!(a.account_tree_root, b.account_tree_root, "pos {i} account root");
+            assert_eq!(
+                a.account_pub_data_tree_root, b.account_pub_data_tree_root,
+                "pos {i} account_pub_data root"
+            );
+            assert_eq!(
+                a.account_delta_tree_root, b.account_delta_tree_root,
+                "pos {i} account_delta root"
+            );
+            assert_eq!(a.market_tree_root, b.market_tree_root, "pos {i} market root");
+        }
+
+        // The at_chunk(4,3) roots must be non-degenerate and identical.
+        assert_eq!(c_gz.account_tree_root, c_json.account_tree_root);
+        assert_eq!(c_gz.market_tree_root, c_json.market_tree_root);
+
+        eprintln!(
+            "[issue#318] corpus-load LATENCY: raw-json={json_ms:.3}ms gz={gz_ms:.3}ms \
+             delta(gz-raw)={:.3}ms (raw avoids gunzip; latency measurement is critical)",
+            gz_ms - json_ms
+        );
+    }
 }

@@ -20,10 +20,12 @@ a populated optional `sibling_paths` field per snapshot.
 
 | field | value |
 |---|---|
-| File | `captured_corpus.gz` |
+| File (source of truth) | `captured_corpus.gz` |
 | Size | 5,146,673 bytes (4.91 MiB) |
-| SHA-256 | `86a5e9e5309d35d451a6240a2c51db414872e7f566773ea51eaad005eefb75a4` |
-| Format | gzip-framed JSON (`bench::prestate_store::PreStateCorpus`) |
+| SHA-256 (`.gz`) | `86a5e9e5309d35d451a6240a2c51db414872e7f566773ea51eaad005eefb75a4` |
+| File (RAW, image-baked) | `captured_corpus.json` |
+| Size (RAW) | 33,599,632 bytes (32.04 MiB) |
+| Format | gzip-framed JSON (`.gz`) / RAW JSON (`.json`) (`bench::prestate_store::PreStateCorpus`) |
 | Schema version | `1.1` (paths-bearing) |
 | Snapshot count | 501 (per-tx positional pre-state for 500 txs + 1 trailing post-state) |
 | Snapshots with `empty_index_sibling_paths.is_some()` | 500 / 501 |
@@ -40,15 +42,37 @@ Adaptive empty-leaf indices recorded at position 495 (account family /
 market): `account_index = 281474976579584`, `market_index = 256` —
 matching the `EmptyIndexSiblingPaths` shape that #263 finalized.
 
+## Two on-disk framings (issue #318)
+
+Two byte-identical-content artifacts ship here:
+
+- **`captured_corpus.gz`** — gzip-framed JSON, ≈5 MB. The smaller
+  **source of truth** kept in the repo.
+- **`captured_corpus.json`** — RAW (uncompressed) JSON, ≈33.6 MB. The
+  decompressed twin (`gunzip -c captured_corpus.gz > captured_corpus.json`).
+  This is the artifact the **runtime container bakes** at
+  `/data/captured_corpus.json`, so the in-pod load pays **no gunzip cost** —
+  latency measurement is critical to this project and a per-startup
+  decompress would pollute it.
+
+`bench::prestate_store::load_prestate_corpus_from_path` **auto-detects the
+framing by extension**: `*.json` → `from_json_bytes` (zero-decompress),
+`*.gz` → `from_gzip_bytes` (gzip). Both yield identical `PreStateSnapshots`
+(501 snapshots, identical state roots at every position).
+
 ## How to consume
 
-Point `--prestate-corpus-path` / `LIGHTER_PRESTATE_CORPUS` at this file
+Point `--prestate-corpus-path` / `LIGHTER_PRESTATE_CORPUS` at either file
 and `run_cell` will load it via
 `bench::prestate_store::load_prestate_corpus_from_path` (a few hundred
 ms) and skip the S=1 sweep entirely. If the file is missing or its
 schema MAJOR is incompatible with the running build, the loader returns
 an honest error — it never fabricates snapshots — so a stale or wrong
 corpus fails loudly, not silently.
+
+If `bench/bench_test.json` ever changes (regenerating the `.gz`),
+regenerate the RAW twin too:
+`gunzip -c captured_corpus.gz > captured_corpus.json`.
 
 ## Reproduce / regenerate
 
