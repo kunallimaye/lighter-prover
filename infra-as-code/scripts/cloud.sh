@@ -802,12 +802,15 @@ cloud_gke_provision() {
   fi
 
   local target_sa="infra-as-code/terraform/target.auto.tfvars.json"
-  local builder_sa="" runtime_sa="" build_machine=""
+  local builder_sa="" runtime_sa="" build_machine="" cfg_enable_fungible=""
   if [[ -f "${target_sa}" ]]; then
     builder_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('builder_sa_email', ''))" 2>/dev/null || true)"
     runtime_sa="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('runtime_sa_email', ''))" 2>/dev/null || true)"
     build_machine="$(python3 -c "import json; print(json.load(open('${target_sa}')).get('build_machine_type', 'E2_HIGHCPU_32'))" 2>/dev/null || true)"
+    cfg_enable_fungible="$(python3 -c "import json; print(str(json.load(open('${target_sa}')).get('enable_fungible_pool', '')).lower())" 2>/dev/null || true)"
   fi
+
+  enable_fungible_pool="${enable_fungible_pool:-${cfg_enable_fungible}}"
 
   if [[ "${arch}" == "all" ]]; then
     _log_info "Provisioning ALL GKE clusters (t2d, c3d, c4a, c4d) in parallel..."
