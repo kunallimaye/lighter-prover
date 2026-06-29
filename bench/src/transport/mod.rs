@@ -885,14 +885,14 @@ mod tests {
         let l1 = WorkDescriptor::leaf(1, 2, 4, 1);
 
         // Commit first child: parent not yet ready, nothing published.
-        assert_eq!(t.commit_and_gate(&l0, b"leaf0"), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&l0, b"leaf0", 0, 0), CommitOutcome::Committed);
         assert!(
             t.pull_one().is_none(),
             "parent fold must not publish until all children done"
         );
 
         // Commit second child: parent ready, fold descriptor published.
-        assert_eq!(t.commit_and_gate(&l1, b"leaf1"), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&l1, b"leaf1", 0, 0), CommitOutcome::Committed);
         let lease = t.pull_one().expect("parent fold should be published");
         let d = lease.descriptor();
         assert_eq!(d.role, Role::TreeNode);
@@ -908,10 +908,10 @@ mod tests {
         let n0 = WorkDescriptor::tree_node(1, 0, 2, 4, 1);
         let n1 = WorkDescriptor::tree_node(1, 1, 2, 4, 1);
 
-        assert_eq!(t.commit_and_gate(&n0, b"node10"), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&n0, b"node10", 0, 0), CommitOutcome::Committed);
         assert!(t.pull_one().is_none(), "root not ready after one level-1 node");
 
-        assert_eq!(t.commit_and_gate(&n1, b"node11"), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&n1, b"node11", 0, 0), CommitOutcome::Committed);
         let lease = t.pull_one().expect("root fold should publish");
         let d = lease.descriptor();
         assert_eq!(d.role, Role::TreeNode);
@@ -925,11 +925,11 @@ mod tests {
         // A redelivered child (AlreadyExists on commit) must not advance gating.
         let t = LocalTransport::new(tmp_store("gate-redeliver"));
         let l0 = WorkDescriptor::leaf(0, 2, 4, 1);
-        assert_eq!(t.commit_and_gate(&l0, b"leaf0"), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&l0, b"leaf0", 0, 0), CommitOutcome::Committed);
         // Re-commit the SAME child (simulating redelivery): AlreadyExists, and
         // it must NOT make the parent (which still needs leaf 1) ready.
         assert_eq!(
-            t.commit_and_gate(&l0, b"leaf0-dup"),
+            t.commit_and_gate(&l0, b"leaf0-dup", 0, 0),
             CommitOutcome::AlreadyExists
         );
         assert!(

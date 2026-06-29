@@ -37,7 +37,12 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use log::{Level, LevelFilter, info, warn, error};
+use log::{Level, LevelFilter, info};
+// `warn`/`error` are only used by the pubsub-gated worker helpers
+// (`start_readiness_listener`), so import them only under that feature to keep
+// the default (cloud-free) build free of unused-import warnings.
+#[cfg(feature = "pubsub")]
+use log::{error, warn};
 use serde_json::json;
 
 use bench::transport::{
@@ -1856,14 +1861,11 @@ fn run_local_work(
     timing.print();
 }
 
-/// Drive the fungible dispatch loop over the production
-/// [`PubSubGcsTransport`](bench::transport::pubsub::PubSubGcsTransport).
+/// Prewarm the Plonky2/Rayon circuit caches before the pubsub worker loop.
 ///
-/// Compiled only with `--features pubsub`. Without the feature, the binary still
-/// accepts `--transport=pubsub` but fails fast with a clear message rather than
-/// pretending a cloud backend exists.
+/// Compiled only with `--features pubsub` because its sole caller,
+/// [`run_pubsub_work`], is itself gated behind the `pubsub` feature.
 #[cfg(feature = "pubsub")]
-#[allow(clippy::too_many_arguments)]
 fn prewarm_circuits(radix: usize, tx_per_proof: usize) {
     info!("[prewarm] Starting circuit prewarming...");
     let start = Instant::now();
@@ -1888,6 +1890,7 @@ fn prewarm_circuits(radix: usize, tx_per_proof: usize) {
     info!("[prewarm] Circuit prewarming completed in {:?}.", start.elapsed());
 }
 
+#[cfg(feature = "pubsub")]
 fn start_readiness_listener(port: u16) {
     use std::net::TcpListener;
     info!("[ready] Binding readiness TCP listener to port {}...", port);
@@ -1908,6 +1911,14 @@ fn start_readiness_listener(port: u16) {
     }
 }
 
+/// Drive the fungible dispatch loop over the production
+/// [`PubSubGcsTransport`](bench::transport::pubsub::PubSubGcsTransport).
+///
+/// Compiled only with `--features pubsub`. Without the feature, the binary still
+/// accepts `--transport=pubsub` but fails fast with a clear message rather than
+/// pretending a cloud backend exists.
+#[cfg(feature = "pubsub")]
+#[allow(clippy::too_many_arguments)]
 fn run_pubsub_work(
     plan: &WorkloadPlan,
     block_number: u64,
@@ -2357,6 +2368,8 @@ mod tests {
             &self,
             descriptor: &bench::transport::WorkDescriptor,
             bytes: &[u8],
+            _prove_time_ms: u64,
+            _total_time_ms: u64,
         ) -> CommitOutcome {
             use bench::transport::{real_children_for_node, tree_depth, Role, WorkDescriptor};
             let outcome = self.commit_output(&descriptor.output_key(), bytes);
@@ -2449,7 +2462,7 @@ mod tests {
             // Cheap sentinel "proof" bytes (NOT a real STARK) — we are testing
             // the generic loop's transport progression, not the circuits.
             let bytes = format!("sentinel:{}", d.output_key()).into_bytes();
-            let _ = transport.commit_and_gate(&d, &bytes);
+            let _ = transport.commit_and_gate(&d, &bytes, 0, 0);
             lease.ack();
             iters += 1;
             assert!(iters < 10_000, "loop must terminate");
