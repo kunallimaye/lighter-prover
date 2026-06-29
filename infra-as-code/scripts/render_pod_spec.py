@@ -297,9 +297,12 @@ spec:
   print(f"[OK] Rendered REDIS manifest to {out_path}")
 
 
-def render_coordinator(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path):
+def render_coordinator(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path, leaf_count, depth):
   arch = args.arch if args.arch else "c3d"
   mount_opts = f"only-dir={gcs_relative_path},implicit-dirs"
+  
+  # The root proof file we need to wait for
+  root_proof_file = f"/data/reports/stark_proofs/tree_L{depth}_N0.proof"
   
   coordinator_yaml = f"""apiVersion: batch/v1
 kind: Job
@@ -330,7 +333,7 @@ spec:
       containers:
       - name: coordinator
         image: {image_uri}
-        command: ["sh", "-c", "prover-node root-coordinator --block-number 1042 --radix {args.radix} --node-idx 0 --tx-per-proof {leaf_chunk} 2>&1 | tee /data/reports/coordinator.log"]
+        command: ["bash", "-c", "echo '[INFO] Waiting for root proof {root_proof_file}...'; while [ ! -f {root_proof_file} ]; do sleep 5; done; echo '[INFO] Root proof found, starting verification...'; prover-node root-coordinator --block-number 1042 --radix {args.radix} --leaf-count {leaf_count} --node-idx 0 --tx-per-proof {leaf_chunk}"]
         resources:
           limits:
             cpu: "2"
@@ -543,12 +546,17 @@ def main():
     leaf_cpu = str(leaf_cfg.get("cpu_requests", "30" if arch in ("c3d", "c4d") else "64")) if leaf_cfg else ("30" if arch in ("c3d", "c4d") else "64")
     leaf_mem = str(leaf_cfg.get("memory_requests", "60Gi" if arch in ("c3d", "c4d") else "128Gi")) if leaf_cfg else ("60Gi" if arch in ("c3d", "c4d") else "128Gi")
 
+    # We assume 500 transactions for the benchmark block (block 1042)
+    txs_per_block = 500
+    leaf_count = txs_per_block // leaf_chunk
+    depth = max(tree_depth(leaf_count, args.radix), 1)
+
     benchmark_id = args.benchmark_id if args.benchmark_id else "none"
     gcs_relative_path = f"benchmark-reports/{benchmark_id}/{image_tag}/{arch}"
 
     render_redis(args)
     render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem)
-    render_coordinator(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path)
+    render_coordinator(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path, leaf_count, depth)
     render_seeder(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path)
     return
 

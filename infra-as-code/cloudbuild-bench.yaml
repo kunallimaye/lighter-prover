@@ -110,11 +110,15 @@ steps:
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-coordinator.rendered.yaml
           
           echo "[INFO] Waiting for pipeline completion (waiting on coordinator)..."
-          kubectl wait --for=condition=complete job/lighter-coordinator --timeout=1200s
+          kubectl wait --for=condition=complete job/lighter-coordinator --timeout=1200s || WORKLOAD_FAILED=true
           
-          echo "[INFO] Extracting coordinator logs from GCS..."
-          GCS_PREFIX=$$(cat gcs_prefix.txt)
-          gsutil cp "$${GCS_PREFIX}/coordinator.log" coordinator.log
+          echo "[INFO] Extracting coordinator logs..."
+          kubectl logs job/lighter-coordinator -c coordinator > coordinator.log
+          
+          if [ "$${WORKLOAD_FAILED}" = "true" ]; then
+            echo "[ERROR] Coordinator Job failed or timed out. Check coordinator.log for details."
+            exit 1
+          fi
         fi
 
   # 7. Extract GKE Telemetry & Upload bench_summary.json
