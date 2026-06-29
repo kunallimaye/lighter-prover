@@ -44,7 +44,7 @@ def nodes_at_level(n, radix, level):
   return max((n + divisor - 1) // divisor, 1)
 
 
-def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, default_cpu, default_mem):
+def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, default_cpu, default_mem, gcs_relative_path):
   """Render the fungible-pool Deployment + KEDA ScaledObject (issue #302).
 
   This is the FUNGIBLE-AUTOSCALED path: one pod shape running
@@ -146,7 +146,7 @@ spec:
         - name: PROVER_PUBSUB_BUCKET
           value: "{gcs_bucket}"
         - name: PROVER_PUBSUB_OBJECT_PREFIX
-          value: ""
+          value: "{gcs_relative_path}/stark_proofs/"
         - name: ACK_DEADLINE
           value: "{ack_deadline}"
         - name: RADIX
@@ -177,7 +177,7 @@ spec:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
             bucketName: "{gcs_bucket}"
-            mountOptions: "implicit-dirs"
+            mountOptions: "only-dir={gcs_relative_path}/stark_proofs,implicit-dirs"
             metadataCacheTTLSeconds: "0"
             metadataStatCacheCapacity: "0"
 """
@@ -611,7 +611,7 @@ def main():
     gcs_relative_path = f"benchmark-reports/{benchmark_id}/{image_tag}/{arch}"
 
     render_redis(args)
-    render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem)
+    render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem, gcs_relative_path)
     render_active_coordinator(args, project_id, image_uri)
     render_coordinator(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path, leaf_count, depth)
     render_seeder(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path)
