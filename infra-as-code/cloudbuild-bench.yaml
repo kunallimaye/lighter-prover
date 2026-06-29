@@ -119,7 +119,9 @@ steps:
           kubectl wait --for=condition=complete job/lighter-coordinator --timeout=1200s || WORKLOAD_FAILED=true
           
           echo "[INFO] Extracting coordinator logs..."
-          kubectl logs job/lighter-coordinator -c coordinator > coordinator.log
+          kubectl logs deployment/lighter-active-coordinator -c coordinator > active_coordinator.log
+          kubectl logs job/lighter-coordinator -c coordinator > passive_coordinator.log
+          cat active_coordinator.log passive_coordinator.log > coordinator.log
           
           if [ "$${WORKLOAD_FAILED}" = "true" ]; then
             echo "[ERROR] Coordinator Job failed or timed out. Check coordinator.log for details."
