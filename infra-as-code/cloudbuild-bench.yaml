@@ -88,7 +88,7 @@ steps:
           gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
           
           echo "[INFO] Cleaning old GKE resources..."
-          kubectl delete deployment/lighter-fungible-prover deployment/lighter-redis service/redis-service job/lighter-seeder job/lighter-coordinator --ignore-not-found=true --wait=false
+          kubectl delete deployment/lighter-fungible-prover deployment/lighter-active-coordinator deployment/lighter-redis service/redis-service job/lighter-seeder job/lighter-coordinator --ignore-not-found=true --wait=false
           for i in {1..30}; do
             if ! kubectl get job/lighter-seeder job/lighter-coordinator &>/dev/null; then
               break
@@ -96,6 +96,12 @@ steps:
             echo "[INFO] Waiting for old resources to be deleted..."
             sleep 2
           done
+          
+          echo "[INFO] Deploying Redis..."
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-redis.rendered.yaml
+          
+          echo "[INFO] Deploying Active Coordinator..."
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-active-coordinator.rendered.yaml
           
           echo "[INFO] Deploying Fungible Workers..."
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-fungible.rendered.yaml
