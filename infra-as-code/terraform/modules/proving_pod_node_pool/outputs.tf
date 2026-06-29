@@ -11,12 +11,12 @@ output "aggregator_fleet_id" {
   value       = try(google_container_node_pool.proving_pool[0].id, "")
 }
 
-output "fungible_baseload_pool_id" {
-  description = "Identifier of the committed baseload fungible node pool (empty if disabled or not GKE)"
-  value       = try(google_container_node_pool.fungible_baseload_pool[0].id, "")
+output "fungible_leaf_pool_id" {
+  description = "Identifier of the GKE fungible leaf worker node pool (empty if disabled or not GKE)"
+  value       = try(google_container_node_pool.fungible_leaf_pool[0].id, "")
 }
 
-output "fungible_burst_pool_id" {
-  description = "Identifier of the Spot burst fungible node pool (empty if disabled or not GKE)"
-  value       = try(google_container_node_pool.fungible_burst_pool[0].id, "")
+output "fungible_agg_pool_id" {
+  description = "Identifier of the GKE fungible aggregator node pool (empty if disabled or not GKE)"
+  value       = try(google_container_node_pool.fungible_agg_pool[0].id, "")
 }
