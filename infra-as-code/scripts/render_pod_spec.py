@@ -44,7 +44,7 @@ def nodes_at_level(n, radix, level):
   return max((n + divisor - 1) // divisor, 1)
 
 
-def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk):
+def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, default_cpu, default_mem):
   """Render the fungible-pool Deployment + KEDA ScaledObject (issue #302).
 
   This is the FUNGIBLE-AUTOSCALED path: one pod shape running
@@ -61,10 +61,9 @@ def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chu
   burst = max(int(args.burst), 0)
   max_replicas = baseload + burst
   arch = args.arch if args.arch else "c3d"
-  # Resources sized for the heaviest fungible role (radix-16 fold ~2.2 GB peak
-  # RSS per ADR Amendment). Conservative per-arch defaults; tune as needed.
-  cpu = args.cpu if args.cpu else ("32" if arch == "c4a" else "30")
-  mem = args.memory if args.memory else ("64Gi" if arch == "c4a" else "60Gi")
+  # Use CLI override if present, else use default from config.toml
+  cpu = args.cpu if args.cpu else default_cpu
+  mem = args.memory if args.memory else default_mem
   topic = args.topic or "PLACEHOLDER_TOPIC"
   subscription = args.subscription or "PLACEHOLDER_SUBSCRIPTION"
   ack_deadline = int(args.ack_deadline)
@@ -536,12 +535,16 @@ def main():
     arch_cfg = pod_cfg.get(arch, {})
     leaf_cfg = arch_cfg.get("leaf_worker", {}) if arch_cfg else {}
     leaf_chunk = int(leaf_cfg.get("chunk_size", 1 if arch in ("c3d", "c4d") else 4)) if leaf_cfg else (1 if arch in ("c3d", "c4d") else 4)
+    
+    # Extract cpu and memory requests from config.toml
+    leaf_cpu = str(leaf_cfg.get("cpu_requests", "30" if arch in ("c3d", "c4d") else "64")) if leaf_cfg else ("30" if arch in ("c3d", "c4d") else "64")
+    leaf_mem = str(leaf_cfg.get("memory_requests", "60Gi" if arch in ("c3d", "c4d") else "128Gi")) if leaf_cfg else ("60Gi" if arch in ("c3d", "c4d") else "128Gi")
 
     benchmark_id = args.benchmark_id if args.benchmark_id else "none"
     gcs_relative_path = f"benchmark-reports/{benchmark_id}/{image_tag}/{arch}"
 
     render_redis(args)
-    render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk)
+    render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem)
     render_coordinator(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path)
     render_seeder(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path)
     return
