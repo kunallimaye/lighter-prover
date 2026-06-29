@@ -125,6 +125,8 @@ def main():
     if isinstance(vms_data, dict):
       has_vms = len([k for k in vms_data.keys() if k != 'default']) > 0
 
+    enable_fungible = bool(defaults.get('enable_fungible_pool', False)) if isinstance(defaults, dict) else False
+
     cleaned = {
         'build_project_id': project,
         'runtime_project_id': project,
@@ -146,6 +148,7 @@ def main():
         'orchestration_engine': engine,
         'silicon_arch': arch,
         'enable_static_vms': has_vms,
+        'enable_fungible_pool': enable_fungible,
         'fungible_leaf_machine_type': fungible_leaf_machine,
         'fungible_leaf_node_count': fungible_leaf_nodes,
         'fungible_agg_machine_type': fungible_agg_machine,
