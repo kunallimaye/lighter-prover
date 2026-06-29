@@ -66,6 +66,7 @@ def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chu
   mem = args.memory if args.memory else default_mem
   topic = args.topic or "PLACEHOLDER_TOPIC"
   subscription = args.subscription or "PLACEHOLDER_SUBSCRIPTION"
+  event_topic = args.event_topic or "PLACEHOLDER_EVENT_TOPIC"
   ack_deadline = int(args.ack_deadline)
   # terminationGracePeriod >= max prove time on target instance; sized for the
   # live 500-tx run's ≈80s radix-16 folds on c3d-highcpu-16 with comfortable
@@ -140,6 +141,8 @@ spec:
           value: "{topic}"
         - name: PROVER_PUBSUB_SUBSCRIPTION
           value: "{subscription}"
+        - name: PROVER_PUBSUB_EVENT_TOPIC
+          value: "{event_topic}"
         - name: PROVER_PUBSUB_BUCKET
           value: "{gcs_bucket}"
         - name: PROVER_PUBSUB_OBJECT_PREFIX
