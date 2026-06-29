@@ -26,7 +26,7 @@ ARCH ?= c3d
 RADIX ?= 16
 IMAGE := $(if $(IMAGE),$(IMAGE),default)
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
-	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)"
+	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)" "$(IMAGE)" "$(BENCHMARK_ID)"
 
 cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving experiment (accepts ENGINE=gke/mig ARCH=c4a/c3d/t2d BLOCKS=2 CHUNK=1 RADIX=2)
 	@bash infra-as-code/scripts/cloud.sh cloud-run-distributed-cluster --engine=$(ENGINE) --arch=$(ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK) --radix=$(RADIX)

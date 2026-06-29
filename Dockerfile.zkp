@@ -17,7 +17,13 @@ COPY circuit/ circuit/
 COPY bench/ bench/
 
 ARG RUSTFLAGS
-RUN RUSTFLAGS=${RUSTFLAGS} cargo build --release --target x86_64-unknown-linux-gnu --bin bench --bin prover-node
+ARG CARGO_FEATURES=""
+RUN if [ -n "${CARGO_FEATURES}" ]; then \
+      RUSTFLAGS=${RUSTFLAGS} cargo build --release --target x86_64-unknown-linux-gnu --bin bench --bin prover-node --bin lighter-coordinator --features "${CARGO_FEATURES}"; \
+    else \
+      RUSTFLAGS=${RUSTFLAGS} cargo build --release --target x86_64-unknown-linux-gnu --bin bench --bin prover-node; \
+      touch /app/target/x86_64-unknown-linux-gnu/release/lighter-coordinator; \
+    fi
 
 # ─── Stage 2: Minimal High-Throughput Compute Runtime ────────────────
 FROM debian:bookworm-slim AS runtime
@@ -32,6 +38,7 @@ WORKDIR /data
 # Copy compiled bench harness, distributed prover daemon and default test fixture
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/bench /usr/local/bin/bench
 COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/prover-node /usr/local/bin/prover-node
+COPY --from=builder /app/target/x86_64-unknown-linux-gnu/release/lighter-coordinator /usr/local/bin/lighter-coordinator
 COPY bench/bench_test.json /data/bench_test.json
 
 ENV RUST_LOG=info

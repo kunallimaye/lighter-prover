@@ -181,7 +181,7 @@ spec:
         # (ifGenerationMatch=0) inside PubSubGcsTransport, because gcsfuse O_EXCL
         # atomicity is REFUTED (ADR §6 / open item (c)). Bytes-via-mount is fine.
         - name: gcs-volume
-          mountPath: /data/reports
+          mountPath: /data/reports/stark_proofs
       volumes:
       - name: gcs-volume
         csi:

@@ -18,6 +18,11 @@ path = "src/bin/bench.rs"
 name = "prover-node"
 path = "src/bin/prover_node.rs"
 
+[[bin]]
+name = "lighter-coordinator"
+path = "src/bin/coordinator.rs"
+required-features = ["pubsub"]
+
 [features]
 default = ["parallel", "std"]
 parallel = ["plonky2/parallel"]
@@ -28,7 +33,7 @@ std = ["plonky2/std"]
 # dependencies compiled in. Enable with `cargo build --features pubsub` to wire
 # the production `PubSubGcsTransport`. TLS is rustls (no OpenSSL/pkg-config
 # system dependency). See `bench/src/transport/pubsub.rs`.
-pubsub = ["dep:google-cloud-storage", "dep:google-cloud-pubsub", "dep:google-cloud-googleapis", "dep:tokio"]
+pubsub = ["dep:google-cloud-storage", "dep:google-cloud-pubsub", "dep:google-cloud-googleapis", "dep:tokio", "dep:redis", "dep:futures-util"]
 
 [dependencies]
 num = { workspace = true }
@@ -69,6 +74,8 @@ google-cloud-storage = { version = "0.24", default-features = false, features = 
 google-cloud-pubsub = { version = "0.30", default-features = false, features = ["rustls-tls", "auth"], optional = true }
 google-cloud-googleapis = { version = "0.16", optional = true }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "sync", "time"], optional = true }
+redis = { version = "0.24", default-features = false, features = ["tokio-comp"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"], optional = true }
 
 [dev-dependencies]
 flate2 = "1.0"

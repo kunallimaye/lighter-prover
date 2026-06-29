@@ -99,7 +99,7 @@ resource "google_container_node_pool" "fungible_baseload_pool" {
   }
 
   node_config {
-    preemptible  = false # COMMITTED — the always-on baseload must not be Spot.
+    preemptible  = true # Modified to TRUE for the Phase 1 Spot VM smoke test
     machine_type = var.fungible_machine_type
     disk_type    = var.fungible_disk_type
     disk_size_gb = var.fungible_disk_size_gb

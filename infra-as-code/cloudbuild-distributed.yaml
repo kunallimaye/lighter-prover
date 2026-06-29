@@ -82,7 +82,7 @@ steps:
       - '-c'
       - |
         echo "[INFO] Executing Terraform action: ${_TF_ACTION} (engine=${_ENGINE}, arch=${_ARCH})..."
-        terraform "${_TF_ACTION}" -auto-approve -no-color -input=false
+        terraform "${_TF_ACTION}" -auto-approve -no-color -input=false -var="enable_static_vms=false" -var="orchestration_engine=${TF_VAR_orchestration_engine}" -var="silicon_arch=${TF_VAR_silicon_arch}"
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_enable_shared_resources=false'
@@ -284,7 +284,7 @@ steps:
       - '-c'
       - |
         # Tear down the fleet (GKE cluster or GCE MIGs) for zero-billing.
-        terraform destroy -auto-approve -no-color -input=false
+        terraform destroy -auto-approve -no-color -input=false -var="enable_static_vms=false" -var="orchestration_engine=${TF_VAR_orchestration_engine}" -var="silicon_arch=${TF_VAR_silicon_arch}"
     env:
       - 'TF_IN_AUTOMATION=true'
       - 'TF_VAR_enable_shared_resources=false'

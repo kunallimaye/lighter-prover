@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use log::{Level, LevelFilter, info};
+use log::{Level, LevelFilter, info, warn, error};
 use serde_json::json;
 
 use bench::transport::{
@@ -252,6 +252,14 @@ pub enum Role {
         /// bucket without colliding (e.g. `runs/block_1042/`).
         #[arg(long, default_value = "")]
         object_prefix: String,
+        /// (pubsub) Pub/Sub topic id to emit completion events to. Falls back
+        /// to env `PROVER_PUBSUB_EVENT_TOPIC` when the flag is empty.
+        #[arg(long, default_value = "")]
+        event_topic: String,
+        /// (GKE) Port to bind the TCP readiness probe to after prewarming.
+        /// If absent, prewarming is skipped.
+        #[arg(long)]
+        prewarm_port: Option<u16>,
     },
 }
 
@@ -1337,6 +1345,7 @@ fn run_dispatch_loop<T: WorkTransport>(
             }
         };
         let prove_total_latency_ms = prove_start.elapsed().as_millis();
+        let total_time_ms = iter_start.elapsed().as_millis() as u64;
 
         // ── [instrumentation] COMMIT_latency_ms + outcome ────────────────────
         // Atomic idempotent commit + readiness gating (publishes the parent fold
@@ -1344,7 +1353,7 @@ fn run_dispatch_loop<T: WorkTransport>(
         // CAS result: exactly one pod observes `Committed` per descriptor — the
         // `worker={id}` field makes that single winner attributable across pods.
         let commit_start = Instant::now();
-        let outcome = transport.commit_and_gate(&d, &bytes);
+        let outcome = transport.commit_and_gate(&d, &bytes, prove_total_latency_ms as u64, total_time_ms);
         let commit_latency_ms = commit_start.elapsed().as_millis();
         let outcome_str = match outcome {
             CommitOutcome::Committed => "Committed",
@@ -1599,6 +1608,8 @@ fn main() {
             bucket,
             ack_deadline,
             object_prefix,
+            event_topic,
+            prewarm_port,
         } => {
             // ── 3-knob workload: derive + FAIL-FAST validate BEFORE any seed/pod
             //    action (on the seeder/laptop, never in the pod). ──────────────
@@ -1640,6 +1651,8 @@ fn main() {
                         bucket,
                         ack_deadline,
                         object_prefix,
+                        event_topic,
+                        prewarm_port,
                     );
                 }
             }
@@ -1851,6 +1864,50 @@ fn run_local_work(
 /// pretending a cloud backend exists.
 #[cfg(feature = "pubsub")]
 #[allow(clippy::too_many_arguments)]
+fn prewarm_circuits(radix: usize, tx_per_proof: usize) {
+    info!("[prewarm] Starting circuit prewarming...");
+    let start = Instant::now();
+
+    info!("[prewarm] Compiling BlockPreExecutionCircuit...");
+    let pre_exec_circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+    let _ = pre_exec_circuit.builder.build::<C>();
+
+    info!("[prewarm] Compiling BlockTxCircuit (tx_per_proof={})...", tx_per_proof);
+    let tx_circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, tx_per_proof, CHAIN_ID);
+    let _ = tx_circuit.builder.build::<C>();
+
+    if radix == 2 {
+        info!("[prewarm] Compiling BinaryTreeChainCircuit...");
+        let (child_data, _) = build_batch_leaf_data();
+        let _ = BinaryTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data).builder.build::<C>();
+    } else {
+        info!("[prewarm] Compiling HexadecimalTreeChainCircuit...");
+        let _ = build_node_circuit_for_level(2);
+    }
+
+    info!("[prewarm] Circuit prewarming completed in {:?}.", start.elapsed());
+}
+
+fn start_readiness_listener(port: u16) {
+    use std::net::TcpListener;
+    info!("[ready] Binding readiness TCP listener to port {}...", port);
+    match TcpListener::bind(format!("0.0.0.0:{}", port)) {
+        Ok(listener) => {
+            info!("[ready] Readiness listener active. Pod is now READY.");
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if let Err(e) = stream {
+                        warn!("[ready] Failed to accept readiness connection: {e}");
+                    }
+                }
+            });
+        }
+        Err(e) => {
+            error!("[ready] Failed to bind readiness listener: {e}");
+        }
+    }
+}
+
 fn run_pubsub_work(
     plan: &WorkloadPlan,
     block_number: u64,
@@ -1861,6 +1918,8 @@ fn run_pubsub_work(
     bucket: String,
     ack_deadline: i32,
     object_prefix: String,
+    event_topic: String,
+    prewarm_port: Option<u16>,
 ) {
     use bench::transport::pubsub::{PubSubGcsConfig, PubSubGcsTransport};
     use bench::transport::tree_depth as t_depth;
@@ -1883,6 +1942,7 @@ fn run_pubsub_work(
     let project = project.or_else(|| std::env::var("PROVER_PUBSUB_PROJECT").ok());
     let topic = env_or(topic, "PROVER_PUBSUB_TOPIC");
     let subscription = env_or(subscription, "PROVER_PUBSUB_SUBSCRIPTION");
+    let event_topic = env_or(event_topic, "PROVER_PUBSUB_EVENT_TOPIC");
     let bucket = env_or(bucket, "PROVER_PUBSUB_BUCKET");
     let object_prefix = env_or(object_prefix, "PROVER_PUBSUB_OBJECT_PREFIX");
     let ack_deadline = std::env::var("PROVER_PUBSUB_ACK_DEADLINE")
@@ -1902,6 +1962,7 @@ fn run_pubsub_work(
         project_id: project,
         topic,
         subscription,
+        event_topic,
         bucket,
         ack_deadline_secs: ack_deadline,
         object_prefix,
@@ -2079,6 +2140,12 @@ fn run_pubsub_work(
     // nack-on-failure, ifGenerationMatch=0 commit + gating markers) is
     // verified-by-construction here and was pilot-verified ephemerally; the full
     // live run is the separate GKE smoke test, not executed in this slice.
+    // ── Worker prewarming (warming up Plonky2/Rayon) ──────────────────────────
+    if let Some(port) = prewarm_port {
+        prewarm_circuits(radix, tx_per_proof);
+        start_readiness_listener(port);
+    }
+
     let Some(root_proof) =
         run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut TimingTree::new("prover_node::pubsub_dispatch", Level::Info))
     else {
@@ -2148,6 +2215,8 @@ fn run_pubsub_work(
     _bucket: String,
     _ack_deadline: i32,
     _object_prefix: String,
+    _event_topic: String,
+    _prewarm_port: Option<u16>,
 ) {
     eprintln!(
         "--transport=pubsub requires building with the `pubsub` cargo feature \

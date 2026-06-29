@@ -66,8 +66,8 @@ use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, Up
 use google_cloud_storage::http::Error as GcsHttpError;
 use tokio::runtime::Runtime;
 
-use super::gating::{CasError, CasStore, GatingEngine, Publisher};
-use super::{CommitOutcome, WorkDescriptor, WorkLease, WorkTransport};
+use super::gating::{CasError, CasStore, Publisher};
+use super::{CommitOutcome, WorkDescriptor, WorkLease, WorkTransport, ProverEvent};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Configuration
@@ -84,6 +84,8 @@ pub struct PubSubGcsConfig {
     pub topic: String,
     /// Pub/Sub subscription id the worker pulls descriptors from.
     pub subscription: String,
+    /// Pub/Sub topic id the worker emits completion events to.
+    pub event_topic: String,
     /// GCS bucket holding committed proof outputs and the CAS gating markers.
     pub bucket: String,
     /// Ack deadline (seconds) requested on each `modifyAckDeadline` heartbeat
@@ -126,6 +128,9 @@ impl PubSubGcsConfig {
         if self.subscription.trim().is_empty() {
             return Err("pubsub: --subscription must be set".into());
         }
+        if self.event_topic.trim().is_empty() {
+            return Err("pubsub: --event-topic must be set".into());
+        }
         if self.bucket.trim().is_empty() {
             return Err("pubsub: --bucket must be set".into());
         }
@@ -157,6 +162,7 @@ impl Default for PubSubGcsConfig {
             project_id: None,
             topic: String::new(),
             subscription: String::new(),
+            event_topic: String::new(),
             bucket: String::new(),
             ack_deadline_secs: Self::default_ack_deadline_secs(),
             object_prefix: String::new(),
@@ -332,6 +338,34 @@ impl Publisher for PubSubPublisher {
     }
 }
 
+impl PubSubPublisher {
+    pub fn new(rt: Arc<Runtime>, topic: Topic) -> Self {
+        Self {
+            rt,
+            topic: Arc::new(topic),
+        }
+    }
+
+    pub fn publish_event(&self, event: &ProverEvent) -> Result<(), CasError> {
+        let data = serde_json::to_vec(event)
+            .map_err(|e| CasError(format!("event serialize: {e}")))?;
+        let topic = self.topic.clone();
+        self.rt.block_on(async move {
+            let publisher = topic.new_publisher(None);
+            let msg = PubsubMessage {
+                data,
+                ..Default::default()
+            };
+            let awaiter = publisher.publish(msg).await;
+            awaiter
+                .get()
+                .await
+                .map_err(|e| CasError(format!("pubsub publish event: {e}")))
+        })?;
+        Ok(())
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // PubSubGcsTransport
 // ─────────────────────────────────────────────────────────────────────────
@@ -347,6 +381,7 @@ pub struct PubSubGcsTransport {
     gcs: GcsCasStore,
     subscription: Arc<Subscription>,
     publisher: PubSubPublisher,
+    event_publisher: PubSubPublisher,
 }
 
 impl PubSubGcsTransport {
@@ -388,6 +423,7 @@ impl PubSubGcsTransport {
 
         let topic = ps_client.topic(&config.topic);
         let subscription = ps_client.subscription(&config.subscription);
+        let event_topic = ps_client.topic(&config.event_topic);
 
         let gcs = GcsCasStore {
             rt: rt.clone(),
@@ -399,6 +435,10 @@ impl PubSubGcsTransport {
             rt: rt.clone(),
             topic: Arc::new(topic),
         };
+        let event_publisher = PubSubPublisher {
+            rt: rt.clone(),
+            topic: Arc::new(event_topic),
+        };
 
         Ok(Self {
             rt,
@@ -406,6 +446,7 @@ impl PubSubGcsTransport {
             gcs,
             subscription: Arc::new(subscription),
             publisher,
+            event_publisher,
         })
     }
 
@@ -460,35 +501,66 @@ impl WorkTransport for PubSubGcsTransport {
     type Lease = PubSubLease;
 
     fn pull_one(&self) -> Option<Self::Lease> {
-        // Flow control = 1 outstanding message: pull at most one.
-        // TODO(confirm-on-live-run): real Pub/Sub pull/redelivery. Pilot-verified
-        // ephemerally; not re-run live here.
+        log::info!("DEBUG: PubSubGcsTransport::pull_one entered");
         let sub = self.subscription.clone();
-        let messages = self
-            .rt
-            .block_on(async move { sub.pull(1, None).await })
-            .ok()?;
-        let message = messages.into_iter().next()?;
-        let descriptor: WorkDescriptor = match serde_json::from_slice(&message.message.data) {
-            Ok(d) => d,
-            Err(_) => {
-                // Malformed payload: nack so it is redelivered / dead-lettered,
-                // and report empty so the loop tries again.
-                let _ = self.rt.block_on(async { message.nack().await });
+        loop {
+            if crate::shutdown::is_shutdown_requested() {
+                log::info!("DEBUG: pull_one: shutdown requested, returning None");
                 return None;
             }
-        };
-        Some(PubSubLease {
-            transport: self.clone(),
-            descriptor,
-            message,
-        })
+            log::info!("DEBUG: pull_one: calling sub.pull");
+            // Pull with a timeout so we don't block indefinitely and can check for shutdown.
+            let pull_result = self.rt.block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    sub.pull(1, None)
+                ).await
+            });
+
+            match &pull_result {
+                Ok(Ok(msgs)) => log::info!("DEBUG: pull_one: pull ok, got {} messages", msgs.len()),
+                Ok(Err(status)) => log::info!("DEBUG: pull_one: pull err: {:?}", status),
+                Err(_) => log::info!("DEBUG: pull_one: pull timeout"),
+            }
+
+            match pull_result {
+                Ok(Ok(messages)) => {
+                    if let Some(message) = messages.into_iter().next() {
+                        log::info!("DEBUG: pull_one: processing message");
+                        let descriptor: WorkDescriptor = match serde_json::from_slice(&message.message.data) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                log::error!("DEBUG: pull_one: malformed message: {:?}", e);
+                                // Malformed payload: nack so it is redelivered / dead-lettered,
+                                // and continue the loop to try pulling another message.
+                                let _ = self.rt.block_on(async { message.nack().await });
+                                continue;
+                            }
+                        };
+                        log::info!("DEBUG: pull_one: returning Some(lease) for {:?}", descriptor.output_key());
+                        return Some(PubSubLease {
+                            transport: self.clone(),
+                            descriptor,
+                            message,
+                        });
+                    }
+                    log::info!("DEBUG: pull_one: queue empty, sleeping 500ms");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                _ => {
+                    log::info!("DEBUG: pull_one: timeout or error, sleeping 500ms");
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        }
     }
 
     fn publish(&self, descriptor: WorkDescriptor) {
         // Direct publish (e.g. seeding leaves). Gating-driven folds go through
         // the same `PubSubPublisher`.
-        let _ = self.publisher.publish(descriptor);
+        if let Err(e) = self.publisher.publish(descriptor) {
+            log::error!("PubSubGcsTransport::publish failed: {:?}", e);
+        }
     }
 
     fn commit_output(&self, key: &str, bytes: &[u8]) -> CommitOutcome {
@@ -513,14 +585,29 @@ impl WorkTransport for PubSubGcsTransport {
     /// `commit_and_gate`, driving the shared [`GatingEngine`] over the GCS CAS
     /// store + Pub/Sub publisher. Implemented as the [`WorkTransport`] trait
     /// method so the generic dispatch loop drives it.
-    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome {
+    fn commit_and_gate(
+        &self,
+        descriptor: &WorkDescriptor,
+        bytes: &[u8],
+        prove_time_ms: u64,
+        total_time_ms: u64,
+    ) -> CommitOutcome {
+        let gcs_start = std::time::Instant::now();
         let outcome = self.commit_output(&descriptor.output_key(), bytes);
-        let engine = GatingEngine::new(&self.gcs, &self.publisher);
-        // A gate error here is a genuine transport failure; surface it loudly so
-        // the dispatch loop nacks rather than silently dropping a fold.
-        engine
-            .on_child_committed(descriptor, outcome)
-            .unwrap_or_else(|e| panic!("readiness gating failed for {}: {e}", descriptor.output_key()));
+        let gcs_time_ms = gcs_start.elapsed().as_millis() as u64;
+
+        if outcome == CommitOutcome::Committed {
+            let event = ProverEvent {
+                descriptor: descriptor.clone(),
+                status: "success".to_string(),
+                prove_time_ms,
+                gcs_time_ms,
+                total_time_ms,
+            };
+            self.event_publisher
+                .publish_event(&event)
+                .unwrap_or_else(|e| panic!("failed to publish completion event for {}: {e}", descriptor.output_key()));
+        }
         outcome
     }
 }

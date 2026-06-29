@@ -68,7 +68,9 @@ roles = [
   "roles/artifactregistry.reader",
   "roles/logging.logWriter",
   "roles/monitoring.metricWriter",
-  "roles/storage.objectAdmin"
+  "roles/storage.objectAdmin",
+  "roles/pubsub.subscriber",
+  "roles/pubsub.publisher"
 ]
 
 # ─── Virtual Machines List & Default Inheritance ───────────────────────

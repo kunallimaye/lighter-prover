@@ -29,7 +29,19 @@ steps:
       - |
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Rendering dynamic K8s deployment manifests reading config.toml..."
-          python3 infra-as-code/scripts/render_pod_spec.py --arch="${_ARCH}" --blocks="${_BLOCK_CONCURRENCY}" --image="${_IMAGE}" --radix="${_RADIX}" --benchmark-id="${_BENCHMARK_ID}"
+          python3 infra-as-code/scripts/render_pod_spec.py \
+            --arch="${_ARCH}" \
+            --blocks="${_BLOCK_CONCURRENCY}" \
+            --image="${_IMAGE}" \
+            --radix="${_RADIX}" \
+            --benchmark-id="${_BENCHMARK_ID}" \
+            --emit-fungible \
+            --baseload=10 \
+            --burst=0 \
+            --topic="${_WORK_TOPIC}" \
+            --subscription="${_WORK_SUBSCRIPTION}" \
+            --event-topic="${_EVENT_TOPIC}" \
+            --event-subscription="${_EVENT_SUBSCRIPTION}"
         fi
 
   # 2. Clean GCS bucket before run to avoid stale proofs
@@ -49,7 +61,22 @@ steps:
           fi
         fi
 
-  # 3. Deploy GKE Proving Pipeline (Concurrent)
+  # 2.5 Clean Pub/Sub subscriptions to avoid stale tasks/events
+  - id: clean-pubsub
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        if [ "${_ENGINE}" = "gke" ]; then
+          echo "[INFO] Purging Pub/Sub subscriptions..."
+          # Seek to 10 seconds in the future to discard all unacked messages
+          FUTURE_TIME=$(date -u -d "+10 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+10s +%Y-%m-%dT%H:%M:%SZ)
+          gcloud pubsub subscriptions seek "${_WORK_SUBSCRIPTION}" --time="$${FUTURE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          gcloud pubsub subscriptions seek "${_EVENT_SUBSCRIPTION}" --time="$${FUTURE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+        fi
+
+  # 3. Deploy GKE Proving Pipeline (Fungible Pool)
   - id: deploy-pipeline
     name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
@@ -60,21 +87,24 @@ steps:
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
           gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
           
-          echo "[INFO] Cleaning old Jobs..."
-          kubectl delete job/lighter-leaf-worker job/lighter-tree-aggregator job/lighter-coordinator --ignore-not-found=true --wait=false
+          echo "[INFO] Cleaning old GKE resources..."
+          kubectl delete deployment/lighter-fungible-prover deployment/lighter-redis service/redis-service job/lighter-seeder job/lighter-coordinator --ignore-not-found=true --wait=false
           for i in {1..30}; do
-            if ! kubectl get job/lighter-leaf-worker job/lighter-tree-aggregator job/lighter-coordinator &>/dev/null; then
+            if ! kubectl get job/lighter-seeder job/lighter-coordinator &>/dev/null; then
               break
             fi
-            echo "[INFO] Waiting for old jobs to be deleted..."
+            echo "[INFO] Waiting for old resources to be deleted..."
             sleep 2
           done
           
-          echo "[INFO] Deploying Leaf Workers..."
-          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-leaf.rendered.yaml
+          echo "[INFO] Deploying Fungible Workers..."
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-fungible.rendered.yaml
           
-          echo "[INFO] Deploying Tree Aggregator..."
-          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-tree.rendered.yaml
+          echo "[INFO] Waiting for all provers to be ready and prewarmed..."
+          kubectl rollout status deployment/lighter-fungible-prover --timeout=400s
+          
+          echo "[INFO] Deploying Seeder (Bootstrapping Queue)..."
+          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-seeder.rendered.yaml
           
           echo "[INFO] Deploying Coordinator..."
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-coordinator.rendered.yaml
@@ -119,6 +149,10 @@ substitutions:
   _ORCH_PROJECT_ID: ''
   _BUILDER_SA_EMAIL: ''
   _RUNTIME_SA_EMAIL: ''
+  _WORK_TOPIC: 'prover-work-topic'
+  _WORK_SUBSCRIPTION: 'prover-work-sub'
+  _EVENT_TOPIC: 'prover-events-topic'
+  _EVENT_SUBSCRIPTION: 'prover-events-sub'
 
 options:
   logging: CLOUD_LOGGING_ONLY

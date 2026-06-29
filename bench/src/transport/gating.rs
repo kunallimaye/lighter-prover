@@ -604,3 +604,159 @@ mod tests {
         assert_eq!(pubr.distinct_keys().len(), 3);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Redis CAS Store Implementation (GCP Memorystore)
+// ─────────────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "pubsub")]
+pub struct RedisCasStore {
+    client: redis::Client,
+    ttl_secs: usize,
+}
+
+#[cfg(feature = "pubsub")]
+impl RedisCasStore {
+    /// Connect to Redis using the provided connection string (e.g., "redis://127.0.0.1:6379").
+    pub fn new(connection_info: &str, ttl_secs: usize) -> Result<Self, CasError> {
+        let client = redis::Client::open(connection_info)
+            .map_err(|e| CasError(format!("redis open: {e}")))?;
+        Ok(Self { client, ttl_secs })
+    }
+
+    fn get_connection(&self) -> Result<redis::Connection, CasError> {
+        self.client
+            .get_connection()
+            .map_err(|e| CasError(format!("redis connect: {e}")))
+    }
+}
+
+#[cfg(feature = "pubsub")]
+impl CasStore for RedisCasStore {
+    fn cas_create(&self, key: &str, bytes: &[u8]) -> Result<CommitOutcome, CasError> {
+        use redis::Commands as _;
+        let mut conn = self.get_connection()?;
+
+        if key.starts_with("gate/") {
+            // key format: gate/L{level}/N{node_idx}/child_{child_idx}
+            // We map to SADD gate:L{level}:N{node_idx} {child_idx}
+            let parts: Vec<&str> = key.split('/').collect();
+            if parts.len() == 4 && parts[3].starts_with("child_") {
+                let level_str = parts[1];
+                let node_str = parts[2];
+                let child_idx_str = &parts[3]["child_".len()..];
+                
+                let redis_key = format!("gate:{}:{}", level_str, node_str);
+                let added: i32 = conn.sadd(&redis_key, child_idx_str)
+                    .map_err(|e| CasError(format!("redis sadd: {e}")))?;
+                
+                let _: () = conn.expire(&redis_key, self.ttl_secs as i64)
+                    .map_err(|e| CasError(format!("redis expire: {e}")))?;
+
+                if added == 1 {
+                    Ok(CommitOutcome::Committed)
+                } else {
+                    Ok(CommitOutcome::AlreadyExists)
+                }
+            } else {
+                Err(CasError(format!("invalid gate key format: {key}")))
+            }
+        } else if key.starts_with("published/") {
+            // key format: published/L{level}/N{node_idx}
+            // We map to SETNX published:L{level}:N{node_idx} 1
+            let parts: Vec<&str> = key.split('/').collect();
+            if parts.len() == 3 {
+                let level_str = parts[1];
+                let node_str = parts[2];
+                let redis_key = format!("published:{}:{}", level_str, node_str);
+                
+                let set: bool = conn.set_nx(&redis_key, "1")
+                    .map_err(|e| CasError(format!("redis set_nx: {e}")))?;
+                
+                if set {
+                    let _: () = conn.expire(&redis_key, self.ttl_secs as i64)
+                        .map_err(|e| CasError(format!("redis expire: {e}")))?;
+                    Ok(CommitOutcome::Committed)
+                } else {
+                    Ok(CommitOutcome::AlreadyExists)
+                }
+            } else {
+                Err(CasError(format!("invalid published key format: {key}")))
+            }
+        } else {
+            let set: bool = conn.set_nx(key, bytes)
+                .map_err(|e| CasError(format!("redis set_nx fallback: {e}")))?;
+            if set {
+                let _: () = conn.expire(key, self.ttl_secs as i64)
+                    .map_err(|e| CasError(format!("redis expire fallback: {e}")))?;
+                Ok(CommitOutcome::Committed)
+            } else {
+                Ok(CommitOutcome::AlreadyExists)
+            }
+        }
+    }
+
+    fn exists(&self, key: &str) -> Result<bool, CasError> {
+        use redis::Commands as _;
+        let mut conn = self.get_connection()?;
+        
+        if key.starts_with("gate/") {
+             let parts: Vec<&str> = key.split('/').collect();
+             if parts.len() == 4 && parts[3].starts_with("child_") {
+                 let level_str = parts[1];
+                 let node_str = parts[2];
+                 let child_idx_str = &parts[3]["child_".len()..];
+                 let redis_key = format!("gate:{}:{}", level_str, node_str);
+                 let exists: bool = conn.sismember(&redis_key, child_idx_str)
+                     .map_err(|e| CasError(format!("redis sismember: {e}")))?;
+                 Ok(exists)
+             } else {
+                 Err(CasError(format!("invalid gate key format for exists: {key}")))
+             }
+        } else if key.starts_with("published/") {
+             let parts: Vec<&str> = key.split('/').collect();
+             if parts.len() == 3 {
+                 let level_str = parts[1];
+                 let node_str = parts[2];
+                 let redis_key = format!("published:{}:{}", level_str, node_str);
+                 let exists: bool = conn.exists(&redis_key)
+                     .map_err(|e| CasError(format!("redis exists: {e}")))?;
+                 Ok(exists)
+             } else {
+                 Err(CasError(format!("invalid published key format for exists: {key}")))
+             }
+        } else {
+             let exists: bool = conn.exists(key)
+                 .map_err(|e| CasError(format!("redis exists fallback: {e}")))?;
+             Ok(exists)
+        }
+    }
+
+    fn read(&self, _key: &str) -> Result<Option<Vec<u8>>, CasError> {
+        Err(CasError("RedisCasStore::read not implemented".to_string()))
+    }
+
+    fn count_prefix(&self, prefix: &str) -> Result<usize, CasError> {
+        use redis::Commands as _;
+        let mut conn = self.get_connection()?;
+
+        if prefix.starts_with("gate/") {
+            // prefix format: gate/L{level}/N{node_idx}/child_
+            // We map to SCARD gate:L{level}:N{node_idx}
+            let parts: Vec<&str> = prefix.split('/').collect();
+            if parts.len() == 4 && parts[3] == "child_" {
+                let level_str = parts[1];
+                let node_str = parts[2];
+                let redis_key = format!("gate:{}:{}", level_str, node_str);
+                let count: usize = conn.scard(&redis_key)
+                    .map_err(|e| CasError(format!("redis scard: {e}")))?;
+                Ok(count)
+            } else {
+                Err(CasError(format!("invalid gate prefix format: {prefix}")))
+            }
+        } else {
+            Err(CasError(format!("RedisCasStore::count_prefix only supports gate/ prefixes, got: {prefix}")))
+        }
+    }
+}
+

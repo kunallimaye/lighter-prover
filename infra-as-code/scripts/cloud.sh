@@ -492,6 +492,11 @@ cloud_bench_run() {
     sleep 3
   done
 
+  local extra_args=""
+  if [[ "${image_uri}" != *"v0.0.1"* ]]; then
+    extra_args="--tx-per-proof ${tx_per_proof}"
+  fi
+
   gcloud compute ssh "${target_vm}" --zone="${zone}" --project="${build_project}" --command="
     nohup bash -c '
       set -euo pipefail
@@ -506,7 +511,7 @@ cloud_bench_run() {
           --pids-limit=-1 \
           --ulimit nofile=1048576:1048576 \
           -v /tmp/reports:/data/reports:rw \
-          ${image_uri} --tx-per-proof ${tx_per_proof}
+          ${image_uri} ${extra_args}
       else
         threads_per_job=\$(( \$(nproc) / ${jobs} ))
         pids=()
@@ -517,7 +522,7 @@ cloud_bench_run() {
             --ulimit nofile=1048576:1048576 \
             -e RAYON_NUM_THREADS=\${threads_per_job} \
             -v /tmp/reports/job_\${j}:/data/reports:rw \
-            ${image_uri} &
+            ${image_uri} ${extra_args} &
           pids+=(\$!)
         done
         for pid in \"\${pids[@]}\"; do
@@ -990,7 +995,7 @@ case "${1:-}" in
   cloud-admin-init)              cloud_admin_init ;;
   cloud-admin-undo)              cloud_admin_undo ;;
   cloud-bench-run)               shift; cloud_bench_run "${1:-all}" "${2:-1}" "${3:-4}" "${4:-default}" "${5:-}" ;;
-  cloud-run-distributed-cluster) cloud_run_distributed_cluster ;;
+  cloud-run-distributed-cluster) shift; cloud_run_distributed_cluster "$@" ;;
   cloud-gke-provision)           shift; cloud_gke_provision "$@" ;;
   cloud-gke-bench)               shift; cloud_gke_bench "$@" ;;
   cloud-gke-destroy)             shift; cloud_gke_destroy "$@" ;;

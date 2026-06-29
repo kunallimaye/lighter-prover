@@ -21,7 +21,7 @@ module "proving_pod_fleet" {
   silicon_arch         = var.silicon_arch
 
   image             = var.silicon_arch == "c4a" ? "debian-cloud/debian-12-arm64" : "debian-cloud/debian-12"
-  leaf_machine_type = var.silicon_arch == "c4a" ? "c4a-highcpu-16" : (var.silicon_arch == "c3d" ? "c3d-highcpu-16" : (var.silicon_arch == "c4d" ? "c4d-highcpu-16" : "t2d-standard-16"))
+  leaf_machine_type = var.silicon_arch == "c4a" ? "c4a-highcpu-16" : (var.silicon_arch == "c3d" ? "c3d-highcpu-30" : (var.silicon_arch == "c4d" ? "c4d-highcpu-16" : "t2d-standard-16"))
   leaf_disk_type    = var.silicon_arch == "t2d" ? "pd-balanced" : "hyperdisk-balanced"
   leaf_disk_size_gb = 100
   leaf_node_count   = 6

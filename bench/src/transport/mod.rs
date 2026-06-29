@@ -181,6 +181,17 @@ impl WorkDescriptor {
     }
 }
 
+/// Event published by workers upon successful completion of a task.
+/// Listened to by the external coordinator to drive the gating logic.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ProverEvent {
+    pub descriptor: WorkDescriptor,
+    pub status: String, // "success" or "failed"
+    pub prove_time_ms: u64,
+    pub gcs_time_ms: u64,
+    pub total_time_ms: u64,
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Commit outcome
 // ─────────────────────────────────────────────────────────────────────────
@@ -266,7 +277,7 @@ pub trait WorkTransport: Send + Sync {
     /// markers for [`LocalTransport`], GCS-native `ifGenerationMatch=0` CAS
     /// markers for the production backend) so the "publish each fold exactly
     /// once" invariant holds across pods.
-    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome;
+    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8], prove_time_ms: u64, total_time_ms: u64) -> CommitOutcome;
 }
 
 /// A leased message. Holds the [`WorkDescriptor`] and the consumption verbs.
@@ -574,7 +585,7 @@ impl WorkTransport for LocalTransport {
     /// This is the primitive the dispatch loop uses so that completing the last
     /// child of a node automatically enqueues that node's fold. Implemented as
     /// the [`WorkTransport`] trait method so the generic dispatch loop drives it.
-    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8]) -> CommitOutcome {
+    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8], _prove_time_ms: u64, _total_time_ms: u64) -> CommitOutcome {
         let outcome = self.commit_output(&descriptor.output_key(), bytes);
         self.maybe_publish_parent(descriptor, outcome == CommitOutcome::Committed);
         outcome

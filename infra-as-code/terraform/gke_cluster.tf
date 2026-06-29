@@ -51,3 +51,32 @@ resource "google_service_account_iam_member" "workload_identity_binding" {
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.runtime_project_id != "" ? var.runtime_project_id : var.build_project_id}.svc.id.goog[default/prover-sa]"
 }
+
+resource "google_container_node_pool" "system_pool" {
+  count    = var.orchestration_engine == "gke" ? 1 : 0
+  provider = google-beta.runtime_beta
+  name     = "lighter-system-pool"
+  cluster  = google_container_cluster.primary[0].id
+  location = google_container_cluster.primary[0].location
+  project  = google_container_cluster.primary[0].project
+
+  node_count = 1
+
+  management {
+    auto_repair  = true
+    auto_upgrade = true
+  }
+
+  node_config {
+    preemptible  = true
+    machine_type = "e2-medium"
+
+    service_account = var.runtime_sa_email != "" ? var.runtime_sa_email : var.builder_sa_email
+    oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
+
+    labels = {
+      role = "system"
+    }
+  }
+}
+

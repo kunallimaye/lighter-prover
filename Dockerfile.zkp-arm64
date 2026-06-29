@@ -26,8 +26,13 @@ COPY bench/ bench/
 
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 
-ARG RUSTFLAGS
-RUN RUSTFLAGS=${RUSTFLAGS} cargo build --release --target aarch64-unknown-linux-gnu --bin bench --bin prover-node
+ARG CARGO_FEATURES=""
+RUN if [ -n "${CARGO_FEATURES}" ]; then \
+      RUSTFLAGS=${RUSTFLAGS} cargo build --release --target aarch64-unknown-linux-gnu --bin bench --bin prover-node --bin lighter-coordinator --features "${CARGO_FEATURES}"; \
+    else \
+      RUSTFLAGS=${RUSTFLAGS} cargo build --release --target aarch64-unknown-linux-gnu --bin bench --bin prover-node; \
+      touch /app/target/aarch64-unknown-linux-gnu/release/lighter-coordinator; \
+    fi
 
 # ─── Stage 2: Native ARM64 Runtime Packaging ──────────────────────────
 FROM --platform=linux/arm64 debian:bookworm-slim AS runtime
@@ -37,6 +42,7 @@ WORKDIR /data
 # Copy cross-compiled ARM64 binaries and default benchmark fixture
 COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/bench /usr/local/bin/bench
 COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/prover-node /usr/local/bin/prover-node
+COPY --from=builder /app/target/aarch64-unknown-linux-gnu/release/lighter-coordinator /usr/local/bin/lighter-coordinator
 COPY bench/bench_test.json /data/bench_test.json
 
 ENV RUST_LOG=info

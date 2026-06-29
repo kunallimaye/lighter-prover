@@ -14,6 +14,8 @@ steps:
       - '${_PLATFORM}'
       - '--build-arg'
       - 'RUSTFLAGS=${_RUSTFLAGS}'
+      - '--build-arg'
+      - 'CARGO_FEATURES=${_CARGO_FEATURES}'
       - '-f'
       - '${_DOCKERFILE}'
       - '-t'
@@ -29,6 +31,7 @@ substitutions:
   _IMAGE_URI: 'zkp-prover:amd64'
   _EXTRA_TAG_URI: 'zkp-prover:latest'
   _RUSTFLAGS: '-C target-cpu=znver3'
+  _CARGO_FEATURES: 'pubsub'
 
 options:
   logging: CLOUD_LOGGING_ONLY

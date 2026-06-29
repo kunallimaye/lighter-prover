@@ -87,12 +87,22 @@ def main():
   
   # Execute Monolithic Runs via cloud-bench-run
   if args.vm != "none":
-    for img_tag in images_list:
-      print(f"  [RUNNER] Executing cloud-bench-run across target VMs={args.vm} (jobs={args.jobs}, image={img_tag})...")
-      env_mon = os.environ.copy()
-      env_mon["BENCHMARK_ID"] = bench_id
-      env_mon["IMAGE"] = img_tag
-      subprocess.run(["make", "cloud-bench-run", f"VM={args.vm}", f"JOBS={args.jobs}", f"IMAGE={img_tag}", f"BENCHMARK_ID={bench_id}"], env=env_mon, check=False)
+    if ".." in args.jobs:
+      start, end = map(int, args.jobs.split(".."))
+      jobs_range = list(range(start, end + 1))
+    elif "-" in args.jobs:
+      start, end = map(int, args.jobs.split("-"))
+      jobs_range = list(range(start, end + 1))
+    else:
+      jobs_range = [int(args.jobs)]
+
+    for jobs_val in jobs_range:
+      for img_tag in images_list:
+        print(f"  [RUNNER] Executing cloud-bench-run across target VMs={args.vm} (jobs={jobs_val}, image={img_tag})...")
+        env_mon = os.environ.copy()
+        env_mon["BENCHMARK_ID"] = bench_id
+        env_mon["IMAGE"] = img_tag
+        subprocess.run(["make", "cloud-bench-run", f"VM={args.vm}", f"JOBS={jobs_val}", f"IMAGE={img_tag}", f"BENCHMARK_ID={bench_id}"], env=env_mon, check=False)
 
   # Execute Distributed Runs via cloud-run-distributed-cluster
   if args.blocks not in ("none", "0", "false", ""):
