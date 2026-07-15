@@ -245,6 +245,147 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
             CommitOutcome::AlreadyExists => Ok(GatingOutcome::ParentAlreadyPublished),
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Order-free adjacent-pair (interval) gating — issue #321 Phase 4
+    //
+    // The hex `on_child_committed` above waits for ALL `radix` children of a
+    // fixed `(level, node_idx)` node before publishing that node. The reduction
+    // path instead merges ADJACENT same-height intervals opportunistically, the
+    // moment BOTH members of a pair are committed — so folding overlaps leaf
+    // proving and a straggler only delays its own pair, not the whole level.
+    //
+    // TWO correctness hazards and how this design defeats them:
+    //
+    // 1. DOUBLE-CONSUMPTION RACE (the silent-deadlock hazard). If an interval
+    //    could be merged by EITHER neighbour, two concurrent commits could each
+    //    claim it into a DIFFERENT merged interval (different CAS keys, both
+    //    succeed) — consuming it twice and producing overlapping intervals that
+    //    can never span [0, N-1]: a silent deadlock, no root.
+    //    DEFEAT: a DETERMINISTIC PAIRING RULE. In a same-height binary tree,
+    //    every interval is either the LEFT or the RIGHT child of its unique
+    //    parent pair. Its partner is FIXED by position (not "whichever neighbour
+    //    commits first"), so an interval belongs to EXACTLY ONE pair and can be
+    //    consumed by EXACTLY ONE merge. Whichever member commits SECOND finds the
+    //    partner present and drives the (single, deterministic) merged interval
+    //    [left.lo, right.hi]; the merge identity is independent of arrival order.
+    //
+    // 2. EXACTLY-ONCE + RECOVERY. The merged parent is published under a CAS
+    //    publish-marker keyed by the MERGED interval, so even if both members
+    //    race to drive the same pair only one publishes. The marker VALUE carries
+    //    a lease stamp so a lost/timed-out merge task can be re-driven (Phase 5
+    //    coordinator), rather than the seam being stuck forever (the
+    //    TTL-is-GC-not-lease hazard).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Marker recording that the interval `[lo, hi]` (span `2^level`) has
+    /// committed. Interval-addressed, independent of any radix-node slot.
+    fn interval_marker_key(lo: usize, hi: usize) -> String {
+        format!("rgate/committed/{lo}_{hi}")
+    }
+
+    /// Publish-marker guaranteeing the merged parent `[lo, hi]` is published
+    /// once. Its value is a lease stamp (millis) for crash-recovery re-drive.
+    fn merge_publish_marker_key(lo: usize, hi: usize) -> String {
+        format!("rgate/published/{lo}_{hi}")
+    }
+
+    /// Given a committed same-height interval `[lo, hi]` (span `s = hi-lo+1 =
+    /// 2^level`), return `(is_right_child, partner)` where `partner` is the
+    /// adjacent SAME-HEIGHT sibling it pairs with under its parent:
+    ///   * right child (odd block index `lo/s`): partner = the LEFT sibling
+    ///     `[lo - s, lo - 1]`.
+    ///   * left child (even block index): partner = the RIGHT sibling
+    ///     `[hi + 1, hi + s]`.
+    /// The merged parent is always `[left.lo, right.hi]` regardless of which
+    /// member calls, giving every pair a single deterministic merge identity.
+    fn sibling_of(lo: usize, hi: usize) -> (bool, (usize, usize)) {
+        let span = hi - lo + 1;
+        let block = lo / span; // index of this interval among same-height blocks
+        if block % 2 == 1 {
+            (true, (lo - span, lo - 1)) // right child → left sibling
+        } else {
+            (false, (hi + 1, hi + span)) // left child → right sibling
+        }
+    }
+
+    /// Advance order-free reduction gating for a just-committed reduction/leaf
+    /// interval and, when its adjacent same-height partner is also present,
+    /// publish the merged parent fold EXACTLY once.
+    ///
+    /// `committed` must be the output-commit CAS outcome (only the output winner
+    /// drives the gate, so redeliveries never double-drive). A leaf `i` is
+    /// `[i, i]` at level 0; a reduction fold output is `[lo, hi]` at its level.
+    ///
+    /// Deterministic pairing (see the module note) guarantees no interval is
+    /// consumed by two merges, so overlapping-interval deadlock cannot occur.
+    #[allow(clippy::too_many_arguments)]
+    pub fn on_interval_committed(
+        &self,
+        lo: usize,
+        hi: usize,
+        level: usize,
+        radix: usize,
+        leaf_count: usize,
+        tx_per_proof: usize,
+        committed: CommitOutcome,
+    ) -> Result<GatingOutcome, CasError> {
+        if committed != CommitOutcome::Committed {
+            return Ok(GatingOutcome::NotWinner);
+        }
+
+        // Record THIS interval as committed (idempotent via the marker name).
+        let _ = self
+            .store
+            .cas_create(&Self::interval_marker_key(lo, hi), b"1")?;
+
+        // The whole tree spans [0, leaf_count-1]. If this interval already spans
+        // it, it is the root — nothing above to merge.
+        if lo == 0 && hi == leaf_count - 1 {
+            return Ok(GatingOutcome::RootReached);
+        }
+
+        let (is_right, (plo, phi)) = Self::sibling_of(lo, hi);
+        let (mlo, mhi) = if is_right { (plo, hi) } else { (lo, phi) };
+        let merged_level = level + 1;
+
+        // Is the partner committed yet? If not, record + wait; the partner's own
+        // commit will re-evaluate this same pair. This symmetric check fires the
+        // merge the moment the SECOND of the pair lands, any arrival order — the
+        // deterministic [left,right] merged key gives it a single identity.
+        let partner_present = self
+            .store
+            .exists(&Self::interval_marker_key(plo, phi))?;
+        if !partner_present {
+            return Ok(GatingOutcome::Recorded { have: 1, needed: 2 });
+        }
+
+        // Both present → publish the merged parent EXACTLY once, guarded by the
+        // merged-interval publish marker (value = lease stamp for Phase-5
+        // crash-recovery re-drive). Whichever of the pair wins the CAS is the
+        // sole publisher; the other observes AlreadyExists.
+        let pub_marker = Self::merge_publish_marker_key(mlo, mhi);
+        let lease_stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+            .to_string();
+        match self.store.cas_create(&pub_marker, lease_stamp.as_bytes())? {
+            CommitOutcome::Committed => {
+                let fold = WorkDescriptor::reduction_fold(
+                    mlo,
+                    mhi,
+                    merged_level,
+                    radix,
+                    leaf_count,
+                    tx_per_proof,
+                );
+                self.publisher.publish(fold.clone())?;
+                Ok(GatingOutcome::PublishedParent(fold))
+            }
+            CommitOutcome::AlreadyExists => Ok(GatingOutcome::ParentAlreadyPublished),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -608,6 +749,142 @@ mod tests {
 
         // Every published key is distinct (exactly-once across the whole tree).
         assert_eq!(pubr.distinct_keys().len(), 3);
+    }
+
+    // ── Order-free adjacent-pair (interval) gating — #321 Phase 4 ────────────
+
+    /// Helper: drive an interval commit through the engine (radix 2, tx 1).
+    fn commit_interval(
+        eng: &GatingEngine<InMemoryCasStore, RecordingPublisher>,
+        lo: usize,
+        hi: usize,
+        level: usize,
+        leaf_count: usize,
+    ) -> GatingOutcome {
+        eng.on_interval_committed(lo, hi, level, 2, leaf_count, 1, CommitOutcome::Committed)
+            .unwrap()
+    }
+
+    /// The merge fires the moment the SECOND member of a pair lands, regardless
+    /// of arrival order, and publishes the merged interval exactly once — for
+    /// BOTH orders (left-then-right and right-then-left).
+    #[test]
+    fn adjacent_pair_merges_on_second_commit_either_order() {
+        for right_first in [false, true] {
+            let store = InMemoryCasStore::new();
+            let pubr = RecordingPublisher::new();
+            let eng = GatingEngine::new(&store, &pubr);
+            let (first, second) = if right_first {
+                ((1usize, 1usize), (0usize, 0usize))
+            } else {
+                ((0usize, 0usize), (1usize, 1usize))
+            };
+            let o1 = commit_interval(&eng, first.0, first.1, 0, 2);
+            assert!(
+                matches!(o1, GatingOutcome::Recorded { .. }),
+                "first commit (right_first={right_first}) must only record: {o1:?}"
+            );
+            let o2 = commit_interval(&eng, second.0, second.1, 0, 2);
+            match o2 {
+                GatingOutcome::PublishedParent(d) => {
+                    assert_eq!(d.output_key(), "reduction_0_1.proof");
+                    assert_eq!(d.level, 1);
+                }
+                other => panic!("second commit must publish merged [0,1]: {other:?}"),
+            }
+            assert_eq!(pubr.published().len(), 1, "exactly one merge published");
+        }
+    }
+
+    /// THE double-consumption race guard. Three+ adjacent committed intervals
+    /// where a naive impl could merge the mis-aligned [1,2] pair. The
+    /// deterministic pairing rule must yield only the valid [0,1] and [2,3]
+    /// merges — never [1,2] — even under an adversarial commit order.
+    #[test]
+    fn no_double_consumption_three_adjacent_intervals() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let eng = GatingEngine::new(&store, &pubr);
+        // Adversarial: the two MIDDLE leaves first (adjacent; would tempt [1,2]).
+        commit_interval(&eng, 1, 1, 0, 4);
+        commit_interval(&eng, 2, 2, 0, 4);
+        commit_interval(&eng, 0, 0, 0, 4);
+        commit_interval(&eng, 3, 3, 0, 4);
+
+        let keys = pubr.distinct_keys();
+        assert!(keys.contains("reduction_0_1.proof"), "must merge [0,1]");
+        assert!(keys.contains("reduction_2_3.proof"), "must merge [2,3]");
+        assert!(
+            !keys.contains("reduction_1_2.proof"),
+            "MUST NOT merge mis-aligned [1,2] (double-consumption / overlap!)"
+        );
+        assert_eq!(pubr.published().len(), 2, "exactly two level-1 merges");
+    }
+
+    /// A full same-height reduction over N=4 reaches the single root [0,3] with
+    /// no overlaps. Drives level-1 outputs back in as commits (as Phase 5 will).
+    #[test]
+    fn full_reduction_n4_reaches_root() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let eng = GatingEngine::new(&store, &pubr);
+        for i in 0..4 {
+            commit_interval(&eng, i, i, 0, 4);
+        }
+        let a = commit_interval(&eng, 0, 1, 1, 4);
+        assert!(matches!(a, GatingOutcome::Recorded { .. }), "[0,1] waits for [2,3]");
+        let b = commit_interval(&eng, 2, 3, 1, 4);
+        match b {
+            GatingOutcome::PublishedParent(d) => {
+                assert_eq!(d.output_key(), "reduction_0_3.proof");
+                assert_eq!(d.level, 2);
+            }
+            other => panic!("[2,3] commit must publish root [0,3]: {other:?}"),
+        }
+        let r = commit_interval(&eng, 0, 3, 2, 4);
+        assert_eq!(r, GatingOutcome::RootReached);
+    }
+
+    /// Exactly-once merge publication under concurrency: both members of a pair
+    /// commit simultaneously; exactly one publishes the merged parent.
+    #[test]
+    fn merge_published_exactly_once_under_concurrency() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        // Pre-record BOTH members so both drivers see the partner and race.
+        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
+        store.cas_create(&G::interval_marker_key(1, 1), b"1").unwrap();
+
+        let published = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for who in [(0usize, 0usize), (1usize, 1usize)] {
+            let store = store.clone();
+            let pubr = pubr.clone();
+            let pc = published.clone();
+            handles.push(thread::spawn(move || {
+                let eng = GatingEngine::new(&store, &pubr);
+                if let GatingOutcome::PublishedParent(_) = eng
+                    .on_interval_committed(who.0, who.1, 0, 2, 2, 1, CommitOutcome::Committed)
+                    .unwrap()
+                {
+                    pc.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        for h in handles { h.join().unwrap(); }
+        assert_eq!(published.load(Ordering::SeqCst), 1, "exactly one merge publish");
+        assert_eq!(pubr.published().len(), 1, "exactly one descriptor published");
+    }
+
+    /// `sibling_of` computes the correct same-height partner + initiator flag.
+    #[test]
+    fn sibling_of_is_correct() {
+        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        assert_eq!(G::sibling_of(0, 0), (false, (1, 1)));
+        assert_eq!(G::sibling_of(1, 1), (true, (0, 0)));
+        assert_eq!(G::sibling_of(2, 3), (true, (0, 1)));
+        assert_eq!(G::sibling_of(0, 1), (false, (2, 3)));
     }
 }
 
