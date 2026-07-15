@@ -102,6 +102,31 @@ impl Role {
     }
 }
 
+/// (#321 Phase 5) The fold strategy a descriptor belongs to, carried on the WIRE
+/// so the coordinator can ROUTE a completion event to the correct gate: the hex
+/// fixed-node gate ([`GatingEngine::on_child_committed`]) for [`FoldStrategy::Hex`],
+/// or the order-free interval gate ([`GatingEngine::on_interval_committed`]) for
+/// [`FoldStrategy::Reduction`].
+///
+/// This is DISTINCT from the CLI `FoldStrategy` value-enum in `prover_node.rs`
+/// (a `clap::ValueEnum` for command-line parsing): this one is the serialized
+/// contract between worker and coordinator. `#[serde(rename_all = "kebab-case")]`
+/// matches [`Role`]'s style. [`FoldStrategy::Hex`] is the [`Default`] so a
+/// descriptor serialized BEFORE this field existed deserializes to the existing
+/// hex path — wire back-compat, exactly like the Phase-3 `lo`/`hi` addition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum FoldStrategy {
+    /// The existing radix-16 hexadecimal fixed-node fold. The default so
+    /// pre-Phase-5 descriptors (which lack the field) route to the hex gate
+    /// unchanged.
+    #[default]
+    Hex,
+    /// The order-free same-height binary reduction fold (issue #321), gated by
+    /// interval-addressed adjacent-pair merging.
+    Reduction,
+}
+
 /// A unit of work pulled from the transport. Carries the **role**, the
 /// **geometry params** needed to locate the work in the tree, and **pointers**
 /// (output keys) into the proof store — never proof bytes themselves. Inputs are
@@ -136,6 +161,21 @@ pub struct WorkDescriptor {
     /// Inclusive upper leaf index of the interval this fold's output covers.
     #[serde(default)]
     pub hi: usize,
+    /// (#321 Phase 5) Which fold strategy this descriptor belongs to, so the
+    /// coordinator can ROUTE a completion event to the correct gate. Defaults to
+    /// [`FoldStrategy::Hex`] via `#[serde(default)]` so descriptors serialized
+    /// before Phase 5 (which lack this field) route to the existing hex path —
+    /// wire back-compat, mirroring the Phase-3 `lo`/`hi` addition.
+    #[serde(default)]
+    pub fold_strategy: FoldStrategy,
+    /// (#321 Phase 5) `true` when THIS descriptor was published by a crash-
+    /// recovery re-drive ([`GatingEngine::redrive_stale_merges`]) rather than the
+    /// normal gate — so the completion event can flag `redriven_after_lease_expiry`
+    /// and the coordinator can count stale-lease re-drives. `#[serde(default)]`
+    /// (= `false`) for wire back-compat and because normal-gate publishes never
+    /// set it.
+    #[serde(default)]
+    pub redriven: bool,
 }
 
 impl WorkDescriptor {
@@ -151,6 +191,38 @@ impl WorkDescriptor {
             node_idx: 0,
             lo: 0,
             hi: 0,
+            fold_strategy: FoldStrategy::Hex,
+            redriven: false,
+        }
+    }
+
+    /// (#321 Phase 5) A REDUCTION leaf descriptor for chunk `chunk_idx`: a
+    /// [`Role::Leaf`] tagged [`FoldStrategy::Reduction`] with its interval seeded
+    /// to `[chunk_idx, chunk_idx]` at level 0. Seeding a reduction run uses this
+    /// (instead of [`WorkDescriptor::leaf`]) so the coordinator routes the leaf's
+    /// completion to the interval gate ([`GatingEngine::on_interval_committed`])
+    /// with the correct single-leaf interval `[i, i]` at level 0 — the base of
+    /// the padded perfect binary reduction tree.
+    pub fn reduction_leaf(
+        chunk_idx: usize,
+        radix: usize,
+        leaf_count: usize,
+        tx_per_proof: usize,
+    ) -> Self {
+        Self {
+            role: Role::Leaf,
+            radix,
+            leaf_count,
+            tx_per_proof,
+            chunk_idx,
+            // A reduction leaf's interval is the single leaf [chunk_idx, chunk_idx]
+            // at reduction level 0 (the tree base). lo == hi == chunk_idx.
+            level: 0,
+            node_idx: 0,
+            lo: chunk_idx,
+            hi: chunk_idx,
+            fold_strategy: FoldStrategy::Reduction,
+            redriven: false,
         }
     }
 
@@ -172,6 +244,8 @@ impl WorkDescriptor {
             node_idx,
             lo: 0,
             hi: 0,
+            fold_strategy: FoldStrategy::Hex,
+            redriven: false,
         }
     }
 
@@ -196,6 +270,8 @@ impl WorkDescriptor {
             node_idx: 0,
             lo,
             hi,
+            fold_strategy: FoldStrategy::Reduction,
+            redriven: false,
         }
     }
 
@@ -211,6 +287,8 @@ impl WorkDescriptor {
             node_idx: 0,
             lo: 0,
             hi: 0,
+            fold_strategy: FoldStrategy::Hex,
+            redriven: false,
         }
     }
 
@@ -300,6 +378,34 @@ pub struct ProverEvent {
     /// Echo of `descriptor.leaf_count` — total leaves feeding the tree.
     #[serde(default)]
     pub leaf_count: usize,
+
+    // ── #321 Phase 5: reduction / recovery telemetry (all serde(default)) ──────
+    /// The kind of fold this task performed, so REAL folds can be sized
+    /// separately from nearly-free PADDING no-op folds:
+    ///   * `"real"`        — a real same-height fold of two real children.
+    ///   * `"padding-noop"`— the `right_is_real = false` right-padding passthrough
+    ///                       (nearly free; `BinaryTreeChainCircuit::prove_padding`).
+    ///   * `"n/a"`         — leaf / hex / non-reduction task (no fold-kind concept).
+    /// Defaults to `"n/a"` for pre-Phase-5 payloads via
+    /// [`fold_kind_default`]. Anti-fabrication: never a made-up label.
+    #[serde(default = "fold_kind_default")]
+    pub fold_kind: String,
+    /// For a reduction event, the merged interval span `hi - lo + 1`; `0` for
+    /// non-reduction events (honest zero — a hex/leaf task has no interval span).
+    #[serde(default)]
+    pub merge_interval_span: usize,
+    /// `true` if THIS task was published by a crash-recovery re-drive
+    /// ([`GatingEngine::redrive_stale_merges`], Part C) rather than the normal
+    /// gate. Surfaced from `descriptor.redriven`. Defaults to `false`.
+    #[serde(default)]
+    pub redriven_after_lease_expiry: bool,
+}
+
+/// serde default for [`ProverEvent::fold_kind`]: `"n/a"` so a pre-Phase-5
+/// payload (which omits the field) deserializes to the leaf/hex/non-reduction
+/// sentinel rather than an empty string.
+fn fold_kind_default() -> String {
+    "n/a".to_string()
 }
 
 /// serde default for [`ProverEvent::prestate_source`]: `"n/a"` so a pre-#328
@@ -963,6 +1069,9 @@ mod tests {
             is_first_task_on_pod: true,
             chunk_size: 300,
             leaf_count: 8,
+            fold_kind: "n/a".to_string(),
+            merge_interval_span: 0,
+            redriven_after_lease_expiry: false,
         };
         let s = serde_json::to_string(&event).unwrap();
         let back: ProverEvent = serde_json::from_str(&s).unwrap();
@@ -1020,6 +1129,130 @@ mod tests {
         assert!(!e.is_first_task_on_pod, "missing flag defaults to false");
         assert_eq!(e.chunk_size, 0);
         assert_eq!(e.leaf_count, 0);
+        // #321 Phase 5 fields also default honestly on a pre-#328 payload.
+        assert_eq!(e.fold_kind, "n/a", "missing fold_kind defaults to n/a");
+        assert_eq!(e.merge_interval_span, 0);
+        assert!(!e.redriven_after_lease_expiry);
+    }
+
+    /// (#321 Phase 5) A `ProverEvent` carrying the new reduction/recovery fields
+    /// round-trips through JSON with every P5 field intact.
+    #[test]
+    fn prover_event_with_p5_fields_round_trips_through_json() {
+        let event = ProverEvent {
+            descriptor: WorkDescriptor::reduction_fold(0, 3, 2, 2, 4, 1),
+            status: "success".to_string(),
+            prove_time_ms: 10,
+            gcs_time_ms: 2,
+            total_time_ms: 15,
+            peak_rss_bytes: 1024,
+            prestate_source: "n/a".to_string(),
+            pull_ms: 1,
+            pre_exec_ms: 0,
+            prove_ms: 10,
+            gcs_write_ms: 2,
+            queue_wait_ms: 0,
+            is_first_task_on_pod: false,
+            chunk_size: 1,
+            leaf_count: 4,
+            fold_kind: "real".to_string(),
+            merge_interval_span: 4,
+            redriven_after_lease_expiry: true,
+        };
+        let s = serde_json::to_string(&event).unwrap();
+        let back: ProverEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.fold_kind, "real");
+        assert_eq!(back.merge_interval_span, 4);
+        assert!(back.redriven_after_lease_expiry);
+        assert_eq!(back.descriptor.fold_strategy, FoldStrategy::Reduction);
+    }
+
+    /// (#321 Phase 5) A pre-Phase-5 `ProverEvent` JSON (WITHOUT the P5 fields)
+    /// still deserializes — the new fields default to their honest sentinels.
+    #[test]
+    fn pre_phase5_event_without_p5_fields_still_deserializes() {
+        // Note: descriptor also omits fold_strategy/redriven (pre-P5), so those
+        // default too (Hex / false).
+        let legacy = r#"{
+            "descriptor":{
+                "role":"leaf","radix":2,"leaf_count":8,"tx_per_proof":300,
+                "chunk_idx":3,"level":0,"node_idx":0,"lo":0,"hi":0
+            },
+            "status":"success",
+            "prove_time_ms":1,"gcs_time_ms":1,"total_time_ms":1,
+            "peak_rss_bytes":1,"prestate_source":"corpus",
+            "pull_ms":0,"pre_exec_ms":0,"prove_ms":1,"gcs_write_ms":1,
+            "queue_wait_ms":0,"is_first_task_on_pod":false,
+            "chunk_size":300,"leaf_count":8
+        }"#;
+        let e: ProverEvent =
+            serde_json::from_str(legacy).expect("pre-P5 event must deserialize");
+        assert_eq!(e.fold_kind, "n/a", "missing fold_kind defaults to n/a");
+        assert_eq!(e.merge_interval_span, 0);
+        assert!(!e.redriven_after_lease_expiry);
+        assert_eq!(
+            e.descriptor.fold_strategy,
+            FoldStrategy::Hex,
+            "missing fold_strategy defaults to Hex"
+        );
+        assert!(!e.descriptor.redriven);
+    }
+
+    /// (#321 Phase 5) `fold_strategy` serde round-trip + wire back-compat: a
+    /// pre-Phase-5 `WorkDescriptor` JSON (no `fold_strategy`) deserializes to
+    /// [`FoldStrategy::Hex`]; a reduction descriptor round-trips with
+    /// [`FoldStrategy::Reduction`] intact (serialized kebab-case).
+    #[test]
+    fn fold_strategy_serde_round_trip_and_back_compat() {
+        // Round-trip a reduction descriptor: fold_strategy survives.
+        let d = WorkDescriptor::reduction_fold(0, 3, 2, 2, 4, 1);
+        let s = serde_json::to_string(&d).unwrap();
+        assert!(
+            s.contains("\"reduction\""),
+            "reduction fold_strategy must serialize kebab-case, got: {s}"
+        );
+        let back: WorkDescriptor = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.fold_strategy, FoldStrategy::Reduction);
+
+        // A pre-Phase-5 descriptor (no fold_strategy / redriven) defaults to Hex.
+        let legacy = r#"{
+            "role":"tree-node","radix":2,"leaf_count":4,"tx_per_proof":1,
+            "chunk_idx":0,"level":1,"node_idx":0,"lo":0,"hi":0
+        }"#;
+        let d2: WorkDescriptor =
+            serde_json::from_str(legacy).expect("legacy descriptor must deserialize");
+        assert_eq!(
+            d2.fold_strategy,
+            FoldStrategy::Hex,
+            "missing fold_strategy defaults to Hex"
+        );
+        assert!(!d2.redriven, "missing redriven defaults to false");
+
+        // FoldStrategy::default() is Hex.
+        assert_eq!(FoldStrategy::default(), FoldStrategy::Hex);
+    }
+
+    /// (#321 Phase 5) The `reduction_leaf` ctor makes a `Role::Leaf` descriptor
+    /// tagged `FoldStrategy::Reduction` with the single-leaf interval
+    /// `[chunk_idx, chunk_idx]` at level 0 — the base of the reduction tree.
+    #[test]
+    fn reduction_leaf_ctor_sets_reduction_interval_and_level_zero() {
+        let rl = WorkDescriptor::reduction_leaf(5, 2, 8, 1);
+        assert_eq!(rl.role, Role::Leaf);
+        assert_eq!(rl.fold_strategy, FoldStrategy::Reduction);
+        assert_eq!(rl.lo, 5, "reduction leaf lo == chunk_idx");
+        assert_eq!(rl.hi, 5, "reduction leaf hi == chunk_idx");
+        assert_eq!(rl.chunk_idx, 5);
+        assert_eq!(rl.level, 0, "reduction leaf is at level 0 (tree base)");
+        assert!(!rl.redriven);
+        // Its output key is still the leaf key (a reduction leaf proves a chunk).
+        assert_eq!(rl.output_key(), "leaf_5.proof");
+
+        // A plain (hex) leaf remains Hex with a zeroed interval — unchanged.
+        let hl = WorkDescriptor::leaf(5, 2, 8, 1);
+        assert_eq!(hl.fold_strategy, FoldStrategy::Hex);
+        assert_eq!(hl.lo, 0);
+        assert_eq!(hl.hi, 0);
     }
 
     #[test]

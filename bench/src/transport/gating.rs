@@ -79,6 +79,23 @@ pub trait CasStore: Send + Sync {
     /// over a real bucket use a `list` with a prefix; the in-memory double scans
     /// its map.
     fn count_prefix(&self, prefix: &str) -> Result<usize, CasError>;
+
+    /// (#321 Phase 5) Unconditional overwrite (SET, last-writer-wins) — the
+    /// non-CAS write primitive crash-recovery ([`GatingEngine::redrive_stale_merges`])
+    /// needs to REFRESH a stale lease stamp on an existing publish marker (the
+    /// CAS `cas_create` deliberately WON'T overwrite an existing key). Distinct
+    /// from `cas_create`: this is intentionally NOT exactly-one-winner and MUST
+    /// only be used where last-writer-wins is correct (a lease-stamp refresh,
+    /// which is idempotent-in-effect: the value is a monotone-ish timestamp).
+    ///
+    /// Default implementation returns `Err` ("unsupported") so a backend that
+    /// cannot overwrite is honest rather than silently wrong; recovery then
+    /// degrades to the ABSENT-marker-only re-drive (see `redrive_stale_merges`).
+    fn cas_put(&self, _key: &str, _bytes: &[u8]) -> Result<(), CasError> {
+        Err(CasError(
+            "cas_put (overwrite) not supported by this CasStore".to_string(),
+        ))
+    }
 }
 
 /// An error from a [`CasStore`] operation. Backends map their transport errors
@@ -416,11 +433,7 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         // crash-recovery re-drive). Whichever of the pair wins the CAS is the
         // sole publisher; the other observes AlreadyExists.
         let pub_marker = Self::merge_publish_marker_key(mlo, mhi);
-        let lease_stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-            .to_string();
+        let lease_stamp = Self::now_lease_stamp_ms().to_string();
         match self.store.cas_create(&pub_marker, lease_stamp.as_bytes())? {
             CommitOutcome::Committed => {
                 let fold = WorkDescriptor::reduction_fold(
@@ -436,6 +449,179 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
             }
             CommitOutcome::AlreadyExists => Ok(GatingOutcome::ParentAlreadyPublished),
         }
+    }
+
+    /// Current wall-clock lease stamp in milliseconds since the UNIX epoch, as a
+    /// string (the VALUE stored under a merge publish marker). Factored out so the
+    /// normal-gate publish and the recovery re-drive stamp identically.
+    fn now_lease_stamp_ms() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Lease-based crash recovery — issue #321 Phase 5
+    //
+    // THE HAZARD: a merge can be lost forever. The pair-owner won the publish-
+    // marker CAS (so no other member will ever re-publish — exactly-once is doing
+    // its job), then crashed BEFORE the merged fold descriptor was durably
+    // enqueued (or the enqueue was dropped). The seam is now "stuck": both
+    // members are committed, the publish marker exists, yet no fold task is in the
+    // queue. Nothing re-drives it. This is the "TTL-is-GC-not-lease" trap — a TTL
+    // would eventually delete the marker and let a DIFFERENT member re-publish,
+    // but only members that re-commit, and only after a GC delay; it is not a
+    // lease you can deterministically reclaim.
+    //
+    // THE FIX: the publish marker's VALUE is a LEASE STAMP (millis). A separate
+    // recovery pass (this method) treats a publish marker whose stamp is older
+    // than `lease_timeout_ms` as an EXPIRED LEASE and RE-PUBLISHES the exact same
+    // merged fold descriptor (same deterministic `pair_role` identity — never a
+    // new/overlapping interval), refreshing the stamp. A marker that is ABSENT
+    // (owner crashed before even the CAS) is also re-driven. This is a pure
+    // `GatingEngine` method so it is unit-testable against `InMemoryCasStore`
+    // with NO coordinator / Pub/Sub.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Scan the padded reduction tree for merges whose BOTH members are committed
+    /// but whose merged fold was never (or may never be) durably enqueued, and
+    /// RE-DRIVE them: re-publish the exact same merged fold descriptor. Returns
+    /// the number of merges re-driven.
+    ///
+    /// A merged interval `[mlo, mhi]` is re-driven when both members of its pair
+    /// are present (committed, or the right member is entirely padding) AND its
+    /// publish marker `rgate/published/{mlo}_{mhi}` is either:
+    ///   * **absent** — the owner crashed before winning the publish CAS; OR
+    ///   * **present but STALE** — its lease-stamp value is older than
+    ///     `now - lease_timeout_ms` (the owner won the CAS then crashed before the
+    ///     fold was enqueued). The stamp is refreshed (via [`CasStore::cas_put`])
+    ///     so a subsequent recovery pass does not re-drive it again until the new
+    ///     lease also expires.
+    ///
+    /// If the store does not support overwrite ([`CasStore::cas_put`] returns
+    /// `Err`), the stale-lease branch degrades HONESTLY to a no-op (it cannot
+    /// refresh the stamp, so it does not re-drive to avoid a re-drive storm), and
+    /// only the ABSENT-marker case is recovered. The `InMemoryCasStore` and
+    /// `RedisCasStore` both support `cas_put`, so full stale-lease recovery is
+    /// available in tests and production.
+    ///
+    /// Deterministic identity: the re-published descriptor uses the SAME
+    /// `pair_role`/merged-interval identity as [`on_interval_committed`], so a
+    /// re-drive targets EXACTLY the same merged interval — never a new or
+    /// overlapping one (the padded-tree invariants are preserved).
+    ///
+    /// Re-drive is exactly-once per absent marker: when the marker is absent this
+    /// method CAS-creates it (winning the same publish CAS the normal gate would),
+    /// so a second recovery pass finds the marker present-and-fresh and does
+    /// nothing.
+    pub fn redrive_stale_merges(
+        &self,
+        leaf_count: usize,
+        radix: usize,
+        tx_per_proof: usize,
+        lease_timeout_ms: u128,
+    ) -> Result<usize, CasError> {
+        let padded = Self::padded_leaf_count(leaf_count);
+        let now = Self::now_lease_stamp_ms();
+        let mut redriven = 0usize;
+
+        // Walk the padded perfect binary tree level by level. At `level` the
+        // same-height intervals have span `2^level`; a merged parent at
+        // `level+1` is produced by the LEFT owner of each pair. We enumerate
+        // every LEFT-owner interval `[lo, hi]` at each level (lo advancing by
+        // 2*span so we only visit owners), and consider its merge `[lo, hi+span]`.
+        let mut span = 1usize; // 2^level, starting at level 0 (single leaves)
+        let mut level = 0usize;
+        while span < padded {
+            let merged_span = span * 2;
+            let mut lo = 0usize;
+            while lo < padded {
+                let hi = lo + span - 1;
+                // Only left owners (block index even) produce a merge here; the
+                // step of 2*span already visits exactly the left owners.
+                let role = Self::pair_role(lo, hi);
+                debug_assert!(
+                    role.is_left_owner,
+                    "level {level}: [{lo},{hi}] should be a left owner"
+                );
+                let (mlo, mhi) = role.merged; // = (lo, hi + span)
+                let (plo, phi) = role.partner; // right sibling = (hi+1, hi+span)
+
+                // Both members present? Left owner committed AND (partner
+                // committed OR partner entirely padding). Same availability test
+                // as `on_interval_committed`.
+                let left_present = self
+                    .store
+                    .exists(&Self::interval_marker_key(lo, hi))?;
+                let partner_present = Self::is_all_padding(plo, leaf_count)
+                    || self.store.exists(&Self::interval_marker_key(plo, phi))?;
+
+                if left_present && partner_present {
+                    let pub_marker = Self::merge_publish_marker_key(mlo, mhi);
+                    let existing = self.store.read(&pub_marker)?;
+                    let should_redrive = match &existing {
+                        // Owner crashed before winning the publish CAS: re-drive.
+                        None => true,
+                        // Marker present: re-drive only if its lease stamp is STALE
+                        // (older than now - lease_timeout_ms). A fresh stamp means
+                        // the merge was published recently; leave it alone.
+                        Some(val) => {
+                            let stamp = std::str::from_utf8(val)
+                                .ok()
+                                .and_then(|s| s.trim().parse::<u128>().ok())
+                                .unwrap_or(0);
+                            now.saturating_sub(stamp) > lease_timeout_ms
+                        }
+                    };
+
+                    if should_redrive {
+                        let stamp = now.to_string();
+                        // Claim/refresh the lease. Absent -> CAS-create (exactly
+                        // one recovery pass wins). Present-but-stale -> overwrite
+                        // via cas_put; if unsupported, degrade honestly.
+                        let claimed = match &existing {
+                            None => {
+                                matches!(
+                                    self.store.cas_create(&pub_marker, stamp.as_bytes())?,
+                                    CommitOutcome::Committed
+                                )
+                            }
+                            Some(_) => match self.store.cas_put(&pub_marker, stamp.as_bytes()) {
+                                Ok(()) => true,
+                                // Overwrite unsupported: cannot refresh the stale
+                                // lease safely, so do NOT re-drive (honest degrade,
+                                // documented). ABSENT-marker recovery still works.
+                                Err(_) => false,
+                            },
+                        };
+                        if claimed {
+                            let merged_level = level + 1;
+                            let mut fold = WorkDescriptor::reduction_fold(
+                                mlo,
+                                mhi,
+                                merged_level,
+                                radix,
+                                leaf_count,
+                                tx_per_proof,
+                            );
+                            // Flag the re-driven descriptor so the completion event
+                            // can surface `redriven_after_lease_expiry` (#321 P5 /
+                            // #328 telemetry).
+                            fold.redriven = true;
+                            self.publisher.publish(fold)?;
+                            redriven += 1;
+                        }
+                    }
+                }
+
+                lo += merged_span;
+            }
+            span = merged_span;
+            level += 1;
+        }
+
+        Ok(redriven)
     }
 }
 
@@ -507,6 +693,16 @@ impl CasStore for InMemoryCasStore {
             .keys()
             .filter(|k| k.starts_with(prefix))
             .count())
+    }
+
+    fn cas_put(&self, key: &str, bytes: &[u8]) -> Result<(), CasError> {
+        // Unconditional last-writer-wins overwrite (models GCS upload with no
+        // ifGenerationMatch precondition, or a Redis SET).
+        self.inner
+            .lock()
+            .expect("cas mutex poisoned")
+            .insert(key.to_string(), bytes.to_vec());
+        Ok(())
     }
 }
 
@@ -1065,6 +1261,141 @@ mod tests {
         assert!(G::is_all_padding(5, 5));
         assert!(!G::is_all_padding(4, 5));
     }
+
+    // ── Lease-based crash recovery re-drive — #321 Phase 5 ───────────────────
+
+    /// THE recovery test: both members of a pair are committed but the merge was
+    /// never published (the publish marker is ABSENT — the owner crashed before
+    /// winning the CAS). `redrive_stale_merges` must re-publish EXACTLY the
+    /// correct merged interval, EXACTLY once (a second call is a no-op because the
+    /// marker now exists and is fresh). This proves the anti-"seam stuck forever"
+    /// recovery path.
+    #[test]
+    fn redrive_stale_merges_republishes_lost_merge_exactly_once() {
+        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let eng = GatingEngine::new(&store, &pubr);
+
+        // Simulate the lost merge for N=2, radix=2: BOTH leaf intervals [0,0] and
+        // [1,1] committed, but the merged [0,1] fold was NEVER published (its
+        // publish marker rgate/published/0_1 is ABSENT). We create ONLY the two
+        // committed markers — not the publish marker — so the seam is "stuck".
+        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
+        store.cas_create(&G::interval_marker_key(1, 1), b"1").unwrap();
+        assert!(
+            pubr.published().is_empty(),
+            "no merge published yet (seam is stuck)"
+        );
+
+        // Recovery pass re-drives the lost merge exactly once.
+        let n = eng.redrive_stale_merges(2, 2, 1, 60_000).unwrap();
+        assert_eq!(n, 1, "exactly one merge re-driven");
+        let published = pubr.published();
+        assert_eq!(published.len(), 1, "exactly one descriptor re-published");
+        let d = &published[0];
+        assert_eq!(d.output_key(), "reduction_0_1.proof", "correct merged interval");
+        assert_eq!(d.lo, 0);
+        assert_eq!(d.hi, 1);
+        assert_eq!(d.level, 1);
+        assert!(
+            d.redriven,
+            "re-driven descriptor must be flagged for redriven_after_lease_expiry"
+        );
+
+        // A SECOND recovery pass is a no-op: the marker now exists and is fresh
+        // (its lease stamp is recent, well within the 60s timeout).
+        let n2 = eng.redrive_stale_merges(2, 2, 1, 60_000).unwrap();
+        assert_eq!(n2, 0, "second pass must not re-drive (marker present + fresh)");
+        assert_eq!(pubr.published().len(), 1, "still exactly one descriptor");
+    }
+
+    /// A publish marker that EXISTS but is STALE (lease stamp older than the
+    /// timeout) is re-driven — the owner won the CAS then crashed before the fold
+    /// was enqueued. With `cas_put` supported (InMemory), the stamp is refreshed
+    /// so a subsequent pass does not re-drive again.
+    #[test]
+    fn redrive_stale_merges_republishes_on_expired_lease() {
+        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let eng = GatingEngine::new(&store, &pubr);
+
+        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
+        store.cas_create(&G::interval_marker_key(1, 1), b"1").unwrap();
+        // Pre-create the publish marker with an ANCIENT lease stamp (millis=1),
+        // i.e. the owner claimed it long ago then crashed before enqueue.
+        store
+            .cas_create(&G::merge_publish_marker_key(0, 1), b"1")
+            .unwrap();
+
+        // With a tiny timeout, the stamp (1ms) is far older than now-timeout, so
+        // it is stale and re-driven.
+        let n = eng.redrive_stale_merges(2, 2, 1, 1_000).unwrap();
+        assert_eq!(n, 1, "stale-lease merge must be re-driven");
+        assert_eq!(pubr.published().len(), 1);
+        assert!(pubr.published()[0].redriven);
+
+        // The stamp was refreshed (fresh now); a second pass does not re-drive.
+        let n2 = eng.redrive_stale_merges(2, 2, 1, 1_000).unwrap();
+        assert_eq!(n2, 0, "refreshed lease must not be re-driven again");
+    }
+
+    /// A merge whose BOTH members are present AND whose publish marker is FRESH
+    /// is NOT re-driven (normal healthy state — recovery must not double-publish).
+    #[test]
+    fn redrive_stale_merges_ignores_fresh_published_merge() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let eng = GatingEngine::new(&store, &pubr);
+
+        // Drive the pair normally so the merge is published with a fresh stamp.
+        eng.on_interval_committed(0, 0, 0, 2, 2, 1, CommitOutcome::Committed)
+            .unwrap();
+        let o = eng
+            .on_interval_committed(1, 1, 0, 2, 2, 1, CommitOutcome::Committed)
+            .unwrap();
+        assert!(matches!(o, GatingOutcome::PublishedParent(_)));
+        assert_eq!(pubr.published().len(), 1);
+
+        // Recovery finds a fresh publish marker => no re-drive.
+        let n = eng.redrive_stale_merges(2, 2, 1, 60_000).unwrap();
+        assert_eq!(n, 0, "a freshly-published merge must not be re-driven");
+        assert_eq!(pubr.published().len(), 1, "still exactly one publish");
+    }
+
+    /// Recovery does nothing when a pair is INCOMPLETE (only one member
+    /// committed) — there is no merge to re-drive yet.
+    #[test]
+    fn redrive_stale_merges_skips_incomplete_pairs() {
+        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let eng = GatingEngine::new(&store, &pubr);
+        // Only the left member committed; the partner [1,1] is absent.
+        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
+        let n = eng.redrive_stale_merges(2, 2, 1, 60_000).unwrap();
+        assert_eq!(n, 0, "incomplete pair must not be re-driven");
+        assert!(pubr.published().is_empty());
+    }
+
+    /// `cas_put` on the in-memory double is a last-writer-wins overwrite (the
+    /// primitive stale-lease refresh needs), distinct from the exactly-one-winner
+    /// `cas_create`.
+    #[test]
+    fn cas_put_overwrites_last_writer_wins() {
+        let s = InMemoryCasStore::new();
+        assert_eq!(s.cas_create("k", b"first").unwrap(), CommitOutcome::Committed);
+        // cas_create refuses to overwrite (exactly-one-winner).
+        assert_eq!(
+            s.cas_create("k", b"second").unwrap(),
+            CommitOutcome::AlreadyExists
+        );
+        assert_eq!(s.read("k").unwrap().unwrap(), b"first");
+        // cas_put overwrites unconditionally.
+        s.cas_put("k", b"third").unwrap();
+        assert_eq!(s.read("k").unwrap().unwrap(), b"third");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -1219,6 +1550,23 @@ impl CasStore for RedisCasStore {
         } else {
             Err(CasError(format!("RedisCasStore::count_prefix only supports gate/ prefixes, got: {prefix}")))
         }
+    }
+
+    fn cas_put(&self, key: &str, bytes: &[u8]) -> Result<(), CasError> {
+        // (#321 Phase 5) Unconditional SET (last-writer-wins) for lease-stamp
+        // refresh during crash-recovery re-drive. Only the interval publish
+        // markers (`rgate/published/{lo}_{hi}`) are refreshed this way; they are
+        // stored as plain string keys (unlike the SADD/SETNX-mapped gate/published
+        // keys), so a straight SET + expire is correct.
+        use redis::Commands as _;
+        let mut conn = self.get_connection()?;
+        let _: () = conn
+            .set(key, bytes)
+            .map_err(|e| CasError(format!("redis set (cas_put): {e}")))?;
+        let _: () = conn
+            .expire(key, self.ttl_secs as i64)
+            .map_err(|e| CasError(format!("redis expire (cas_put): {e}")))?;
+        Ok(())
     }
 }
 

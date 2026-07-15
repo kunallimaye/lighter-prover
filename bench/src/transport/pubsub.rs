@@ -624,6 +624,13 @@ impl WorkTransport for PubSubGcsTransport {
                 is_first_task_on_pod: telemetry.is_first_task_on_pod,
                 chunk_size: descriptor.tx_per_proof,
                 leaf_count: descriptor.leaf_count,
+                // #321 Phase 5: reduction/recovery facts. `fold_kind` +
+                // `merge_interval_span` come from the prover's reduction dispatch
+                // (populated in the `Role::ReductionFold` arm); `redriven` is
+                // surfaced from the descriptor a recovery re-drive flagged.
+                fold_kind: telemetry.fold_kind.as_str().to_string(),
+                merge_interval_span: telemetry.merge_interval_span,
+                redriven_after_lease_expiry: descriptor.redriven,
             };
             self.event_publisher
                 .publish_event(&event)
