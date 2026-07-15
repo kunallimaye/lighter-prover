@@ -112,6 +112,46 @@ impl BinaryTreeChainCircuit {
         timing.print();
         Ok(proof)
     }
+
+    /// Prove a fold whose RIGHT child is PADDING (`right_is_real = false`): the
+    /// parent's aggregate is exactly the left child's, unchanged (issue #321
+    /// Phase 4 padded perfect-binary-tree). Used when an interval's same-height
+    /// right sibling covers only padding leaves (indices `>= real_leaf_count`),
+    /// which needs no proof of its own.
+    ///
+    /// The circuit's `verify_proof` for the right slot runs UNCONDITIONALLY (like
+    /// the hex node's #289 padding), so the slot must still be filled with a proof
+    /// that verifies against the pinned child VK. We reuse the LEFT proof itself
+    /// as that placeholder: it is a genuine, VK-matching proof of the child
+    /// circuit, and because the fold runs with `cond = right_is_real = false`, its
+    /// contents are ignored — the aggregate passes the left child through
+    /// unchanged. This avoids minting a separate base proof (cf.
+    /// `mint_base_proof_for_level` on the hex path); same-height padding never
+    /// needs one.
+    pub fn prove_padding(
+        target: &BinaryTreeChainTarget<D>,
+        circuit_data: &CircuitData<F, C, D>,
+        left_proof: &ProofWithPublicInputs<F, C, D>,
+    ) -> Result<ProofWithPublicInputs<F, C, D>> {
+        let mut pw = PartialWitness::new();
+        pw.set_proof_with_pis_target(&target.left_child, left_proof)?;
+        // Fill the right slot with the left proof as a VK-matching placeholder; it
+        // verifies but is folded with cond=false, so its content is ignored.
+        pw.set_proof_with_pis_target(&target.right_child, left_proof)?;
+        pw.set_bool_target(target.right_is_real, false)?;
+
+        // Aggregate == left child's batch, unchanged (host-side cond=false fold).
+        let left_batch =
+            Batch::<F>::from_public_inputs(&left_proof.public_inputs[..BATCH_TARGET_INDEX]);
+        let aggregated = fold_consecutive(&left_batch, &left_batch, false);
+        pw.set_batch_target(&target.aggregated_batch, &aggregated)?;
+
+        let mut timing = TimingTree::new("Binary tree padding prove", Level::Debug);
+        let proof = timed!(timing, "prove", circuit_data.prove(pw))?;
+        timed!(timing, "verify", circuit_data.verify(proof.clone())?);
+        timing.print();
+        Ok(proof)
+    }
 }
 
 /// Host-side analogue of [`BatchTarget::conditionally_merge_consecutive`].
@@ -239,6 +279,39 @@ mod tests {
             HashOut::from([F::from_canonical_u64(30); 4])
         );
         assert_eq!(parent_batch.batch_size, 2);
+    }
+
+    /// (#321 Phase 4) A padding fold (`prove_padding`, right child = padding /
+    /// `right_is_real = false`) produces a VALID proof whose aggregate is the
+    /// LEFT child's batch, unchanged — the no-op passthrough used to pad a
+    /// non-power-of-two leaf count up to a perfect binary tree.
+    #[test]
+    fn test_binary_tree_chain_padding_passthrough() {
+        let leaf = build_leaf();
+        let left = prove_leaf(&leaf, &chained_batch(1, 10, 20));
+
+        let circuit = BinaryTreeChainCircuit::define(CIRCUIT_CONFIG, &leaf.data);
+        let target = circuit.target;
+        let data = circuit.builder.build::<C>();
+
+        let proof = BinaryTreeChainCircuit::prove_padding(&target, &data, &left).unwrap();
+
+        let parent_batch =
+            Batch::<F>::from_public_inputs(&proof.public_inputs[..BATCH_TARGET_INDEX]);
+        // Aggregate == left child unchanged: [10, 20], size 1.
+        assert_eq!(
+            parent_batch.old_state_root,
+            HashOut::from([F::from_canonical_u64(10); 4])
+        );
+        assert_eq!(
+            parent_batch.new_state_root,
+            HashOut::from([F::from_canonical_u64(20); 4]),
+            "padding fold must pass the LEFT child's new_state_root through unchanged"
+        );
+        assert_eq!(
+            parent_batch.batch_size, 1,
+            "padding fold must not add the (nonexistent) right child's batch_size"
+        );
     }
 
     #[test]

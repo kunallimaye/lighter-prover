@@ -782,7 +782,6 @@ fn tree_proof_path(level: usize, node_idx: usize) -> PathBuf {
 // Called by `aggregate_pair`; wired into TreeNode/Work dispatch in #321 Phase 4.
 // The non-test build has no dispatch call site yet, so gate the transitional
 // dead-code warning here.
-#[cfg_attr(not(test), allow(dead_code))]
 fn reduction_proof_path(lo: usize, hi: usize) -> PathBuf {
     Path::new(&proof_dir()).join(format!("reduction_{lo}_{hi}.proof"))
 }
@@ -1294,16 +1293,25 @@ fn build_node_circuit_for_level(level: usize) -> NodeCircuit {
 // Constructed via `build_reduction_node_for_level` / `cached_reduction_node`,
 // exercised by the Phase-2 tests and wired into dispatch in #321 Phases 3-4; the
 // non-test build has no runtime call site yet.
-#[cfg_attr(not(test), allow(dead_code))]
 struct ReductionNodeCircuit {
     target: BinaryTreeChainTarget<D>,
     data: CircuitData<F, C, D>,
     /// The child circuit's data (level-(L-1) reduction node, or the leaf at
     /// level 1). Its VK is what this node pins via `constant_verifier_data`.
+    ///
+    /// Unlike the hex `NodeCircuit`, the reduction fold never READS this at
+    /// runtime: `BinaryTreeChainCircuit::prove` needs only the pinned VK (already
+    /// baked into `data` at `define` time) and the two real child proofs — there
+    /// is NO padding proof to mint (same-height folds have two real children), so
+    /// no `child_data`/`mint_base_proof_for_level` analogue is required. It is
+    /// retained for parity with [`NodeCircuit`], for diagnostics, and is read by
+    /// the VK-chaining test; hence `allow(dead_code)` in the non-test build.
+    #[cfg_attr(not(test), allow(dead_code))]
     child_data: CircuitData<F, C, D>,
     /// `true` when the child is itself a recursive reduction node (level >= 2).
     /// Unlike the hex path this does NOT gate padding (same-height folds need
     /// none); retained for parity with [`NodeCircuit`] and diagnostics.
+    #[cfg_attr(not(test), allow(dead_code))]
     child_is_recursive: bool,
 }
 
@@ -1323,7 +1331,6 @@ struct ReductionNodeCircuit {
 /// recursion; callers fold at `level >= 1`.
 // Reached via `cached_reduction_node`, exercised by the Phase-2 tests and wired
 // into dispatch in #321 Phases 3-4; the non-test build has no runtime call site.
-#[cfg_attr(not(test), allow(dead_code))]
 fn build_reduction_node_for_level(level: usize) -> ReductionNodeCircuit {
     assert!(level >= 1, "reduction node circuits exist at level >= 1");
 
@@ -1405,7 +1412,6 @@ enum CircuitKey {
     /// same way [`CircuitKey::Node`] does for the hex path.
     // Keys the reduction cache; exercised by the Phase-2 tests and wired into
     // dispatch in #321 Phases 3-4 (no runtime construction in the non-test build).
-    #[cfg_attr(not(test), allow(dead_code))]
     ReductionNode { level: usize },
 }
 
@@ -1449,7 +1455,6 @@ fn node_cache() -> &'static Mutex<HashMap<CircuitKey, &'static NodeCircuit>> {
 /// sharing (or clobbering) each other's retained artifacts.
 // Reached via `cached_reduction_node`, exercised by the Phase-2 tests and wired
 // into dispatch in #321 Phases 3-4; the non-test build has no runtime call site.
-#[cfg_attr(not(test), allow(dead_code))]
 fn reduction_node_cache() -> &'static Mutex<HashMap<CircuitKey, &'static ReductionNodeCircuit>> {
     static C: OnceLock<Mutex<HashMap<CircuitKey, &'static ReductionNodeCircuit>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
@@ -1565,7 +1570,6 @@ fn cached_node_circuit(level: usize) -> &'static NodeCircuit {
 /// process lifetime — the leaked reference is stable and there is no leak growth.
 // Exercised by the Phase-2 tests and wired into TreeNode/Work dispatch in #321
 // Phases 3-4; the non-test build has no runtime call site yet.
-#[cfg_attr(not(test), allow(dead_code))]
 fn cached_reduction_node(level: usize) -> &'static ReductionNodeCircuit {
     let key = CircuitKey::ReductionNode { level };
     if let Some(c) = reduction_node_cache().lock().unwrap().get(&key) {
@@ -1971,35 +1975,41 @@ fn aggregate_node(
     parent
 }
 
-/// Fold two ADJACENT same-height children into a level-`level` parent proof via
-/// the same-height binary reducer (issue #321 Phase 2).
+/// Fold the two ADJACENT same-height children of the leaf interval `[lo, hi]`
+/// into a level-`level` parent proof covering `[lo, hi]`, via the same-height
+/// binary reducer (issue #321 Phases 2-4).
 ///
-/// This is the Phase-2 building block of the additive reduction path. The two
-/// children have EQUAL height (the defining property of Option (a) same-height
-/// merging), so both are always REAL and NO padding / base-proof machinery is
-/// needed — the same `BinaryTreeChainCircuit::prove(&t,&d,&l,&r)` call (which
-/// pins `right_is_real = true`) works at EVERY level, whether the children are
-/// non-recursive leaf proofs (level 1) or recursive reduction-node proofs
-/// (level >= 2). This is the elegant property confirmed against
-/// `BinaryTreeChainCircuit::{define, prove}`: two real children fold with a
-/// single seam continuity assert and no dummy proof.
+/// The two children have EQUAL height (the defining property of Option (a)
+/// same-height merging), so both are always REAL and NO padding / base-proof
+/// machinery is needed — the same `BinaryTreeChainCircuit::prove(&t,&d,&l,&r)`
+/// call (which pins `right_is_real = true`) works at EVERY level, whether the
+/// children are non-recursive leaf proofs (level 1) or recursive reduction-node
+/// proofs (level >= 2). Confirmed against `BinaryTreeChainCircuit::{define,
+/// prove}`: two real children fold with a single seam continuity assert and no
+/// dummy proof.
 ///
-/// # Child-path mapping (Phase 2 placeholder; finalized in Phase 3)
+/// # Interval addressing (#321 Phase 3)
 ///
-/// `lo` and `hi` name the two adjacent children's node indices at the CHILD
-/// level (level-(`level`-1); level 0 == the leaves). At level 1 the children are
-/// leaf proofs ([`leaf_proof_path`]); at level >= 2 they are level-(`level`-1)
-/// reduction-node proofs ([`reduction_proof_path`]). The precise interval → file
-/// mapping (interval descriptors) lands in #321 Phase 3; here `lo`/`hi` are read
-/// directly as the left/right child indices, which is a simple, correct mapping
-/// for a same-height pairwise fold (`lo = 2*node_idx`, `hi = 2*node_idx + 1`).
-// Wired into TreeNode/Work dispatch in #321 Phases 3-4; exercised by the Phase-2
-// tests. The non-test build has no dispatch call site yet.
-#[cfg_attr(not(test), allow(dead_code))]
+/// `[lo, hi]` is the inclusive LEAF interval this fold's OUTPUT covers; its span
+/// is exactly `2^level` (same-height only — mixed-height merges are rejected by
+/// the assert below). The interval is split at its midpoint into the two adjacent
+/// same-height child intervals `[lo, mid]` and `[mid+1, hi]`. At level 1 the
+/// children are single leaves ([`leaf_proof_path`]); at level >= 2 they are
+/// level-(`level`-1) reduction proofs read by interval ([`reduction_proof_path`],
+/// `reduction_{lo}_{hi}.proof`), matching [`WorkDescriptor::output_key`] for
+/// `Role::ReductionFold` so transport and role code agree on locations.
+///
+/// # Dispatch + gating (#321 Phase 4)
+///
+/// Called from the `Role::ReductionFold` dispatch arm. The committed output's
+/// interval gate ([`GatingEngine::on_interval_committed`]) publishes the next
+/// merged parent the moment this interval's adjacent same-height partner is also
+/// present — the order-free, deterministic-pairing adjacent-pair merge.
 fn aggregate_pair(
     level: usize,
     lo: usize,
     hi: usize,
+    leaf_count: usize,
     timing: &mut TimingTree,
 ) -> ProofWithPublicInputs<F, C, D> {
     assert!(level >= 1, "reduction levels are 1-indexed");
@@ -2019,29 +2029,40 @@ fn aggregate_pair(
     // midpoint: left = [lo, mid], right = [mid+1, hi], each of span 2^(level-1).
     let mid = lo + (span / 2) - 1;
 
-    // Read the LEFT and RIGHT child proofs from the filesystem transport by
-    // INTERVAL. At level 1 the children are single leaves ([lo,lo], [hi,hi] read
-    // from `leaf_proof_path`); at level >= 2 they are level-(L-1) reduction
-    // proofs covering [lo, mid] and [mid+1, hi]. Both are REAL (same-height
-    // fold), so there is no padding slot to read.
-    let (left_path, right_path) = if level == 1 {
-        (leaf_proof_path(lo), leaf_proof_path(hi))
+    // Read the LEFT child proof (always real: padding only lands on the high
+    // end, so the left child of any fold covers real leaves). At level 1 the
+    // child is a single leaf; at level >= 2 it is a level-(L-1) reduction proof.
+    let left_path = if level == 1 {
+        leaf_proof_path(lo)
     } else {
-        (
-            reduction_proof_path(lo, mid),
-            reduction_proof_path(mid + 1, hi),
-        )
+        reduction_proof_path(lo, mid)
     };
     let left = read_proof(&left_path);
-    let right = read_proof(&right_path);
 
     timing.push("reduction_pair_aggregation", Level::Info);
-    // Same call at every level: both children real, no padding proof. This holds
-    // for recursive (level >= 2) children too — the child VK is pinned in
-    // `define` and both proofs verify against it; `prove` sets `right_is_real =
-    // true` and folds with the single seam assert.
-    let parent = BinaryTreeChainCircuit::prove(&node.target, &node.data, &left, &right)
-        .expect("same-height binary reduction fold failed to prove");
+    // Is the RIGHT child entirely PADDING (covers only leaves >= leaf_count)?
+    // In the padded perfect binary tree (issue #321 Phase 4) padding always
+    // lands on the high end, so a fold whose right interval starts past the last
+    // real leaf is a no-op passthrough of the left child — no right proof exists
+    // to read; use `prove_padding` (`right_is_real = false`).
+    let right_lo = mid + 1;
+    let parent = if right_lo >= leaf_count {
+        BinaryTreeChainCircuit::prove_padding(&node.target, &node.data, &left)
+            .expect("same-height binary reduction padding fold failed to prove")
+    } else {
+        // Right child is real: read it and fold both. Holds for recursive
+        // (level >= 2) children too — the child VK is pinned in `define` and both
+        // proofs verify against it; `prove` sets `right_is_real = true` and folds
+        // with the single seam assert.
+        let right_path = if level == 1 {
+            leaf_proof_path(hi)
+        } else {
+            reduction_proof_path(right_lo, hi)
+        };
+        let right = read_proof(&right_path);
+        BinaryTreeChainCircuit::prove(&node.target, &node.data, &left, &right)
+            .expect("same-height binary reduction fold failed to prove")
+    };
     timing.pop();
     parent
 }
@@ -2250,20 +2271,25 @@ fn run_dispatch_loop<T: WorkTransport>(
                 continue;
             }
             WorkRole::ReductionFold => {
-                // (#321 Phase 3) The interval-addressed reduction-fold role is
-                // not routed by this loop yet — Phase 4 adds `aggregate_pair`
-                // dispatch + opportunistic adjacent-pair gating. No seeded run
-                // emits a ReductionFold descriptor until then (the
-                // `--fold-strategy` flag defaults to Hex), so this arm is not
-                // reached at runtime; ack defensively and continue rather than
-                // silently drop a lease if one ever appears.
+                // (#321 Phase 4) Same-height binary reduction fold: read the two
+                // adjacent same-height child proofs spanning [lo, hi] and fold
+                // them into the parent covering [lo, hi]. Both children are always
+                // real (same-height merge => no padding). The output is committed
+                // under the interval output_key (`reduction_{lo}_{hi}.proof`) and
+                // the interval gate (`on_interval_committed`) publishes the next
+                // merged parent when this interval's adjacent partner is present.
                 info!(
-                    "[dispatch] worker={worker} ReductionFold [{},{}] level {} — reduction \
-                     dispatch lands in #321 Phase 4; acking without folding",
-                    d.lo, d.hi, d.level
+                    "[dispatch] worker={worker} reduction fold [{},{}] level {} -> {}",
+                    d.lo,
+                    d.hi,
+                    d.level,
+                    d.output_key()
                 );
-                lease.ack();
-                continue;
+                let parent = aggregate_pair(d.level, d.lo, d.hi, d.leaf_count, timing);
+                (
+                    bincode::serialize(&parent).expect("serialize reduction parent proof"),
+                    "reduction-fold",
+                )
             }
         };
         let prove_total_latency_ms = prove_start.elapsed().as_millis();
@@ -4497,14 +4523,14 @@ mod tests {
 
         // Level-1 folds by INTERVAL: [0,1] and [2,3]. Each output is persisted
         // at reduction_proof_path(lo, hi) == the descriptor's output_key.
-        let l1_left = aggregate_pair(1, 0, 1, &mut timing);
+        let l1_left = aggregate_pair(1, 0, 1, 4, &mut timing);
         write_proof(&reduction_proof_path(0, 1), &l1_left);
-        let l1_right = aggregate_pair(1, 2, 3, &mut timing);
+        let l1_right = aggregate_pair(1, 2, 3, 4, &mut timing);
         write_proof(&reduction_proof_path(2, 3), &l1_right);
 
         // Level-2 fold of interval [0,3]: reads the two level-1 reduction proofs
         // [0,1] and [2,3] from the transport (recursive, two REAL children).
-        let root = aggregate_pair(2, 0, 3, &mut timing);
+        let root = aggregate_pair(2, 0, 3, 4, &mut timing);
         let root_batch =
             Batch::<F>::from_public_inputs(&root.public_inputs[..BATCH_TARGET_INDEX]);
 
