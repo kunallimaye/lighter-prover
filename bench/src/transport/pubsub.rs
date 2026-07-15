@@ -658,14 +658,27 @@ impl PubSubGcsTransport {
     /// descriptor's `dispatch_ts_ms` at the true publish instant (see
     /// [`super::WorkDescriptor::stamped_now`]) so a worker computes an honest
     /// `queue_wait_ms`; only the ORDER differs between seed orders.
+    ///
+    /// (#321 Phase 8) When `reduction` is `true` the leaves are seeded via the
+    /// reduction seeder ([`super::seed_reduction_leaf_descriptors_scheduled`]) —
+    /// [`Role::Leaf`](super::Role::Leaf) descriptors tagged
+    /// [`FoldStrategy::Reduction`](super::FoldStrategy::Reduction) with interval
+    /// `[i, i]` — which engages the order-free reduction pipeline on the pool.
+    /// When `false` the legacy hex seeder is used (unchanged).
     pub fn seed_leaves(
         &self,
         radix: usize,
         leaf_count: usize,
         tx_per_proof: usize,
         order: super::SeedOrder,
+        reduction: bool,
     ) {
-        for d in super::seed_leaf_descriptors_scheduled(radix, leaf_count, tx_per_proof, order) {
+        let descriptors = if reduction {
+            super::seed_reduction_leaf_descriptors_scheduled(radix, leaf_count, tx_per_proof, order)
+        } else {
+            super::seed_leaf_descriptors_scheduled(radix, leaf_count, tx_per_proof, order)
+        };
+        for d in descriptors {
             self.publish(d);
         }
     }
@@ -694,14 +707,16 @@ impl PubSubGcsTransport {
         leaf_count: usize,
         tx_per_proof: usize,
         order: super::SeedOrder,
+        reduction: bool,
     ) {
         log::info!(
-            "[seed] seeding {leaf_count} leaf descriptor(s) intended for object-prefix \
+            "[seed] seeding {leaf_count} {} leaf descriptor(s) intended for object-prefix \
              namespace '{prefix}' (radix={radix}, tx_per_proof={tx_per_proof}, \
              seed_order={})",
+            if reduction { "reduction" } else { "hex" },
             order.as_str()
         );
-        self.seed_leaves(radix, leaf_count, tx_per_proof, order);
+        self.seed_leaves(radix, leaf_count, tx_per_proof, order, reduction);
     }
 
     /// The configured ack deadline (seconds).

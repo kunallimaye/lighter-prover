@@ -1142,6 +1142,43 @@ pub fn seed_leaf_descriptors_scheduled(
         .collect()
 }
 
+/// (#321 Phase 8) Seed the N REDUCTION leaf descriptors in the requested
+/// [`SeedOrder`], each STAMPED with `dispatch_ts_ms = now` at seed time. This is
+/// the reduction-path analogue of [`seed_leaf_descriptors_scheduled`]: it reuses
+/// the EXACT same deterministic ordering (`Sequential` / `CriticalPathFirst`
+/// bit-reversal permutation of `0..N`) but builds each descriptor via
+/// [`WorkDescriptor::reduction_leaf`] — a [`Role::Leaf`] tagged
+/// [`FoldStrategy::Reduction`] with its single-leaf interval `[i, i]` at level 0.
+///
+/// Seeding these (instead of the hex [`WorkDescriptor::leaf`]) is the SWITCH that
+/// engages the order-free reduction pipeline end-to-end on the fungible `work`
+/// pool: the coordinator routes each leaf's completion to the interval gate by
+/// the descriptor's `fold_strategy`, and the gate publishes the adjacent-pair
+/// [`Role::ReductionFold`] tasks — no per-level `TreeNode` jobs are used.
+///
+/// Every returned `Vec` is a PERMUTATION of the leaf indices `0..N` (each leaf
+/// exactly once); only the *sequence* differs by order.
+pub fn seed_reduction_leaf_descriptors_scheduled(
+    radix: usize,
+    leaf_count: usize,
+    tx_per_proof: usize,
+    order: SeedOrder,
+) -> Vec<WorkDescriptor> {
+    let now = now_epoch_ms();
+    let indices: Vec<usize> = match order {
+        SeedOrder::Sequential => (0..leaf_count).collect(),
+        SeedOrder::CriticalPathFirst => critical_path_first_order(leaf_count),
+    };
+    indices
+        .into_iter()
+        .map(|i| {
+            let mut d = WorkDescriptor::reduction_leaf(i, radix, leaf_count, tx_per_proof);
+            d.dispatch_ts_ms = now;
+            d
+        })
+        .collect()
+}
+
 /// (#321 Phase 6) The deterministic `CriticalPathFirst` leaf-index sequence over
 /// `N` real leaves: the bit-reversal permutation of the padded index space
 /// `0..P` (`P = next_power_of_two(N)`), with padded indices `>= N` skipped. The
@@ -1854,6 +1891,97 @@ mod tests {
         assert_eq!(order, vec![0, 4, 2, 6, 1, 5, 3, 7]);
         assert_eq!(order[0], 0, "first leaf is the left-most (subtree 0)");
         assert_eq!(order[1], 4, "second leaf is N/2 (the OTHER top-level half)");
+    }
+
+    /// (#321 Phase 8) The reduction seeder emits `FoldStrategy::Reduction`
+    /// `Role::Leaf` descriptors with `lo == hi == chunk_idx` at level 0, in plain
+    /// `0..N` order for `Sequential`, each STAMPED at seed time. This is the
+    /// switch that engages the order-free reduction pipeline on the `work` pool.
+    #[test]
+    fn reduction_seeder_emits_reduction_leaves_sequential() {
+        let seeds =
+            seed_reduction_leaf_descriptors_scheduled(2, 6, 1, SeedOrder::Sequential);
+        assert_eq!(seeds.len(), 6, "must cover exactly N reduction leaves");
+        let order: Vec<usize> = seeds.iter().map(|d| d.chunk_idx).collect();
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5], "sequential = 0..N");
+        for (i, d) in seeds.iter().enumerate() {
+            assert_eq!(d.role, Role::Leaf, "reduction leaf keeps Role::Leaf");
+            assert_eq!(
+                d.fold_strategy,
+                FoldStrategy::Reduction,
+                "reduction leaf must be tagged FoldStrategy::Reduction"
+            );
+            assert_eq!(d.lo, i, "reduction leaf interval lo == chunk index");
+            assert_eq!(d.hi, i, "reduction leaf interval hi == chunk index");
+            assert_eq!(d.level, 0, "reduction leaf sits at level 0 (tree base)");
+            assert!(d.dispatch_ts_ms > 0, "seeded leaves must be stamped");
+        }
+    }
+
+    /// (#321 Phase 8) The reduction seeder covers every leaf `0..N` exactly once
+    /// under BOTH seed orders (it reuses the SAME ordering helper as the hex
+    /// seeder): a permutation of `0..N`, deterministic, all tagged Reduction.
+    #[test]
+    fn reduction_seeder_covers_permutation_of_0_to_n() {
+        for &n in &[1usize, 2, 3, 5, 8, 16, 125] {
+            for order in [SeedOrder::Sequential, SeedOrder::CriticalPathFirst] {
+                let seeds =
+                    seed_reduction_leaf_descriptors_scheduled(2, n, 1, order);
+                assert_eq!(seeds.len(), n, "N={n}: covers exactly N leaves");
+                let mut idx: Vec<usize> = seeds.iter().map(|d| d.chunk_idx).collect();
+                idx.sort_unstable();
+                assert_eq!(
+                    idx,
+                    (0..n).collect::<Vec<_>>(),
+                    "N={n}: reduction seeds are a permutation of 0..N"
+                );
+                assert!(
+                    seeds
+                        .iter()
+                        .all(|d| d.fold_strategy == FoldStrategy::Reduction
+                            && d.lo == d.chunk_idx
+                            && d.hi == d.chunk_idx),
+                    "N={n}: every reduction leaf tagged Reduction with [i, i]"
+                );
+            }
+        }
+    }
+
+    /// (#321 Phase 8) The reduction seeder reuses the EXACT `CriticalPathFirst`
+    /// ordering of the hex seeder — only the descriptor tagging differs. This is
+    /// the invariant that keeps the straggler-aware scheduling identical across
+    /// strategies.
+    #[test]
+    fn reduction_seeder_reuses_hex_seed_order() {
+        let hex: Vec<usize> =
+            seed_leaf_descriptors_scheduled(2, 8, 1, SeedOrder::CriticalPathFirst)
+                .iter()
+                .map(|d| d.chunk_idx)
+                .collect();
+        let reduction: Vec<usize> =
+            seed_reduction_leaf_descriptors_scheduled(2, 8, 1, SeedOrder::CriticalPathFirst)
+                .iter()
+                .map(|d| d.chunk_idx)
+                .collect();
+        assert_eq!(hex, reduction, "reduction reuses the hex seed order exactly");
+    }
+
+    /// (#321 Phase 8) The SERDE WIRE default stays `Hex` for descriptor
+    /// back-compat: a `WorkDescriptor` serialized BEFORE the `fold_strategy`
+    /// field existed deserializes to `Hex`. This is DISTINCT from the CLI default
+    /// (flipped to Reduction in prover_node.rs) — the wire default must NOT change.
+    #[test]
+    fn wire_fold_strategy_default_stays_hex() {
+        assert_eq!(FoldStrategy::default(), FoldStrategy::Hex);
+        // A JSON descriptor missing the field deserializes to Hex.
+        let json = r#"{"role":"leaf","radix":2,"leaf_count":4,"tx_per_proof":1,
+            "chunk_idx":0,"level":0,"node_idx":0}"#;
+        let d: WorkDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            d.fold_strategy,
+            FoldStrategy::Hex,
+            "pre-#321 descriptor (no field) must deserialize to Hex (wire back-compat)"
+        );
     }
 
     /// (#321 Phase 6) `SeedOrder::as_str` emits the stable wire strings echoed

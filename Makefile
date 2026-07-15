@@ -21,10 +21,14 @@ cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via
 JOBS ?= 1
 CHUNK ?= 1
 BLOCKS ?= 2
-ENGINE ?= gke
-ARCH ?= c3d
-RADIX ?= 16
-IMAGE := $(if $(IMAGE),$(IMAGE),default)
+ ENGINE ?= gke
+ ARCH ?= c3d
+ RADIX ?= 16
+ # #321 Phase 8: reduction is the DEFAULT fold strategy on GKE; opt out with
+ # `FOLD_STRATEGY=hex make cloud-gke-bench ...`. Empty passes through to the
+ # cloud.sh/CLI reduction default, so an unset var keeps the reduction default.
+ FOLD_STRATEGY ?= reduction
+ IMAGE := $(if $(IMAGE),$(IMAGE),default)
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)" "$(IMAGE)" "$(BENCHMARK_ID)"
 
@@ -34,8 +38,8 @@ cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving ex
 cloud-gke-provision: ## Provision GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-provision --arch=$(GKE_ARCH)
 
-cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16)
-	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK) --image=$(IMAGE) --radix=$(RADIX) --benchmark-id=$(BENCHMARK_ID)
+cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 FOLD_STRATEGY=reduction|hex)
+	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --benchmark-id=$(BENCHMARK_ID)
 
 cloud-gke-destroy: ## Tear down GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-destroy --arch=$(GKE_ARCH)

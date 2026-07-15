@@ -120,6 +120,7 @@ spec:
         - "--transport=pubsub"
         - "--radix=$(RADIX)"
         - "--tx-per-proof=$(TX_PER_PROOF)"
+        - "--fold-strategy=$(FOLD_STRATEGY)"
         - "--ack-deadline=$(ACK_DEADLINE)"
         env:
         - name: PROVER_PUBSUB_PROJECT
@@ -140,6 +141,8 @@ spec:
           value: "{args.radix}"
         - name: TX_PER_PROOF
           value: "{leaf_chunk}"
+        - name: FOLD_STRATEGY
+          value: "{args.fold_strategy}"
         - name: RUST_LOG
           value: "info"
         - name: RUST_MIN_STACK
@@ -219,6 +222,7 @@ spec:
         - "--transport=pubsub"
         - "--radix=$(RADIX)"
         - "--tx-per-proof=$(TX_PER_PROOF)"
+        - "--fold-strategy=$(FOLD_STRATEGY)"
         - "--ack-deadline=$(ACK_DEADLINE)"
         env:
         - name: PROVER_PUBSUB_PROJECT
@@ -239,6 +243,8 @@ spec:
           value: "{args.radix}"
         - name: TX_PER_PROOF
           value: "{leaf_chunk}"
+        - name: FOLD_STRATEGY
+          value: "{args.fold_strategy}"
         - name: RUST_LOG
           value: "info"
         - name: RUST_MIN_STACK
@@ -579,6 +585,7 @@ spec:
         - "--seed"
         - "--radix=$(RADIX)"
         - "--tx-per-proof=$(TX_PER_PROOF)"
+        - "--fold-strategy=$(FOLD_STRATEGY)"
         - "--ack-deadline=$(ACK_DEADLINE)"
         env:
         - name: PROVER_PUBSUB_PROJECT
@@ -599,6 +606,8 @@ spec:
           value: "{args.radix}"
         - name: TX_PER_PROOF
           value: "{leaf_chunk}"
+        - name: FOLD_STRATEGY
+          value: "{args.fold_strategy}"
         - name: RUST_LOG
           value: "info"
         resources:
@@ -681,6 +690,22 @@ def main():
   parser.add_argument("--memory", default="", help="(fungible) Memory request override")
   parser.add_argument("--event-topic", default="", help="(fungible) Pub/Sub topic id for coordinator events")
   parser.add_argument("--event-subscription", default="", help="(fungible) Pub/Sub subscription id for coordinator events")
+  # ── #321 Phase 8: reduction-tree fold strategy. `reduction` (default) is the
+  #    order-free reducer that now runs on GKE; `hex` is the explicit opt-out
+  #    legacy radix-16 fold. Threaded into the seeder + fungible leaf/agg `work`
+  #    args as `--fold-strategy=<value>` so the rendered manifest is EXPLICIT
+  #    about which strategy runs (the CLI default is also reduction, so the flag
+  #    is belt-and-braces + the hex opt-out mechanism). The coordinator routes
+  #    folds by each descriptor's fold_strategy — set by the reduction seeder —
+  #    so it needs NO flag.
+  parser.add_argument(
+      "--fold-strategy",
+      default="reduction",
+      choices=["reduction", "hex"],
+      help="(#321) Reduction-tree fold strategy for the seeder + fungible pool: "
+           "'reduction' (default, order-free) or 'hex' (explicit opt-out, legacy "
+           "radix-16 fold). Threaded into the seeder/leaf/agg 'work' args.",
+  )
   args = parser.parse_args()
 
   if not args.image or args.image.strip() == "":
