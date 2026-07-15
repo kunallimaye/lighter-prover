@@ -38,6 +38,10 @@ tmp/
 logs/
 # bench-fleet parser test fixtures are intentionally committed .log files
 !scripts/bench-fleet/tests/fixtures/*.log
+# Coordinator-telemetry parser test fixtures (#321 Phase 7 / #328) are
+# intentionally committed synthetic .log files (labeled SYNTHETIC, never
+# measured, never under reports/). Needed by test_extract_gke_telemetry.py.
+!infra-as-code/scripts/tests/fixtures/*.log
 # Detached orchestration state (heartbeat/checkpoint/recovery files, #140)
 .orchestration/
 # Go
@@ -68,3 +72,12 @@ infra-as-code/kubernetes/*-tree.rendered.yaml
 infra-as-code/kubernetes/*-tree-l*.rendered.yaml
 infra-as-code/kubernetes/*-tree-root.rendered.yaml
 infra-as-code/kubernetes/*-tree.plan.env
+
+# Local benchmark harness outputs (#321 Phase 7 / #328): `make bench-reduction-local`
+# writes the captured coordinator.log + derived bench_summary.json here. These
+# are per-run measured/UNMEASURED artifacts, never committed (and never under
+# reports/, so the anti-fabrication guard is unaffected).
+/out/
+# Filesystem-transport proofs produced by the local leaf->tree->root pipeline
+# (test-distributed-fast / bench-reduction-local). Per-run build artifacts.
+reports/stark_proofs/
