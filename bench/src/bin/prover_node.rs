@@ -63,6 +63,8 @@ use circuit::hexadecimal_tree_chain_constraints::{
     HexadecimalTreeChainCircuit, HexadecimalTreeChainTarget, RADIX as HEX_RADIX,
 };
 use circuit::recursion::batch::{Batch, BatchTarget, BatchTargetWitness};
+use circuit::circuit_serializer::{BlockGateSerializer, BlockGeneratorSerializer};
+use circuit::ecdsa::curve::secp256k1::Secp256K1;
 use circuit::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
 use plonky2::iop::witness::{PartialWitness, Witness};
 use plonky2::plonk::circuit_data::CircuitData;
@@ -347,6 +349,25 @@ pub enum Role {
         /// pre-state is never fabricated. See `bench/corpus/cap-block/README.md`.
         #[arg(long)]
         prestate_corpus_path: Option<String>,
+    },
+    /// Bake circuit artifacts to disk for image-baking (issue #322 Phase B).
+    ///
+    /// Builds the app circuits (pre-exec + BlockTx@tx_per_proof) and serialises
+    /// their `CircuitData` to the artifact directory, then verifies each baked
+    /// artifact round-trips to a VK-digest-IDENTICAL circuit (the enforced
+    /// invariant). Run once in CI / the image build; the runtime pod then LOADS
+    /// these instead of building. Deserialise is ~6.8× faster than rebuild
+    /// (pilot-measured). The artifact dir resolves from `--artifact-dir`, env
+    /// `LIGHTER_CIRCUIT_ARTIFACTS`, or `/data/circuits`.
+    Bake {
+        /// Transactions per leaf (BlockTx circuit shape). Bake the shape(s) the
+        /// runtime will use. Default 1.
+        #[arg(long, default_value_t = 1)]
+        tx_per_proof: usize,
+        /// Directory to write artifacts to. Falls back to env
+        /// `LIGHTER_CIRCUIT_ARTIFACTS`, then `/data/circuits`.
+        #[arg(long)]
+        artifact_dir: Option<String>,
     },
 }
 
@@ -1313,9 +1334,17 @@ fn cached_preexec_circuit() -> &'static PreExecCircuit {
     if let Some(c) = guard.get(&key) {
         return c;
     }
+    // define() is cheap (in-memory gate graph) and yields the `target` proving
+    // needs; build() (FFT + VK) is the ~70% cost. Phase B: LOAD the built `data`
+    // from a baked artifact when present, else BUILD. Both are deterministic from
+    // CIRCUIT_CONFIG, so the loaded data matches this define()'s target (VK
+    // identity is pilot-verified and enforced by the version stamp).
     let circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
     let target = circuit.target;
-    let data = circuit.builder.build::<C>();
+    let data = match try_load_block_circuit("pre_exec") {
+        Some(d) => d,
+        None => circuit.builder.build::<C>(),
+    };
     let leaked: &'static PreExecCircuit = Box::leak(Box::new(PreExecCircuit { data, target }));
     guard.insert(key, leaked);
     leaked
@@ -1331,9 +1360,14 @@ fn cached_tx_circuit(tx_per_proof: usize) -> &'static TxCircuit {
     if let Some(c) = guard.get(&key) {
         return c;
     }
+    // Phase B: LOAD-then-BUILD (see cached_preexec_circuit). Artifact is keyed by
+    // tx_per_proof because the circuit shape depends on it.
     let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, tx_per_proof, CHAIN_ID);
     let target = circuit.target;
-    let data = circuit.builder.build::<C>();
+    let data = match try_load_block_circuit(&format!("block_tx_s{tx_per_proof}")) {
+        Some(d) => d,
+        None => circuit.builder.build::<C>(),
+    };
     let leaked: &'static TxCircuit = Box::leak(Box::new(TxCircuit { data, target }));
     guard.insert(key, leaked);
     leaked
@@ -1421,6 +1455,188 @@ fn cached_base_proof_for_level(
     }
     guard.insert(level, leaked);
     leaked
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Baked circuit artifacts (issue #322, Phase B — persistent retention)
+//
+// Phase A retains circuits IN-PROCESS (built once, reused). Phase B additionally
+// lets a pod DESERIALISE a pre-built `CircuitData` from disk instead of building
+// it, so an autoscaled pod skips the multi-second cold-start build. A pilot gate
+// measured deserialise at 6.7×–7.5× faster than rebuild for the expensive
+// circuits (node L1 5.25s→0.70s, L2 10.53s→1.44s; tx/pre-exec ~6.8×), VK-digest
+// identity holding on every circuit, and — critically — NO serializer gap: the
+// recursion-bearing Hex node round-trips with the shipped `Recursion*` pair.
+//
+// DESIGN (mirrors the #318 corpus-baking precedent):
+//   * Artifacts live under a resolvable directory (CLI-free: env then `/data`
+//     mount then a local dir), same resolution shape as `prestate_corpus_path`.
+//   * Each artifact filename embeds a VERSION STAMP (circuit-params + plonky2 rev)
+//     so a param/plonky2 bump makes stale artifacts simply "not found" → the
+//     registry falls back to BUILD. There is never a silent stale-artifact load.
+//   * The registry's `cached_*` builders try LOAD-then-BUILD: a present, matching
+//     artifact is deserialised; anything else (absent / version-mismatch / decode
+//     error / VK-mismatch) falls back to the deterministic in-process build. So
+//     Phase B is a pure speedup with an always-safe fallback — never a new
+//     failure mode.
+//   * VK-IDENTITY is enforced on load: a deserialised circuit whose VK digest
+//     differs from... it cannot differ if the version stamp matches (same params
+//     + same plonky2), but we still assert the loaded artifact is self-consistent
+//     and, in the bake path, that bake→load reproduces the built VK exactly.
+//
+// Serializer coverage (measured): app circuits (pre-exec / tx) use the `Block*`
+// pair with `CC = Secp256K1` (per `build_block_circuit.rs`).
+//
+// SCOPE (BAKE-SUBSET): this PR bakes the two ~1.1s app circuits (pre-exec, tx),
+// which have a clean split — a CHEAP `define()` (yields the in-memory proving
+// `target`) and an EXPENSIVE `build()` (the FFT+VK we load from disk). The Hex
+// NODE circuits are the biggest absolute savings (L1 −4.5s, L2 −9.1s) but are
+// DEFERRED to a follow-up: proving a node needs its in-memory
+// `HexadecimalTreeChainTarget` + `child_data`, and the node's `define()` itself
+// requires the BUILT child circuit (to pin the child VK) — so loading only the
+// node's serialised `CircuitData` does not remove the child-chain build. Baking
+// the node needs a target/child-data reconstruction design (tracked for #322
+// follow-up). The tiny leaf (~104ms) is intentionally not baked (rebuild is
+// cheaper than the artifact plumbing).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Version stamp embedded in every baked-artifact filename. Bumping the pinned
+/// plonky2 rev or any circuit parameter MUST change this string so old artifacts
+/// are ignored (treated as "not found") rather than silently deserialised into a
+/// mismatched VK. Kept deliberately coarse + human-legible.
+///
+/// `CHAIN_ID` and `CIRCUIT_CONFIG`'s security bits are folded in because they
+/// change the built circuit; the plonky2 rev is the dep pin from `Cargo.toml`.
+const CIRCUIT_ARTIFACT_VERSION: &str = concat!(
+    "v1",
+    "-chain", stringify!(304),
+    // Pinned plonky2 dev rev (see workspace Cargo.toml `rev = ...`). Bump this
+    // literal whenever that pin changes; a mismatch makes baked artifacts fall
+    // back to build, which is safe.
+    "-plonky2_e1c2d354",
+);
+
+/// Process-global override for the baked-artifact directory (issue #322 Phase B),
+/// set once from the CLI/env; same override shape as [`PRESTATE_CORPUS_OVERRIDE`].
+static CIRCUIT_ARTIFACT_DIR_OVERRIDE: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// Set (or clear) the baked-artifact directory override.
+fn set_circuit_artifact_dir(path: Option<String>) {
+    *CIRCUIT_ARTIFACT_DIR_OVERRIDE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("artifact-dir override mutex poisoned") = path;
+}
+
+/// Resolve the baked-artifact directory. Resolution order (mirrors
+/// [`prestate_corpus_path`]): CLI/env override → `LIGHTER_CIRCUIT_ARTIFACTS` env
+/// → `/data/circuits` image mount → `bench/circuits` local dir. Returns `None`
+/// only if nothing is configured AND no default dir exists, in which case the
+/// registry simply builds (no baking).
+fn circuit_artifact_dir() -> Option<String> {
+    if let Some(p) = CIRCUIT_ARTIFACT_DIR_OVERRIDE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("artifact-dir override mutex poisoned")
+        .clone()
+    {
+        return Some(p);
+    }
+    if let Ok(p) = std::env::var("LIGHTER_CIRCUIT_ARTIFACTS") {
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    let data_mount = "/data/circuits";
+    if Path::new(data_mount).exists() {
+        return Some(data_mount.to_string());
+    }
+    let local = "bench/circuits";
+    if Path::new(local).exists() {
+        return Some(local.to_string());
+    }
+    None
+}
+
+/// Filename for a given circuit artifact, version-stamped.
+fn artifact_filename(kind: &str) -> String {
+    format!("{kind}.{CIRCUIT_ARTIFACT_VERSION}.circuit")
+}
+
+/// Full path to a circuit artifact, or `None` if no artifact dir is configured.
+fn artifact_path(kind: &str) -> Option<PathBuf> {
+    circuit_artifact_dir().map(|d| Path::new(&d).join(artifact_filename(kind)))
+}
+
+/// The `Block*` serializer pair (app circuits: pre-exec, tx, leaf).
+fn block_serializers() -> (BlockGateSerializer, BlockGeneratorSerializer<C, D, Secp256K1>) {
+    (BlockGateSerializer, BlockGeneratorSerializer::<C, D, Secp256K1>::default())
+}
+
+/// Try to deserialise an app (`Block*`-serialised) `CircuitData` from `kind`'s
+/// artifact. `None` on any miss (no dir, absent file, decode error) so the caller
+/// falls back to BUILD. Honest-failure: a miss is logged, never faked.
+fn try_load_block_circuit(kind: &str) -> Option<CircuitData<F, C, D>> {
+    let path = artifact_path(kind)?;
+    if !path.exists() {
+        info!("[artifact] {kind}: no baked artifact at {} — will BUILD", path.display());
+        return None;
+    }
+    let started = Instant::now();
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            warn_or_info(format!("[artifact] {kind}: read failed ({e}) — will BUILD"));
+            return None;
+        }
+    };
+    let (gs, ggs) = block_serializers();
+    match CircuitData::<F, C, D>::from_bytes(&bytes, &gs, &ggs) {
+        Ok(data) => {
+            info!(
+                "[artifact] {kind}: LOADED baked CircuitData ({} bytes) in {:?} — skipped BUILD",
+                bytes.len(),
+                started.elapsed()
+            );
+            Some(data)
+        }
+        Err(e) => {
+            warn_or_info(format!(
+                "[artifact] {kind}: decode failed ({e:?}) — version/param drift? falling back to BUILD"
+            ));
+            None
+        }
+    }
+}
+
+/// Serialise an app circuit to its artifact path with the `Block*` pair. Used by
+/// the `bake` subcommand (CI / image build), NOT on the hot path.
+fn bake_block_circuit(kind: &str, data: &CircuitData<F, C, D>) -> Result<(), String> {
+    let dir = circuit_artifact_dir()
+        .ok_or_else(|| "no artifact dir configured (set LIGHTER_CIRCUIT_ARTIFACTS)".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
+    let path = Path::new(&dir).join(artifact_filename(kind));
+    let (gs, ggs) = block_serializers();
+    let bytes = data
+        .to_bytes(&gs, &ggs)
+        .map_err(|e| format!("serialise {kind}: {e:?}"))?;
+    fs::write(&path, &bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    info!("[artifact] baked {kind} -> {} ({} bytes)", path.display(), bytes.len());
+    Ok(())
+}
+
+/// Log a non-fatal artifact fallback. `warn!` is only imported under the pubsub
+/// feature; use `info!` otherwise so the default build has no unused-import churn.
+fn warn_or_info(msg: String) {
+    #[cfg(feature = "pubsub")]
+    {
+        warn!("{msg}");
+    }
+    #[cfg(not(feature = "pubsub"))]
+    {
+        info!("{msg}");
+    }
 }
 
 
@@ -2110,6 +2326,73 @@ fn main() {
                     );
                 }
             }
+        }
+        Role::Bake {
+            tx_per_proof,
+            artifact_dir,
+        } => {
+            set_circuit_artifact_dir(
+                artifact_dir.or_else(|| std::env::var("LIGHTER_CIRCUIT_ARTIFACTS").ok()),
+            );
+            let dir = match circuit_artifact_dir() {
+                Some(d) => d,
+                None => {
+                    eprintln!(
+                        "bake: no artifact directory. Pass --artifact-dir, set \
+                         LIGHTER_CIRCUIT_ARTIFACTS, or ensure /data/circuits exists."
+                    );
+                    std::process::exit(2);
+                }
+            };
+            info!("[bake] writing circuit artifacts to '{dir}' (version {CIRCUIT_ARTIFACT_VERSION})");
+
+            // Build + bake + round-trip-verify each app circuit. VK-digest
+            // identity between the freshly-built circuit and the reloaded
+            // artifact is the enforced correctness invariant (#322 Phase B).
+            let mut baked = 0usize;
+
+            // pre-exec
+            {
+                let circuit = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG);
+                let data = circuit.builder.build::<C>();
+                let built_vk = data.verifier_only.circuit_digest;
+                bake_block_circuit("pre_exec", &data).unwrap_or_else(|e| {
+                    eprintln!("bake pre_exec failed: {e}");
+                    std::process::exit(1);
+                });
+                let reloaded = try_load_block_circuit("pre_exec")
+                    .expect("baked pre_exec must reload");
+                assert_eq!(
+                    built_vk, reloaded.verifier_only.circuit_digest,
+                    "pre_exec: baked artifact VK digest != freshly-built VK digest"
+                );
+                info!("[bake] pre_exec: VK-identity verified");
+                baked += 1;
+            }
+
+            // block_tx @ tx_per_proof
+            {
+                let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, tx_per_proof, CHAIN_ID);
+                let data = circuit.builder.build::<C>();
+                let built_vk = data.verifier_only.circuit_digest;
+                let kind = format!("block_tx_s{tx_per_proof}");
+                bake_block_circuit(&kind, &data).unwrap_or_else(|e| {
+                    eprintln!("bake {kind} failed: {e}");
+                    std::process::exit(1);
+                });
+                let reloaded = try_load_block_circuit(&kind)
+                    .unwrap_or_else(|| panic!("baked {kind} must reload"));
+                assert_eq!(
+                    built_vk, reloaded.verifier_only.circuit_digest,
+                    "{kind}: baked artifact VK digest != freshly-built VK digest"
+                );
+                info!("[bake] {kind}: VK-identity verified");
+                baked += 1;
+            }
+
+            info!(
+                "[bake] done: {baked} artifact(s) written to '{dir}' and verified VK-identical"
+            );
         }
     }
 }
@@ -3689,5 +3972,56 @@ mod tests {
             !std::ptr::eq(a as *const NodeCircuit, l2 as *const NodeCircuit),
             "different levels must be distinct retained artifacts"
         );
+    }
+
+    // ── Baked circuit artifacts (#322, Phase B) ──────────────────────────────
+
+    /// The version stamp must be non-empty and embed the plonky2 pin, so a pin
+    /// bump forces stale artifacts to be ignored (fall back to build).
+    #[test]
+    fn artifact_version_stamp_is_pinned() {
+        assert!(!CIRCUIT_ARTIFACT_VERSION.is_empty());
+        assert!(
+            CIRCUIT_ARTIFACT_VERSION.contains("plonky2_"),
+            "version stamp must embed the plonky2 rev so a bump invalidates artifacts"
+        );
+        // Filenames must be version-stamped so different versions never collide.
+        assert!(artifact_filename("pre_exec").contains(CIRCUIT_ARTIFACT_VERSION));
+    }
+
+    /// With no artifact dir configured, load returns None (build-if-absent) —
+    /// Phase B must never hard-fail when unbaked.
+    #[test]
+    fn artifact_load_absent_is_none_not_error() {
+        // Point at a guaranteed-empty temp dir so resolution succeeds but the
+        // file is absent.
+        let tmp = std::env::temp_dir().join(format!("lighter-artifacts-empty-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        set_circuit_artifact_dir(Some(tmp.to_string_lossy().to_string()));
+        assert!(try_load_block_circuit("pre_exec").is_none());
+        set_circuit_artifact_dir(None); // restore default resolution
+    }
+
+    /// Bake -> load round-trip reproduces a VK-digest-IDENTICAL circuit (the
+    /// enforced Phase B correctness invariant). Uses the cheap pre-exec circuit.
+    #[test]
+    fn artifact_bake_load_roundtrip_is_vk_identical() {
+        let tmp = std::env::temp_dir().join(format!("lighter-artifacts-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        set_circuit_artifact_dir(Some(tmp.to_string_lossy().to_string()));
+
+        let built = BlockPreExecutionCircuit::define(CIRCUIT_CONFIG).builder.build::<C>();
+        let built_vk = built.verifier_only.circuit_digest;
+        bake_block_circuit("pre_exec", &built).expect("bake must succeed");
+
+        let reloaded = try_load_block_circuit("pre_exec").expect("baked artifact must reload");
+        assert_eq!(
+            built_vk, reloaded.verifier_only.circuit_digest,
+            "baked->loaded VK digest must equal the freshly-built VK digest"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        set_circuit_artifact_dir(None);
     }
 }
