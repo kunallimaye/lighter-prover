@@ -152,6 +152,39 @@ pub struct TaskTelemetry {
     /// (#321 Phase 5) The merged interval span `hi - lo + 1` for a reduction
     /// event; `0` for non-reduction (honest zero — no interval).
     pub merge_interval_span: usize,
+    /// (#321 Phase 6) Epoch-milliseconds at which the dispatch loop PULLED this
+    /// task off the queue. Surfaced into [`crate::transport::ProverEvent::pull_ts_ms`]
+    /// so a later extractor can compute the leaf wave width. `0` when not
+    /// recorded (honest sentinel).
+    pub pull_ts_ms: u64,
+    /// (#321 Phase 6) The seed-ordering strategy this run used
+    /// (`"sequential"` | `"critical-path-first"`), echoed into
+    /// [`crate::transport::ProverEvent::scheduling_class`] so a run self-describes.
+    /// Defaults to `"sequential"`.
+    pub scheduling_class: SchedulingClass,
+}
+
+/// (#321 Phase 6) A `Copy` tag for the seed-ordering strategy a run used, so
+/// [`TaskTelemetry`] stays `Copy` (no owned `String`) while still carrying the
+/// class. Mirrors `bench::transport::SeedOrder` at the telemetry boundary; kept
+/// here to avoid a telemetry→transport dependency cycle. Its wire string is
+/// emitted into [`crate::transport::ProverEvent::scheduling_class`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchedulingClass {
+    /// The historical default `0..N` seed order.
+    Sequential,
+    /// The straggler-aware critical-path-first front-loading seed order.
+    CriticalPathFirst,
+}
+
+impl SchedulingClass {
+    /// The stable wire string emitted into the completion event.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SchedulingClass::Sequential => "sequential",
+            SchedulingClass::CriticalPathFirst => "critical-path-first",
+        }
+    }
 }
 
 /// (#321 Phase 5) The kind of reduction fold a task performed, so REAL folds are
@@ -199,6 +232,11 @@ impl TaskTelemetry {
             // Non-reduction default; the reduction dispatch arm sets these.
             fold_kind: FoldKind::NotApplicable,
             merge_interval_span: 0,
+            // #321 Phase 6: pull timestamp / scheduling class default to the
+            // honest "not recorded" / historical values; the dispatch loop sets
+            // pull_ts_ms and the run's scheduling class when it has them.
+            pull_ts_ms: 0,
+            scheduling_class: SchedulingClass::Sequential,
         }
     }
 }
@@ -268,5 +306,20 @@ mod tests {
         assert_eq!(PrestateSource::Corpus.as_str(), "corpus");
         assert_eq!(PrestateSource::ReplayFallback.as_str(), "replay-fallback");
         assert_eq!(PrestateSource::NotApplicable.as_str(), "n/a");
+    }
+
+    /// (#321 Phase 6) `SchedulingClass` wire strings match the `SeedOrder` /
+    /// `ProverEvent::scheduling_class` strings, and the default TaskTelemetry
+    /// carries the honest sequential / not-recorded values.
+    #[test]
+    fn scheduling_class_wire_strings_and_defaults_are_stable() {
+        assert_eq!(SchedulingClass::Sequential.as_str(), "sequential");
+        assert_eq!(
+            SchedulingClass::CriticalPathFirst.as_str(),
+            "critical-path-first"
+        );
+        let t = TaskTelemetry::new(0, PrestateSource::NotApplicable, false);
+        assert_eq!(t.pull_ts_ms, 0, "default pull_ts_ms is the honest 0");
+        assert_eq!(t.scheduling_class, SchedulingClass::Sequential);
     }
 }

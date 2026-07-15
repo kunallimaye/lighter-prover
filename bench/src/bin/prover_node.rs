@@ -354,6 +354,15 @@ pub enum Role {
         /// remains the behaviour until then.
         #[arg(long, value_enum, default_value_t = FoldStrategy::Hex)]
         fold_strategy: FoldStrategy,
+        /// (#321 Phase 6) Leaf SEED ORDER. `sequential` (default) preserves the
+        /// historical `0..N` order; `critical-path-first` front-loads the leaves
+        /// feeding the last-to-merge top-level pair (bit-reversal permutation) so
+        /// a straggler is less likely to sit on the final critical path. This is
+        /// a deterministic scheduling MECHANISM + telemetry only; it asserts no
+        /// wall-clock straggler-tail improvement (a real multi-pod run measures
+        /// that). The chosen class is echoed into each event's `scheduling_class`.
+        #[arg(long, value_enum, default_value_t = SeedOrderArg::Sequential)]
+        seed_order: SeedOrderArg,
         /// Path to the committed per-tx pre-state corpus (issue #316). Each leaf
         /// reads its chunk's authentic pre-state from this corpus instead of
         /// re-proving every prefix chunk (the O(N²) tail). Falls back to env
@@ -405,6 +414,42 @@ pub enum FoldStrategy {
     Hex,
     /// Same-height radix-2 binary reducer (issue #321 Phase 2, additive).
     Reduction,
+}
+
+/// (#321 Phase 6) CLI mirror of [`bench::transport::SeedOrder`]: which order the
+/// seeder emits leaf descriptors in. ADDITIVE: `Sequential` (default) is the
+/// historical `0..N` order — existing runs are byte-for-byte unchanged;
+/// `CriticalPathFirst` is the opt-in straggler-aware front-loading. This selects
+/// a deterministic SCHEDULING MECHANISM only; it asserts NOTHING about wall-clock
+/// straggler-tail improvement (that needs a real multi-pod run to measure).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum SeedOrderArg {
+    /// Plain `0, 1, .., N-1` leaf seed order (historical default).
+    Sequential,
+    /// Straggler-aware front-loading (bit-reversal permutation); opt-in.
+    CriticalPathFirst,
+}
+
+impl SeedOrderArg {
+    /// Map to the transport-crate [`bench::transport::SeedOrder`] the seeder uses.
+    fn to_seed_order(self) -> bench::transport::SeedOrder {
+        match self {
+            SeedOrderArg::Sequential => bench::transport::SeedOrder::Sequential,
+            SeedOrderArg::CriticalPathFirst => {
+                bench::transport::SeedOrder::CriticalPathFirst
+            }
+        }
+    }
+
+    /// Map to the telemetry [`bench::telemetry::SchedulingClass`] a run echoes.
+    fn to_scheduling_class(self) -> bench::telemetry::SchedulingClass {
+        match self {
+            SeedOrderArg::Sequential => bench::telemetry::SchedulingClass::Sequential,
+            SeedOrderArg::CriticalPathFirst => {
+                bench::telemetry::SchedulingClass::CriticalPathFirst
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -2163,6 +2208,11 @@ fn run_dispatch_loop<T: WorkTransport>(
     radix: usize,
     leaf_count: usize,
     tx_per_proof: usize,
+    // (#321 Phase 6) The seed-ordering strategy this run used, echoed into each
+    // completion event's `scheduling_class` so the run self-describes. Does NOT
+    // change the loop's behaviour — the loop is a pure consumer of whatever order
+    // the seeder chose; this is telemetry only.
+    scheduling_class: bench::telemetry::SchedulingClass,
     timing: &mut TimingTree,
 ) -> Option<ProofWithPublicInputs<F, C, D>> {
     use bench::transport::tree_depth as t_depth;
@@ -2214,6 +2264,11 @@ fn run_dispatch_loop<T: WorkTransport>(
         }
         let lease = transport.pull_one();
         let pull_latency_ms = pull_start.elapsed().as_millis();
+        // (#321 Phase 6) Wall-clock epoch-millis at which THIS task was pulled.
+        // Used both to compute the honest `queue_wait_ms` (pull − dispatch) and,
+        // surfaced into the event, to let a later extractor compute the leaf wave
+        // width = max(pull_ts) − min(pull_ts). `0` only if the clock is pre-epoch.
+        let pull_ts_ms = bench::transport::now_epoch_ms();
         let Some(lease) = lease else {
             // Nothing pullable but root not yet committed: the gating either
             // hasn't published the next level or work is still in flight. With a
@@ -2369,12 +2424,31 @@ fn run_dispatch_loop<T: WorkTransport>(
             bench::telemetry::take_is_first_task_on_pod(),
         );
         task_telemetry.pull_ms = pull_latency_ms as u64;
-        // pre_exec_ms / queue_wait_ms left at 0 (see comment above): not
-        // separable yet — reported honestly, never fabricated.
+        // #321 Phase 6: the dispatch-timestamp plumbing that finally makes
+        // `queue_wait_ms` HONEST (it was emitted as 0 in #328 Phase 1 because no
+        // dispatch timestamp existed to subtract). The seeder/publisher stamped
+        // `d.dispatch_ts_ms` at the publish boundary; here we subtract it from the
+        // pull time. `queue_wait_ms_from_pull` returns 0 when the descriptor was
+        // UNSTAMPED (dispatch_ts_ms == 0, the honest sentinel) — never fabricated.
+        task_telemetry.queue_wait_ms = d.queue_wait_ms_from_pull(pull_ts_ms);
+        // Record the pull timestamp so the extractor (Phase 7) can compute the
+        // leaf wave width across a run; and echo the run's scheduling class.
+        task_telemetry.pull_ts_ms = pull_ts_ms;
+        task_telemetry.scheduling_class = scheduling_class;
+        // pre_exec_ms left at 0: still not separately isolatable (pre-exec is
+        // fused into the prove span) — reported honestly, never fabricated.
         // #321 Phase 5: reduction fold_kind + merged-interval span (n/a / 0 for
         // non-reduction roles).
         task_telemetry.fold_kind = fold_kind;
         task_telemetry.merge_interval_span = merge_interval_span;
+
+        // TODO(#321 Phase 6 follow-up): speculative straggler re-dispatch — when
+        // one in-flight leaf is far slower than its siblings, opportunistically
+        // re-publish it to a second worker so the final merge does not block on a
+        // single straggler. The CAS commit already makes duplicate proves safe
+        // (exactly one winner), but choosing WHICH task to speculate on needs a
+        // multi-worker runtime + a p-tail detector; deliberately NOT built here
+        // (honest scoping over half-built speculation).
 
         // ── [instrumentation] COMMIT_latency_ms + outcome ────────────────────
         // Atomic idempotent commit + readiness gating (publishes the parent fold
@@ -2650,11 +2724,15 @@ fn main() {
             prewarm_port,
             prestate_corpus_path: prestate_corpus_path_arg,
             fold_strategy,
+            seed_order,
         } => {
             // Issue #321 Phase 2: the fold-strategy flag is PLUMBED + stored here
             // (echoed for operator visibility); dispatch into the reduction path
             // is wired in Phases 3-4. Until then the hex fold governs regardless.
             info!("[fold] strategy={fold_strategy:?} (hex fold active until #321 Phases 3-4)");
+            // #321 Phase 6: the seed order is a deterministic scheduling mechanism;
+            // echoed for operator visibility. Default `sequential` = unchanged.
+            info!("[seed] order={seed_order:?} (leaf dispatch order; telemetry echoes scheduling_class)");
 
             // Wire the pre-state corpus path (issue #316) into the process-global
             // override the deep leaf-proving path reads, BEFORE any work runs. A
@@ -2684,7 +2762,7 @@ fn main() {
 
             match transport {
                 TransportKind::Local => {
-                    run_local_work(&plan, block_number, seed, &mut timing, start);
+                    run_local_work(&plan, block_number, seed, seed_order, &mut timing, start);
                 }
                 TransportKind::Pubsub => {
                     // Effective-plan echo (also printed inside the pubsub seeder).
@@ -2699,6 +2777,7 @@ fn main() {
                         &plan,
                         block_number,
                         seed,
+                        seed_order,
                         project,
                         topic,
                         subscription,
@@ -2828,10 +2907,12 @@ fn run_local_work(
     plan: &WorkloadPlan,
     block_number: u64,
     seed: bool,
+    // (#321 Phase 6) The chosen leaf seed order (default sequential = unchanged).
+    seed_order: SeedOrderArg,
     timing: &mut TimingTree,
     start: Instant,
 ) {
-    use bench::transport::seed_leaf_descriptors;
+    use bench::transport::seed_leaf_descriptors_scheduled;
 
     let radix = plan.radix;
     let leaf_count = plan.leaf_count_per_block;
@@ -2875,14 +2956,21 @@ fn run_local_work(
         // the same process, so we seed inline immediately before the loop; this
         // preserves the exact end-to-end local behaviour. The `--seed` flag is
         // accepted for symmetry with the pubsub path.
-        let seeds = seed_leaf_descriptors(radix, leaf_count, tx_per_proof);
+        // #321 Phase 6: seed in the chosen order; each leaf is stamped with its
+        // dispatch timestamp so the worker can compute the honest queue_wait_ms.
+        let seeds = seed_leaf_descriptors_scheduled(
+            radix,
+            leaf_count,
+            tx_per_proof,
+            seed_order.to_seed_order(),
+        );
         let seeded = seeds.len();
         for d in seeds {
             transport.publish(d);
         }
         info!(
             "[dispatch] seeded {seeded} leaf descriptor(s) onto LocalTransport \
-             (radix {radix}, N={leaf_count}, tx_per_proof={tx_per_proof}){}",
+             (radix {radix}, N={leaf_count}, tx_per_proof={tx_per_proof}, seed_order={seed_order:?}){}",
             if seed {
                 " [--seed requested: local seeds inline then runs the loop]"
             } else {
@@ -2890,8 +2978,14 @@ fn run_local_work(
             }
         );
 
-        let Some(root_proof) =
-            run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, timing)
+        let Some(root_proof) = run_dispatch_loop(
+            &transport,
+            radix,
+            leaf_count,
+            tx_per_proof,
+            seed_order.to_scheduling_class(),
+            timing,
+        )
         else {
             // Graceful shutdown drained the loop before the root existed.
             let report = json!({
@@ -3095,6 +3189,8 @@ fn run_pubsub_work(
     plan: &WorkloadPlan,
     block_number: u64,
     seed: bool,
+    // (#321 Phase 6) The chosen leaf seed order (default sequential = unchanged).
+    seed_order: SeedOrderArg,
     project: Option<String>,
     topic: String,
     subscription: String,
@@ -3249,7 +3345,13 @@ fn run_pubsub_work(
         let mut total_seeded = 0usize;
         for replay in 0..plan.blocks {
             let prefix = replay_object_prefix(&base_object_prefix, replay, plan.blocks);
-            transport.seed_leaves_with_prefix(&prefix, radix, leaf_count, tx_per_proof);
+            transport.seed_leaves_with_prefix(
+                &prefix,
+                radix,
+                leaf_count,
+                tx_per_proof,
+                seed_order.to_seed_order(),
+            );
             total_seeded += leaf_count;
             info!(
                 "[seed] replay {}/{}: published {leaf_count} leaf descriptor(s) under \
@@ -3334,8 +3436,14 @@ fn run_pubsub_work(
         start_readiness_listener(port);
     }
 
-    let Some(root_proof) =
-        run_dispatch_loop(&transport, radix, leaf_count, tx_per_proof, &mut TimingTree::new("prover_node::pubsub_dispatch", Level::Info))
+    let Some(root_proof) = run_dispatch_loop(
+        &transport,
+        radix,
+        leaf_count,
+        tx_per_proof,
+        seed_order.to_scheduling_class(),
+        &mut TimingTree::new("prover_node::pubsub_dispatch", Level::Info),
+    )
     else {
         // Graceful shutdown drained the loop before the root existed: honest
         // clean-drain report, exit 0 (work left on the Pub/Sub queue).
@@ -3397,6 +3505,7 @@ fn run_pubsub_work(
     _plan: &WorkloadPlan,
     _block_number: u64,
     _seed: bool,
+    _seed_order: SeedOrderArg,
     _project: Option<String>,
     _topic: String,
     _subscription: String,
@@ -3606,9 +3715,23 @@ mod tests {
     fn _assert_dispatch_loop_is_generic() {
         if false {
             let local = LocalTransport::new(std::env::temp_dir().join("never"));
-            let _ = run_dispatch_loop(&local, 2, 4, 1, &mut TimingTree::default());
+            let _ = run_dispatch_loop(
+                &local,
+                2,
+                4,
+                1,
+                bench::telemetry::SchedulingClass::Sequential,
+                &mut TimingTree::default(),
+            );
             let inmem = InMemTransport::new();
-            let _ = run_dispatch_loop(&inmem, 2, 4, 1, &mut TimingTree::default());
+            let _ = run_dispatch_loop(
+                &inmem,
+                2,
+                4,
+                1,
+                bench::telemetry::SchedulingClass::Sequential,
+                &mut TimingTree::default(),
+            );
         }
     }
 

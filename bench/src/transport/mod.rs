@@ -176,6 +176,19 @@ pub struct WorkDescriptor {
     /// set it.
     #[serde(default)]
     pub redriven: bool,
+    /// (#321 Phase 6) Epoch-milliseconds when THIS descriptor was PUBLISHED /
+    /// SEEDED for dispatch — the timestamp a worker subtracts on pull to compute
+    /// the HONEST `queue_wait_ms` (#328 Phase 1 emitted it as `0` because this
+    /// plumbing did not exist). Stamped at the actual PUBLISH BOUNDARY (the
+    /// seeder and the concrete production [`Publisher`] impls), NOT inside the
+    /// pure [`GatingEngine`], so the engine stays unit-testable and existing
+    /// descriptor-equality assertions hold. `#[serde(default)]` (= `0`) for wire
+    /// back-compat AND as the honest "not stamped" sentinel: a `0` here means the
+    /// dispatch time was never recorded, so `queue_wait_ms` stays `0` rather than
+    /// being fabricated from a bogus baseline. Anti-fabrication: NEVER invent a
+    /// plausible-looking timestamp; `0` is the truthful "unknown".
+    #[serde(default)]
+    pub dispatch_ts_ms: u64,
 }
 
 impl WorkDescriptor {
@@ -193,6 +206,9 @@ impl WorkDescriptor {
             hi: 0,
             fold_strategy: FoldStrategy::Hex,
             redriven: false,
+            // Pure constructor: unstamped (0). The seeder/publisher boundary
+            // stamps the real dispatch time; 0 is the honest "not stamped".
+            dispatch_ts_ms: 0,
         }
     }
 
@@ -223,6 +239,7 @@ impl WorkDescriptor {
             hi: chunk_idx,
             fold_strategy: FoldStrategy::Reduction,
             redriven: false,
+            dispatch_ts_ms: 0,
         }
     }
 
@@ -246,6 +263,7 @@ impl WorkDescriptor {
             hi: 0,
             fold_strategy: FoldStrategy::Hex,
             redriven: false,
+            dispatch_ts_ms: 0,
         }
     }
 
@@ -272,6 +290,7 @@ impl WorkDescriptor {
             hi,
             fold_strategy: FoldStrategy::Reduction,
             redriven: false,
+            dispatch_ts_ms: 0,
         }
     }
 
@@ -289,6 +308,7 @@ impl WorkDescriptor {
             hi: 0,
             fold_strategy: FoldStrategy::Hex,
             redriven: false,
+            dispatch_ts_ms: 0,
         }
     }
 
@@ -309,6 +329,49 @@ impl WorkDescriptor {
             Role::RootCoordinator => "root_verified.marker".to_string(),
         }
     }
+
+    /// (#321 Phase 6) Stamp this descriptor's [`dispatch_ts_ms`](Self::dispatch_ts_ms)
+    /// with the CURRENT wall-clock epoch-millis and return `self`, so the seeder
+    /// and the concrete [`Publisher`] impls can stamp AT THE PUBLISH BOUNDARY in
+    /// one call (`WorkDescriptor::leaf(..).stamped_now()`). Deliberately NOT
+    /// called from inside the pure [`GatingEngine`]: the engine emits unstamped
+    /// (`dispatch_ts_ms = 0`) descriptors so its unit tests keep asserting exact
+    /// descriptor fields, and stamping happens only where the descriptor is
+    /// actually handed to the transport for a worker to pull.
+    #[must_use]
+    pub fn stamped_now(mut self) -> Self {
+        self.dispatch_ts_ms = now_epoch_ms();
+        self
+    }
+
+    /// (#321 Phase 6) Compute the HONEST queue-wait for this descriptor given the
+    /// wall-clock `pull_ts_ms` at which a worker pulled it: `pull - dispatch`,
+    /// but ONLY when [`dispatch_ts_ms`](Self::dispatch_ts_ms) was actually stamped
+    /// (`> 0`). If the descriptor is UNSTAMPED (`dispatch_ts_ms == 0`, the honest
+    /// sentinel) this returns `0` — the queue-wait was not measured, so we report
+    /// `0` rather than fabricating a value from a bogus zero baseline.
+    /// `saturating_sub` guards a clock skew that would put `pull` before
+    /// `dispatch` (returns `0`, never a wrapped huge number).
+    pub fn queue_wait_ms_from_pull(&self, pull_ts_ms: u64) -> u64 {
+        if self.dispatch_ts_ms == 0 {
+            // Honest sentinel: dispatch time was never recorded ⇒ not measurable.
+            0
+        } else {
+            pull_ts_ms.saturating_sub(self.dispatch_ts_ms)
+        }
+    }
+}
+
+/// (#321 Phase 6) Current wall-clock time in milliseconds since the UNIX epoch.
+/// The single source of the dispatch/pull timestamps that make `queue_wait_ms`
+/// honest. Mirrors the gating engine's `now_lease_stamp_ms` style; degrades to
+/// `0` if the system clock is before the epoch (never panics). Anti-fabrication:
+/// callers store the REAL value or the honest `0` sentinel — never a made-up one.
+pub fn now_epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Event published by workers upon successful completion of a task.
@@ -399,6 +462,30 @@ pub struct ProverEvent {
     /// gate. Surfaced from `descriptor.redriven`. Defaults to `false`.
     #[serde(default)]
     pub redriven_after_lease_expiry: bool,
+
+    // ── #321 Phase 6: dispatch-scheduling telemetry (all serde(default)) ───────
+    /// Epoch-milliseconds at which the worker PULLED this task off the queue.
+    /// Paired across all events of a run this lets a later extractor compute the
+    /// LEAF WAVE WIDTH = `max(pull_ts_ms) − min(pull_ts_ms)` (how spread-out the
+    /// leaf pulls were — the observable a straggler-aware seed order is meant to
+    /// tighten). `0` when the dispatch loop did not record it (honest sentinel —
+    /// never fabricated). Defaults to `0` for pre-Phase-6 payloads.
+    #[serde(default)]
+    pub pull_ts_ms: u64,
+    /// The seed-ordering strategy this run used, echoed so a run SELF-DESCRIBES
+    /// which schedule produced it (`"sequential"` = the default `0..N` order,
+    /// `"critical-path-first"` = the straggler-aware front-loading). Surfaced
+    /// from [`SeedOrder::as_str`]. Defaults to `"sequential"` for pre-Phase-6
+    /// payloads via [`scheduling_class_default`] — the historical behaviour.
+    #[serde(default = "scheduling_class_default")]
+    pub scheduling_class: String,
+}
+
+/// serde default for [`ProverEvent::scheduling_class`]: `"sequential"` so a
+/// pre-Phase-6 payload (which omits the field) deserializes to the historical
+/// default seed order rather than an empty string. Matches [`SeedOrder::Sequential`].
+fn scheduling_class_default() -> String {
+    "sequential".to_string()
 }
 
 /// serde default for [`ProverEvent::fold_kind`]: `"n/a"` so a pre-Phase-5
@@ -786,9 +873,18 @@ impl WorkTransport for LocalTransport {
     }
 
     fn publish(&self, descriptor: WorkDescriptor) {
+        // #321 Phase 6: stamp the dispatch time AT THE PUBLISH BOUNDARY. A leaf
+        // seeded via `seed_leaf_descriptors` is already stamped; a fold published
+        // by `maybe_publish_parent` arrives unstamped (0) from the pure gating
+        // path, so stamp it here — the true "published for dispatch" instant.
+        let descriptor = descriptor.stamped_now();
         let mut q = self.queue.lock().expect("queue mutex poisoned");
-        // De-dupe exact duplicates already pending (idempotent publish).
-        if q.messages.iter().any(|m| m.descriptor == descriptor) {
+        // De-dupe duplicates already pending (idempotent publish). Identity is the
+        // OUTPUT KEY (the work unit), NOT full-struct equality: the Phase-6
+        // `dispatch_ts_ms` stamp differs between a re-publish and the original, so
+        // comparing full structs would wrongly treat a redelivery as new work.
+        let key = descriptor.output_key();
+        if q.messages.iter().any(|m| m.descriptor.output_key() == key) {
             return;
         }
         q.messages.push(QueuedMessage {
@@ -936,17 +1032,150 @@ pub fn validate_seed_plan(
     Ok(())
 }
 
+/// (#321 Phase 6) The order in which leaf descriptors are SEEDED onto the
+/// transport — a pluggable, deterministic scheduling mechanism.
+///
+/// This is a SCHEDULING MECHANISM + telemetry, not a proven speedup: it controls
+/// which leaves a worker pool pulls FIRST. `Sequential` preserves the historical
+/// `0..N` behaviour (the default; existing callers are unchanged). `CriticalPathFirst`
+/// front-loads the leaves that feed the LAST-to-merge top-level pair, so — IF a
+/// straggler stalls a leaf — it is more likely to be one whose merge does not sit
+/// on the final critical path. Whether that tightens the straggler tail is an
+/// EMPIRICAL question answered by a real multi-pod run (out of scope here); this
+/// phase only provides the deterministic order + the pull/dispatch timestamps a
+/// benchmark needs to MEASURE the effect later.
+///
+/// Anti-fabrication: selecting `CriticalPathFirst` asserts NOTHING about
+/// wall-clock improvement; it only changes the deterministic seed order and the
+/// `scheduling_class` a run self-reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SeedOrder {
+    /// Seed leaves in plain `0, 1, .., N-1` order (the historical default).
+    #[default]
+    Sequential,
+    /// Seed leaves so the ones on the FINAL merge's critical path go FIRST.
+    /// See [`seed_leaf_descriptors_scheduled`] for the exact deterministic order.
+    CriticalPathFirst,
+}
+
+impl SeedOrder {
+    /// The stable wire string echoed into
+    /// [`ProverEvent::scheduling_class`](crate::transport::ProverEvent::scheduling_class).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SeedOrder::Sequential => "sequential",
+            SeedOrder::CriticalPathFirst => "critical-path-first",
+        }
+    }
+}
+
 /// Seed the descriptors needed to prove an N-leaf tree from scratch: one leaf
-/// descriptor per leaf. Readiness gating then publishes the fold tasks level by
-/// level as children complete. Returned in deterministic order for tests.
+/// descriptor per leaf, in plain `0..N` order. Readiness gating then publishes
+/// the fold tasks level by level as children complete. Returned in deterministic
+/// order for tests.
+///
+/// (#321 Phase 6) Each seeded leaf is STAMPED with `dispatch_ts_ms = now` at seed
+/// time — this is the publish-boundary stamp a worker subtracts on pull to
+/// compute the honest `queue_wait_ms`. This is the default `Sequential` order;
+/// [`seed_leaf_descriptors_scheduled`] adds the opt-in straggler-aware order.
 pub fn seed_leaf_descriptors(
     radix: usize,
     leaf_count: usize,
     tx_per_proof: usize,
 ) -> Vec<WorkDescriptor> {
-    (0..leaf_count)
-        .map(|i| WorkDescriptor::leaf(i, radix, leaf_count, tx_per_proof))
+    seed_leaf_descriptors_scheduled(radix, leaf_count, tx_per_proof, SeedOrder::Sequential)
+}
+
+/// (#321 Phase 6) Seed the N leaf descriptors in the requested [`SeedOrder`],
+/// each STAMPED with `dispatch_ts_ms = now` at seed time (the publish-boundary
+/// stamp for honest `queue_wait_ms`). Every returned `Vec` is a PERMUTATION of
+/// the leaf indices `0..N` — each leaf appears EXACTLY ONCE — so no leaf is ever
+/// dropped or duplicated regardless of order; only the *sequence* differs.
+///
+/// # `CriticalPathFirst` heuristic (deterministic, simple, documented)
+///
+/// The reduction tree is a padded PERFECT binary tree over `P = next_power_of_two(N)`
+/// leaves; the ROOT is the merge of the two top-level halves `[0, P/2)` and
+/// `[P/2, P)`, and each half is itself the merge of its two halves, recursively.
+/// The LAST merge to run is the root, and it cannot fire until BOTH top-level
+/// halves are complete — so a straggler anywhere delays the root. To front-load
+/// the critical path we emit leaves in **bit-reversal-permutation order**: index
+/// `i` maps to `bitrev(i, log2 P)`. Bit reversal interleaves the two halves
+/// (`0, P/2, P/4, 3P/4, ...`), so the seed sequence alternates between the two
+/// top-level subtrees from the very first leaves — every top-level pair, and
+/// recursively every sub-pair, starts receiving leaves as early as possible
+/// rather than finishing one whole half before the other begins. That makes the
+/// last-to-complete merge least likely to sit idle waiting on a lone straggler
+/// in a half that was seeded last.
+///
+/// Why bit reversal specifically:
+/// * DETERMINISTIC and pure (a fixed function of `i` and `P`), so the order is
+///   reproducible and unit-testable — no randomness, no clock dependence.
+/// * A well-known PERMUTATION of `0..P` (the FFT decimation order), so within the
+///   real range `0..N` it is guaranteed to hit every real leaf exactly once (we
+///   simply SKIP padded indices `>= N`; the relative order of the survivors is a
+///   permutation of `0..N`).
+/// * SIMPLE: a single reverse-bits over `log2 P` bits. The exact heuristic
+///   matters less than that it is deterministic, permutation-safe, and
+///   front-loads the interleave — as the plan requires.
+///
+/// Real leaves keep their normal descriptor (`WorkDescriptor::leaf`); only the
+/// *dispatch order* changes.
+pub fn seed_leaf_descriptors_scheduled(
+    radix: usize,
+    leaf_count: usize,
+    tx_per_proof: usize,
+    order: SeedOrder,
+) -> Vec<WorkDescriptor> {
+    let now = now_epoch_ms();
+    let indices: Vec<usize> = match order {
+        SeedOrder::Sequential => (0..leaf_count).collect(),
+        SeedOrder::CriticalPathFirst => critical_path_first_order(leaf_count),
+    };
+    indices
+        .into_iter()
+        .map(|i| {
+            let mut d = WorkDescriptor::leaf(i, radix, leaf_count, tx_per_proof);
+            d.dispatch_ts_ms = now;
+            d
+        })
         .collect()
+}
+
+/// (#321 Phase 6) The deterministic `CriticalPathFirst` leaf-index sequence over
+/// `N` real leaves: the bit-reversal permutation of the padded index space
+/// `0..P` (`P = next_power_of_two(N)`), with padded indices `>= N` skipped. The
+/// result is a PERMUTATION of `0..N` (every real leaf exactly once). See
+/// [`seed_leaf_descriptors_scheduled`] for the rationale.
+fn critical_path_first_order(leaf_count: usize) -> Vec<usize> {
+    if leaf_count <= 1 {
+        return (0..leaf_count).collect();
+    }
+    let padded = leaf_count.next_power_of_two();
+    let bits = padded.trailing_zeros(); // log2(padded), exact for a power of two.
+    let mut out = Vec::with_capacity(leaf_count);
+    for i in 0..padded {
+        let r = reverse_bits(i, bits);
+        // Skip padded leaves: they carry no proof, so they are never seeded. The
+        // survivors (real indices) form a permutation of 0..N.
+        if r < leaf_count {
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// (#321 Phase 6) Reverse the low `bits` bits of `value` — the primitive behind
+/// the bit-reversal permutation used by [`critical_path_first_order`]. Pure and
+/// deterministic.
+fn reverse_bits(value: usize, bits: u32) -> usize {
+    let mut v = value;
+    let mut r = 0usize;
+    for _ in 0..bits {
+        r = (r << 1) | (v & 1);
+        v >>= 1;
+    }
+    r
 }
 
 // Re-export the backend-agnostic CAS + gating primitives so callers and the
@@ -1072,6 +1301,8 @@ mod tests {
             fold_kind: "n/a".to_string(),
             merge_interval_span: 0,
             redriven_after_lease_expiry: false,
+            pull_ts_ms: 0,
+            scheduling_class: "sequential".to_string(),
         };
         let s = serde_json::to_string(&event).unwrap();
         let back: ProverEvent = serde_json::from_str(&s).unwrap();
@@ -1158,6 +1389,8 @@ mod tests {
             fold_kind: "real".to_string(),
             merge_interval_span: 4,
             redriven_after_lease_expiry: true,
+            pull_ts_ms: 0,
+            scheduling_class: "sequential".to_string(),
         };
         let s = serde_json::to_string(&event).unwrap();
         let back: ProverEvent = serde_json::from_str(&s).unwrap();
@@ -1484,5 +1717,209 @@ mod tests {
         assert!(validate_seed_plan(1, 4, 1, 4).unwrap_err().contains("radix"));
         assert!(validate_seed_plan(2, 0, 1, 4).unwrap_err().contains("leaf_count"));
         assert!(validate_seed_plan(2, 4, 0, 4).unwrap_err().contains("tx_per_proof"));
+    }
+
+    // ── #321 Phase 6: dispatch/pull timestamps + straggler-aware seeding ──────
+
+    /// (#321 Phase 6) `dispatch_ts_ms` round-trips through JSON.
+    #[test]
+    fn dispatch_ts_ms_round_trips_through_json() {
+        let mut d = WorkDescriptor::leaf(2, 2, 4, 1);
+        d.dispatch_ts_ms = 1_700_000_000_123;
+        let s = serde_json::to_string(&d).unwrap();
+        let back: WorkDescriptor = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.dispatch_ts_ms, 1_700_000_000_123);
+        assert_eq!(d, back);
+    }
+
+    /// (#321 Phase 6) A descriptor serialized BEFORE `dispatch_ts_ms` existed
+    /// (no field) must still deserialize — `#[serde(default)]` supplies the honest
+    /// `0` sentinel. Wire back-compat, mirroring the Phase-3 interval-field test.
+    #[test]
+    fn pre_phase6_descriptor_without_dispatch_ts_still_deserializes() {
+        let legacy = r#"{
+            "role":"leaf","radix":2,"leaf_count":4,"tx_per_proof":1,
+            "chunk_idx":2,"level":0,"node_idx":0,"lo":0,"hi":0
+        }"#;
+        let d: WorkDescriptor =
+            serde_json::from_str(legacy).expect("legacy descriptor must deserialize");
+        assert_eq!(
+            d.dispatch_ts_ms, 0,
+            "missing dispatch_ts_ms must default to the honest 0 sentinel"
+        );
+        assert_eq!(d.chunk_idx, 2);
+        assert_eq!(d.role, Role::Leaf);
+    }
+
+    /// (#321 Phase 6) A pure constructor emits an UNSTAMPED (0) descriptor — the
+    /// gating engine's descriptors are pure/unit-testable — while `stamped_now`
+    /// stamps a real (non-zero on this host) dispatch time at the publish boundary.
+    #[test]
+    fn constructors_are_unstamped_and_stamped_now_stamps() {
+        let pure = WorkDescriptor::tree_node(1, 0, 2, 4, 1);
+        assert_eq!(
+            pure.dispatch_ts_ms, 0,
+            "pure constructor must be unstamped (0) — keeps the engine testable"
+        );
+        let stamped = WorkDescriptor::leaf(0, 2, 4, 1).stamped_now();
+        assert!(
+            stamped.dispatch_ts_ms > 0,
+            "stamped_now must record a real epoch-millis on this host"
+        );
+    }
+
+    /// (#321 Phase 6) The HONEST queue_wait computation: with a stamped
+    /// `dispatch_ts_ms = T` and a pull at `T + delta`, the wait is exactly delta.
+    #[test]
+    fn queue_wait_ms_is_pull_minus_dispatch_when_stamped() {
+        let mut d = WorkDescriptor::leaf(0, 2, 4, 1);
+        let t = 1_700_000_000_000u64;
+        d.dispatch_ts_ms = t;
+        // Pulled 250 ms after dispatch ⇒ queue_wait == 250.
+        assert_eq!(d.queue_wait_ms_from_pull(t + 250), 250);
+        // Pulled at the exact dispatch instant ⇒ 0.
+        assert_eq!(d.queue_wait_ms_from_pull(t), 0);
+    }
+
+    /// (#321 Phase 6) An UNSTAMPED descriptor (`dispatch_ts_ms == 0`, the honest
+    /// sentinel) yields a queue_wait of 0 — NEVER fabricated from a bogus zero
+    /// baseline — regardless of the pull time.
+    #[test]
+    fn queue_wait_ms_stays_zero_when_unstamped() {
+        let d = WorkDescriptor::leaf(0, 2, 4, 1); // dispatch_ts_ms == 0
+        assert_eq!(d.dispatch_ts_ms, 0);
+        assert_eq!(
+            d.queue_wait_ms_from_pull(1_700_000_000_999),
+            0,
+            "unstamped => honest 0, never a huge fabricated wait"
+        );
+    }
+
+    /// (#321 Phase 6) A clock skew that puts the pull time BEFORE the dispatch
+    /// time saturates to 0 (never a wrapped huge number).
+    #[test]
+    fn queue_wait_ms_saturates_on_clock_skew() {
+        let mut d = WorkDescriptor::leaf(0, 2, 4, 1);
+        d.dispatch_ts_ms = 1_000;
+        assert_eq!(d.queue_wait_ms_from_pull(500), 0);
+    }
+
+    /// (#321 Phase 6) `Sequential` seeding returns leaves in plain 0..N order,
+    /// each STAMPED at seed time (dispatch_ts_ms > 0 on this host).
+    #[test]
+    fn seed_order_sequential_is_zero_to_n_stamped() {
+        let seeds = seed_leaf_descriptors_scheduled(2, 6, 1, SeedOrder::Sequential);
+        let order: Vec<usize> = seeds.iter().map(|d| d.chunk_idx).collect();
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5]);
+        assert!(
+            seeds.iter().all(|d| d.dispatch_ts_ms > 0),
+            "seeded leaves must be stamped at seed time"
+        );
+    }
+
+    /// (#321 Phase 6) `CriticalPathFirst` seeding returns a PERMUTATION of 0..N
+    /// (every leaf exactly once) and is DETERMINISTIC (identical across calls).
+    /// Covers a power-of-two N and a non-power-of-two N (padding skipped).
+    #[test]
+    fn seed_order_critical_path_first_is_a_deterministic_permutation() {
+        for &n in &[1usize, 2, 3, 4, 5, 8, 13, 16, 125] {
+            let a = seed_leaf_descriptors_scheduled(2, n, 1, SeedOrder::CriticalPathFirst);
+            let b = seed_leaf_descriptors_scheduled(2, n, 1, SeedOrder::CriticalPathFirst);
+            assert_eq!(a.len(), n, "N={n}: must cover exactly N leaves");
+            let idx_a: Vec<usize> = a.iter().map(|d| d.chunk_idx).collect();
+            let idx_b: Vec<usize> = b.iter().map(|d| d.chunk_idx).collect();
+            assert_eq!(idx_a, idx_b, "N={n}: must be deterministic");
+            // A permutation of 0..N: every leaf exactly once.
+            let mut sorted = idx_a.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted,
+                (0..n).collect::<Vec<_>>(),
+                "N={n}: must be a permutation of 0..N (each leaf exactly once)"
+            );
+        }
+    }
+
+    /// (#321 Phase 6) The `CriticalPathFirst` heuristic FRONT-LOADS the two
+    /// top-level halves: for a power-of-two N the second seeded leaf is `N/2`
+    /// (bit reversal interleaves the halves), so folding of BOTH top subtrees can
+    /// begin from the first two leaves rather than after one whole half.
+    #[test]
+    fn critical_path_first_front_loads_top_level_halves() {
+        let order: Vec<usize> = seed_leaf_descriptors_scheduled(2, 8, 1, SeedOrder::CriticalPathFirst)
+            .iter()
+            .map(|d| d.chunk_idx)
+            .collect();
+        // bitrev over 3 bits: 0,4,2,6,1,5,3,7.
+        assert_eq!(order, vec![0, 4, 2, 6, 1, 5, 3, 7]);
+        assert_eq!(order[0], 0, "first leaf is the left-most (subtree 0)");
+        assert_eq!(order[1], 4, "second leaf is N/2 (the OTHER top-level half)");
+    }
+
+    /// (#321 Phase 6) `SeedOrder::as_str` emits the stable wire strings echoed
+    /// into `ProverEvent::scheduling_class`.
+    #[test]
+    fn seed_order_wire_strings_are_stable() {
+        assert_eq!(SeedOrder::Sequential.as_str(), "sequential");
+        assert_eq!(SeedOrder::CriticalPathFirst.as_str(), "critical-path-first");
+        assert_eq!(SeedOrder::default(), SeedOrder::Sequential);
+    }
+
+    /// (#321 Phase 6) A `ProverEvent` carrying the new `pull_ts_ms` +
+    /// `scheduling_class` fields round-trips through JSON with both intact.
+    #[test]
+    fn prover_event_with_p6_fields_round_trips_through_json() {
+        let event = ProverEvent {
+            descriptor: WorkDescriptor::leaf(1, 2, 8, 1),
+            status: "success".to_string(),
+            prove_time_ms: 5,
+            gcs_time_ms: 1,
+            total_time_ms: 7,
+            peak_rss_bytes: 0,
+            prestate_source: "corpus".to_string(),
+            pull_ms: 2,
+            pre_exec_ms: 0,
+            prove_ms: 5,
+            gcs_write_ms: 1,
+            queue_wait_ms: 42,
+            is_first_task_on_pod: false,
+            chunk_size: 1,
+            leaf_count: 8,
+            fold_kind: "n/a".to_string(),
+            merge_interval_span: 0,
+            redriven_after_lease_expiry: false,
+            pull_ts_ms: 1_700_000_000_500,
+            scheduling_class: "critical-path-first".to_string(),
+        };
+        let s = serde_json::to_string(&event).unwrap();
+        let back: ProverEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.pull_ts_ms, 1_700_000_000_500);
+        assert_eq!(back.scheduling_class, "critical-path-first");
+        assert_eq!(back.queue_wait_ms, 42);
+    }
+
+    /// (#321 Phase 6) A pre-Phase-6 `ProverEvent` JSON (no `pull_ts_ms` /
+    /// `scheduling_class`) still deserializes: `pull_ts_ms` defaults to the honest
+    /// `0` and `scheduling_class` to the historical `"sequential"`. Wire
+    /// back-compat, mirroring the pre-#328 event test.
+    #[test]
+    fn pre_phase6_event_without_scheduling_fields_still_deserializes() {
+        let legacy = r#"{
+            "descriptor":{
+                "role":"leaf","radix":2,"leaf_count":8,"tx_per_proof":1,
+                "chunk_idx":1,"level":0,"node_idx":0,"lo":0,"hi":0
+            },
+            "status":"success",
+            "prove_time_ms":5,"gcs_time_ms":1,"total_time_ms":7
+        }"#;
+        let e: ProverEvent =
+            serde_json::from_str(legacy).expect("legacy event must deserialize");
+        assert_eq!(e.pull_ts_ms, 0, "missing pull_ts_ms defaults to honest 0");
+        assert_eq!(
+            e.scheduling_class, "sequential",
+            "missing scheduling_class defaults to the historical sequential"
+        );
+        // And the descriptor's dispatch_ts_ms also defaults to 0.
+        assert_eq!(e.descriptor.dispatch_ts_ms, 0);
     }
 }
