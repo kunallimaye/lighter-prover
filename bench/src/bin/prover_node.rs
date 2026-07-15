@@ -52,7 +52,7 @@ use bench::prestate_store::load_prestate_corpus_from_path;
 use bench::transport::{
     CommitOutcome, LocalTransport, Role as WorkRole, WorkLease, WorkTransport,
 };
-use circuit::binary_tree_chain_constraints::BinaryTreeChainCircuit;
+use circuit::binary_tree_chain_constraints::{BinaryTreeChainCircuit, BinaryTreeChainTarget};
 use circuit::block::Block;
 use circuit::block_pre_execution::BlockPreExec;
 use circuit::block_pre_execution_constraints::{BlockPreExecutionCircuit, Circuit as _};
@@ -216,6 +216,12 @@ pub enum Role {
         leaf_count: usize,
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
+        /// Reduction-tree fold strategy (issue #321). `hex` (default) is the
+        /// existing radix-16 hexadecimal fold; `reduction` selects the additive
+        /// same-height radix-2 binary reducer. Phase 2: PLUMBED + stored only —
+        /// dispatch is wired into the fold path in #321 Phases 3-4.
+        #[arg(long, value_enum, default_value_t = FoldStrategy::Hex)]
+        fold_strategy: FoldStrategy,
     },
     /// Harvest and verify the root proof, then report real metrics.
     RootCoordinator {
@@ -340,6 +346,13 @@ pub enum Role {
         /// If absent, prewarming is skipped.
         #[arg(long)]
         prewarm_port: Option<u16>,
+        /// Reduction-tree fold strategy (issue #321). `hex` (default) is the
+        /// existing radix-16 hexadecimal fold; `reduction` selects the additive
+        /// same-height radix-2 binary reducer. Phase 2: PLUMBED + stored only —
+        /// dispatch is wired into the fold path in #321 Phases 3-4; the hex path
+        /// remains the behaviour until then.
+        #[arg(long, value_enum, default_value_t = FoldStrategy::Hex)]
+        fold_strategy: FoldStrategy,
         /// Path to the committed per-tx pre-state corpus (issue #316). Each leaf
         /// reads its chunk's authentic pre-state from this corpus instead of
         /// re-proving every prefix chunk (the O(N²) tail). Falls back to env
@@ -378,6 +391,19 @@ pub enum TransportKind {
     Local,
     /// Production GCP Pub/Sub pull + GCS native-API atomic claim/commit.
     Pubsub,
+}
+
+/// Which reduction-tree fold strategy to use (issue #321). ADDITIVE: `Hex` is the
+/// existing radix-16 hexadecimal fold (unchanged default); `Reduction` selects
+/// the same-height radix-2 binary reducer (issue #321 Phase 2). The flag is
+/// PLUMBED and stored in Phase 2; dispatch is wired into the fold path in
+/// #321 Phases 3-4. Selecting `Reduction` never removes or alters the hex path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum FoldStrategy {
+    /// Radix-16 hexadecimal reduction tree (the existing default fold).
+    Hex,
+    /// Same-height radix-2 binary reducer (issue #321 Phase 2, additive).
+    Reduction,
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -743,6 +769,21 @@ fn leaf_proof_path(idx: usize) -> PathBuf {
 
 fn tree_proof_path(level: usize, node_idx: usize) -> PathBuf {
     Path::new(&proof_dir()).join(format!("tree_L{level}_N{node_idx}.proof"))
+}
+
+/// Filesystem transport path for a level-`level` SAME-HEIGHT binary reduction
+/// node proof (issue #321 Phase 2). Mirrors [`tree_proof_path`] but writes under
+/// a distinct `reduction_*` prefix so the additive reduction path never collides
+/// with the hex fold's `tree_*` proofs (both strategies can materialise proofs in
+/// the same store without clobbering each other). The full interval-descriptor
+/// bookkeeping (which exact proofs map to an interval `[lo, hi)`) is finalized in
+/// #321 Phase 3; for Phase 2 the `idx` is a plain node index within the level.
+// Called by `aggregate_pair` (the Phase-2 building block, exercised by the tests)
+// and wired into TreeNode/Work dispatch in #321 Phase 3. The non-test build has
+// no dispatch call site yet, so gate the transitional dead-code warning here.
+#[cfg_attr(not(test), allow(dead_code))]
+fn reduction_proof_path(level: usize, idx: usize) -> PathBuf {
+    Path::new(&proof_dir()).join(format!("reduction_L{level}_N{idx}.proof"))
 }
 
 fn write_proof(path: &Path, proof: &ProofWithPublicInputs<F, C, D>) {
@@ -1227,6 +1268,86 @@ fn build_node_circuit_for_level(level: usize) -> NodeCircuit {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// Same-height binary reduction node (issue #321 Phase 2)
+//
+// An ADDITIVE alternative to the radix-16 hex fold above. A level-L reduction
+// node folds exactly TWO level-(L-1) children of EQUAL height with the radix-2
+// `BinaryTreeChainCircuit`, mirroring the hex path's VK-chaining (a level-L node
+// pins the level-(L-1) child VK via `constant_verifier_data`). The elegant
+// property of SAME-HEIGHT merging (issue #321 Phase 1, Option (a)): both
+// children are ALWAYS real, so — unlike the hex path — NO padding / base-proof
+// machinery is ever needed. `BinaryTreeChainCircuit::prove(&t,&d,&l,&r)` (which
+// pins `right_is_real = true`) is sufficient at EVERY level.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// A built same-height binary reduction-tree node circuit plus the child circuit
+/// data its two children are pinned to. Analogous to [`NodeCircuit`] but for the
+/// radix-2 [`BinaryTreeChainCircuit`] reducer (issue #321 Phase 2).
+///
+/// `child_data` is retained to expose the pinned child VK (and to keep the shape
+/// identical to [`NodeCircuit`]); `child_is_recursive` records whether the child
+/// is itself a reduction node (level >= 2) or the leaf (level 1). Because
+/// same-height folds have two REAL children at every level, `child_is_recursive`
+/// does NOT select a padding path (there is none) — it is carried for parity
+/// with [`NodeCircuit`] and for diagnostics.
+// Constructed via `build_reduction_node_for_level` / `cached_reduction_node`,
+// exercised by the Phase-2 tests and wired into dispatch in #321 Phases 3-4; the
+// non-test build has no runtime call site yet.
+#[cfg_attr(not(test), allow(dead_code))]
+struct ReductionNodeCircuit {
+    target: BinaryTreeChainTarget<D>,
+    data: CircuitData<F, C, D>,
+    /// The child circuit's data (level-(L-1) reduction node, or the leaf at
+    /// level 1). Its VK is what this node pins via `constant_verifier_data`.
+    child_data: CircuitData<F, C, D>,
+    /// `true` when the child is itself a recursive reduction node (level >= 2).
+    /// Unlike the hex path this does NOT gate padding (same-height folds need
+    /// none); retained for parity with [`NodeCircuit`] and diagnostics.
+    child_is_recursive: bool,
+}
+
+/// Build the level-`level` same-height binary reduction node circuit (issue #321
+/// Phase 2). The circuit at level L is a `BinaryTreeChainCircuit` pinned to the
+/// level-(L-1) circuit's VK — the radix-2 analogue of
+/// [`build_node_circuit_for_level`].
+///
+/// Built bottom-up and deterministically from the leaf circuit definition, so
+/// the VK at every level is identical across processes (a level-L reduction-node
+/// proof written by one process must verify against the level-L circuit rebuilt
+/// by another — the same determinism invariant the hex builder documents). This
+/// is what lets the reduction VKs chain: a level-L node pins the level-(L-1)
+/// node's VK.
+///
+/// `level == 0` is the (non-recursive) leaf circuit itself, the base of the
+/// recursion; callers fold at `level >= 1`.
+// Reached via `cached_reduction_node`, exercised by the Phase-2 tests and wired
+// into dispatch in #321 Phases 3-4; the non-test build has no runtime call site.
+#[cfg_attr(not(test), allow(dead_code))]
+fn build_reduction_node_for_level(level: usize) -> ReductionNodeCircuit {
+    assert!(level >= 1, "reduction node circuits exist at level >= 1");
+
+    // Recurse to obtain the child circuit data. At level 1 the child is the
+    // non-recursive leaf; at level L the child is the level-(L-1) reduction node.
+    let (child_data, child_is_recursive) = if level == 1 {
+        let (leaf_data, _t) = build_batch_leaf_data();
+        (leaf_data, false)
+    } else {
+        let child = build_reduction_node_for_level(level - 1);
+        (child.data, true)
+    };
+
+    let circuit = BinaryTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
+    let target = circuit.target;
+    let data = circuit.builder.build::<C>();
+    ReductionNodeCircuit {
+        target,
+        data,
+        child_data,
+        child_is_recursive,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Circuit artifact registry (issue #322, Phase A — in-process retention)
 //
 // PROBLEM. Before this registry, every task rebuilt its `CircuitData` from
@@ -1275,6 +1396,16 @@ enum CircuitKey {
     /// level memoizes the whole recursive chain (a cached level-(L-1) is reused
     /// when building level-L).
     Node { level: usize },
+    /// The level-`level` SAME-HEIGHT binary reduction node (issue #321 Phase 2):
+    /// a radix-2 `BinaryTreeChainCircuit` chain that folds exactly TWO
+    /// level-(L-1) children of EQUAL height. Distinct from [`CircuitKey::Node`]
+    /// (the radix-16 hex fold) and keyed by level so
+    /// `build_reduction_node_for_level` memoizes the whole recursive chain the
+    /// same way [`CircuitKey::Node`] does for the hex path.
+    // Keys the reduction cache; exercised by the Phase-2 tests and wired into
+    // dispatch in #321 Phases 3-4 (no runtime construction in the non-test build).
+    #[cfg_attr(not(test), allow(dead_code))]
+    ReductionNode { level: usize },
 }
 
 /// A built `BlockPreExecutionCircuit`: its data plus the target needed to prove.
@@ -1309,6 +1440,17 @@ fn leaf_cache() -> &'static Mutex<HashMap<CircuitKey, &'static LeafCircuitEntry>
 }
 fn node_cache() -> &'static Mutex<HashMap<CircuitKey, &'static NodeCircuit>> {
     static C: OnceLock<Mutex<HashMap<CircuitKey, &'static NodeCircuit>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// Cache for the same-height binary reduction node circuits (issue #321 Phase 2),
+/// keyed by [`CircuitKey::ReductionNode`]. Structurally identical to
+/// [`node_cache`] (the hex path) so the two fold strategies coexist without
+/// sharing (or clobbering) each other's retained artifacts.
+// Reached via `cached_reduction_node`, exercised by the Phase-2 tests and wired
+// into dispatch in #321 Phases 3-4; the non-test build has no runtime call site.
+#[cfg_attr(not(test), allow(dead_code))]
+fn reduction_node_cache() -> &'static Mutex<HashMap<CircuitKey, &'static ReductionNodeCircuit>> {
+    static C: OnceLock<Mutex<HashMap<CircuitKey, &'static ReductionNodeCircuit>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
 }
 /// Minted recursive base proofs, retained by the `level` they are a base proof OF
@@ -1407,6 +1549,33 @@ fn cached_node_circuit(level: usize) -> &'static NodeCircuit {
     }
     let node = build_node_circuit_for_level(level);
     let leaked: &'static NodeCircuit = Box::leak(Box::new(node));
+    guard.insert(key, leaked);
+    leaked
+}
+
+/// Get (building once) the shared level-`level` same-height binary reduction node
+/// circuit (issue #321 Phase 2). EXACTLY replicates the [`cached_node_circuit`]
+/// pattern (double-checked lock + `Box::leak`), keyed by
+/// [`CircuitKey::ReductionNode`] against its own [`reduction_node_cache`].
+///
+/// Memoizes the whole recursive chain: `build_reduction_node_for_level` recurses
+/// to level 1, so caching by level means a cached level-(L-1) chain is not
+/// rebuilt when a caller asks for level L. Exactly one build per level per
+/// process lifetime — the leaked reference is stable and there is no leak growth.
+// Exercised by the Phase-2 tests and wired into TreeNode/Work dispatch in #321
+// Phases 3-4; the non-test build has no runtime call site yet.
+#[cfg_attr(not(test), allow(dead_code))]
+fn cached_reduction_node(level: usize) -> &'static ReductionNodeCircuit {
+    let key = CircuitKey::ReductionNode { level };
+    if let Some(c) = reduction_node_cache().lock().unwrap().get(&key) {
+        return c;
+    }
+    let mut guard = reduction_node_cache().lock().unwrap();
+    if let Some(c) = guard.get(&key) {
+        return c;
+    }
+    let node = build_reduction_node_for_level(level);
+    let leaked: &'static ReductionNodeCircuit = Box::leak(Box::new(node));
     guard.insert(key, leaked);
     leaked
 }
@@ -1801,6 +1970,69 @@ fn aggregate_node(
     parent
 }
 
+/// Fold two ADJACENT same-height children into a level-`level` parent proof via
+/// the same-height binary reducer (issue #321 Phase 2).
+///
+/// This is the Phase-2 building block of the additive reduction path. The two
+/// children have EQUAL height (the defining property of Option (a) same-height
+/// merging), so both are always REAL and NO padding / base-proof machinery is
+/// needed — the same `BinaryTreeChainCircuit::prove(&t,&d,&l,&r)` call (which
+/// pins `right_is_real = true`) works at EVERY level, whether the children are
+/// non-recursive leaf proofs (level 1) or recursive reduction-node proofs
+/// (level >= 2). This is the elegant property confirmed against
+/// `BinaryTreeChainCircuit::{define, prove}`: two real children fold with a
+/// single seam continuity assert and no dummy proof.
+///
+/// # Child-path mapping (Phase 2 placeholder; finalized in Phase 3)
+///
+/// `lo` and `hi` name the two adjacent children's node indices at the CHILD
+/// level (level-(`level`-1); level 0 == the leaves). At level 1 the children are
+/// leaf proofs ([`leaf_proof_path`]); at level >= 2 they are level-(`level`-1)
+/// reduction-node proofs ([`reduction_proof_path`]). The precise interval → file
+/// mapping (interval descriptors) lands in #321 Phase 3; here `lo`/`hi` are read
+/// directly as the left/right child indices, which is a simple, correct mapping
+/// for a same-height pairwise fold (`lo = 2*node_idx`, `hi = 2*node_idx + 1`).
+// Wired into TreeNode/Work dispatch in #321 Phases 3-4; exercised by the Phase-2
+// tests. The non-test build has no dispatch call site yet.
+#[cfg_attr(not(test), allow(dead_code))]
+fn aggregate_pair(
+    level: usize,
+    lo: usize,
+    hi: usize,
+    timing: &mut TimingTree,
+) -> ProofWithPublicInputs<F, C, D> {
+    assert!(level >= 1, "reduction levels are 1-indexed");
+
+    // Reuse the cached level-`level` reduction node circuit (pinned to the
+    // level-(L-1) child VK).
+    let node = cached_reduction_node(level);
+
+    // Read the LEFT and RIGHT child proofs from the filesystem transport. At
+    // level 1 the children are leaf proofs; at level >= 2 they are level-(L-1)
+    // reduction-node proofs. Both are REAL (same-height fold), so there is no
+    // padding slot to read.
+    let (left_path, right_path) = if level == 1 {
+        (leaf_proof_path(lo), leaf_proof_path(hi))
+    } else {
+        (
+            reduction_proof_path(level - 1, lo),
+            reduction_proof_path(level - 1, hi),
+        )
+    };
+    let left = read_proof(&left_path);
+    let right = read_proof(&right_path);
+
+    timing.push("reduction_pair_aggregation", Level::Info);
+    // Same call at every level: both children real, no padding proof. This holds
+    // for recursive (level >= 2) children too — the child VK is pinned in
+    // `define` and both proofs verify against it; `prove` sets `right_is_real =
+    // true` and folds with the single seam assert.
+    let parent = BinaryTreeChainCircuit::prove(&node.target, &node.data, &left, &right)
+        .expect("same-height binary reduction fold failed to prove");
+    timing.pop();
+    parent
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Fungible role-per-message dispatch loop
 //
@@ -2121,13 +2353,17 @@ fn main() {
             radix,
             leaf_count,
             tx_per_proof,
+            fold_strategy,
         } => {
             let depth = tree_depth(leaf_count, radix);
             let node_count = nodes_at_level(leaf_count, radix, level);
+            // Issue #321 Phase 2: the strategy flag is PLUMBED + logged here;
+            // dispatch into the reduction path is wired in Phases 3-4. Until then
+            // TreeNode always uses the hex fold below regardless of the flag.
             info!(
                 "Tree node: aggregating level {level}/{depth} node {node_idx} \
-                 (radix {radix}, N={leaf_count}, {node_count} node(s) at this level) \
-                 by folding child proofs read from {PROOF_DIR}/"
+                 (radix {radix}, N={leaf_count}, {node_count} node(s) at this level, \
+                 fold-strategy={fold_strategy:?}) by folding child proofs read from {PROOF_DIR}/"
             );
 
             // `aggregate_node` refuses genuinely-unimplementable cases (level
@@ -2271,7 +2507,13 @@ fn main() {
             event_topic,
             prewarm_port,
             prestate_corpus_path: prestate_corpus_path_arg,
+            fold_strategy,
         } => {
+            // Issue #321 Phase 2: the fold-strategy flag is PLUMBED + stored here
+            // (echoed for operator visibility); dispatch into the reduction path
+            // is wired in Phases 3-4. Until then the hex fold governs regardless.
+            info!("[fold] strategy={fold_strategy:?} (hex fold active until #321 Phases 3-4)");
+
             // Wire the pre-state corpus path (issue #316) into the process-global
             // override the deep leaf-proving path reads, BEFORE any work runs. A
             // `None` flag leaves the env / bundled-default resolution in place.
@@ -4023,5 +4265,239 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
         set_circuit_artifact_dir(None);
+    }
+
+    // ── Same-height binary reduction (#321 Phase 2) ──────────────────────────
+
+    /// The reduction node registry retains circuits by level and reuses them by
+    /// pointer, and distinct levels are distinct artifacts — the radix-2 analogue
+    /// of `registry_reuses_node_circuit_by_pointer` for the hex path.
+    #[test]
+    fn reduction_node_reuses_by_pointer() {
+        let a = cached_reduction_node(1);
+        let b = cached_reduction_node(1);
+        assert!(
+            std::ptr::eq(a, b),
+            "cached_reduction_node must return the same retained artifact per level"
+        );
+        // Distinct levels are distinct artifacts.
+        let l2 = cached_reduction_node(2);
+        assert!(
+            !std::ptr::eq(a as *const ReductionNodeCircuit, l2 as *const ReductionNodeCircuit),
+            "different reduction levels must be distinct retained artifacts"
+        );
+        // The reduction cache must not populate (or be populated by) the hex node
+        // cache — the two strategies are independent (additive).
+        assert!(
+            !reduction_node_cache()
+                .lock()
+                .unwrap()
+                .contains_key(&CircuitKey::Node { level: 1 }),
+            "reduction cache must be keyed only by ReductionNode, never by Node"
+        );
+
+        // Level 1 folds the (non-recursive) leaf; level 2 folds a recursive
+        // level-1 reduction node. The pinned child VK must chain accordingly:
+        // level 2's child is level 1's own circuit.
+        assert!(
+            !a.child_is_recursive,
+            "level-1 reduction node's child is the non-recursive leaf"
+        );
+        assert!(
+            l2.child_is_recursive,
+            "level-2 reduction node's child is a recursive level-1 reduction node"
+        );
+        assert_eq!(
+            l2.child_data.verifier_only.circuit_digest,
+            a.data.verifier_only.circuit_digest,
+            "level-2's pinned child VK must equal level-1's own VK (chaining)"
+        );
+    }
+
+    /// A chained leaf batch spanning block `n`: `old_root -> new_root`, one tx.
+    /// Mirrors the `chained_batch` helper in
+    /// `binary_tree_chain_constraints::tests` so adjacency continuity holds when
+    /// folded (left.new_state_root == right.old_state_root).
+    fn chained_batch(block_number: u64, old_root: u64, new_root: u64) -> Batch<F> {
+        use plonky2::field::types::Field;
+        use plonky2::hash::hash_types::HashOut;
+        Batch::<F> {
+            end_block_number: block_number,
+            batch_size: 1,
+            first_created_at: 100 + block_number as i64,
+            last_created_at: 100 + block_number as i64,
+            old_state_root: HashOut::from([F::from_canonical_u64(old_root); 4]),
+            new_state_root: HashOut::from([F::from_canonical_u64(new_root); 4]),
+            ..Batch::<F>::default()
+        }
+    }
+
+    /// EQUIVALENCE (the important test): fold the SAME four adjacent leaf batches
+    /// two ways and assert the root aggregate is IDENTICAL.
+    ///
+    /// * Binary reduction (#321 Phase 2): pair-fold [0,1]→A and [2,3]→B at level
+    ///   1, then [A,B]→root at level 2, each via `BinaryTreeChainCircuit::prove`
+    ///   with TWO REAL children and NO padding.
+    /// * Hex fold (existing path): a single level-1 `HexadecimalTreeChainCircuit`
+    ///   node folding all four real leaf children at once (`padding_proof =
+    ///   None`).
+    ///
+    /// Associativity of `fold_consecutive` means both roots must carry the same
+    /// aggregate: `old_state_root` from leaf 0, `new_state_root` from leaf 3,
+    /// `batch_size == 4`. This also confirms the KEY design property: the binary
+    /// reduction needs NO padding/base-proof machinery at ANY level — both
+    /// children are always real, so the plain `prove(&t,&d,&l,&r)` call suffices
+    /// for the recursive level-2 fold too.
+    ///
+    /// Requires a large stack (recursive proving): run with
+    /// `RUST_MIN_STACK=4294967296 cargo test ... -- --test-threads=1`.
+    #[test]
+    fn hex_and_binary_reduction_agree_on_root() {
+        use circuit::recursion::batch::BATCH_TARGET_INDEX;
+
+        // Four adjacent chained leaf batches: 10->20->30->40->50.
+        let b0 = chained_batch(1, 10, 20);
+        let b1 = chained_batch(2, 20, 30);
+        let b2 = chained_batch(3, 30, 40);
+        let b3 = chained_batch(4, 40, 50);
+
+        // Prove each as a BatchTarget-shaped leaf against the SAME leaf VK (the
+        // VK both fold paths pin as their child).
+        let p0 = prove_batch_leaf(&b0);
+        let p1 = prove_batch_leaf(&b1);
+        let p2 = prove_batch_leaf(&b2);
+        let p3 = prove_batch_leaf(&b3);
+
+        // ── Binary reduction path (#321 Phase 2) ──
+        let red_l1 = cached_reduction_node(1);
+        let a = BinaryTreeChainCircuit::prove(&red_l1.target, &red_l1.data, &p0, &p1)
+            .expect("level-1 pair [0,1] must fold");
+        let b = BinaryTreeChainCircuit::prove(&red_l1.target, &red_l1.data, &p2, &p3)
+            .expect("level-1 pair [2,3] must fold");
+        // Level-2 fold of two RECURSIVE reduction-node children — still both real,
+        // still NO padding proof: the same `prove(&t,&d,&l,&r)` call works.
+        let red_l2 = cached_reduction_node(2);
+        let red_root = BinaryTreeChainCircuit::prove(&red_l2.target, &red_l2.data, &a, &b)
+            .expect("level-2 recursive fold must prove with two real children (no padding)");
+        let red_batch =
+            Batch::<F>::from_public_inputs(&red_root.public_inputs[..BATCH_TARGET_INDEX]);
+
+        // ── Hex fold path (existing) ──
+        let hex_l1 = cached_node_circuit(1);
+        let hex_root = HexadecimalTreeChainCircuit::prove(
+            &hex_l1.target,
+            &hex_l1.data,
+            &[p0.clone(), p1.clone(), p2.clone(), p3.clone()],
+            &hex_l1.child_data,
+            None, // level-1 leaf children => dummy_proof padding for empty slots
+        )
+        .expect("hex level-1 fold of 4 real leaves must prove");
+        let hex_batch =
+            Batch::<F>::from_public_inputs(&hex_root.public_inputs[..BATCH_TARGET_INDEX]);
+
+        // Both roots must carry the IDENTICAL aggregate.
+        assert_eq!(
+            red_batch.old_state_root, hex_batch.old_state_root,
+            "reduction vs hex: old_state_root must match (both from leaf 0)"
+        );
+        assert_eq!(
+            red_batch.new_state_root, hex_batch.new_state_root,
+            "reduction vs hex: new_state_root must match (both from leaf 3)"
+        );
+        assert_eq!(
+            red_batch.batch_size, hex_batch.batch_size,
+            "reduction vs hex: batch_size must match (sum of all four)"
+        );
+        assert_eq!(
+            red_batch.end_block_number, hex_batch.end_block_number,
+            "reduction vs hex: end_block_number must match (from leaf 3)"
+        );
+
+        // And the reduction root must equal the host-side expected fold of the
+        // four inputs (old_root from leaf 0, new_root from leaf 3, size = 4).
+        use plonky2::field::types::Field;
+        use plonky2::hash::hash_types::HashOut;
+        assert_eq!(
+            red_batch.old_state_root,
+            HashOut::from([F::from_canonical_u64(10); 4]),
+            "reduction root old_state_root must be leaf 0's old_state_root"
+        );
+        assert_eq!(
+            red_batch.new_state_root,
+            HashOut::from([F::from_canonical_u64(50); 4]),
+            "reduction root new_state_root must be leaf 3's new_state_root"
+        );
+        assert_eq!(
+            red_batch.batch_size, 4,
+            "reduction root batch_size must be the sum of the four leaf batch sizes"
+        );
+    }
+
+    /// Exercise the Phase-2 building block `aggregate_pair` end-to-end over the
+    /// filesystem transport (the same read/fold path #321 Phases 3-4 will drive):
+    /// prove two adjacent leaves, materialise them as `leaf_{i}.proof`, fold them
+    /// with `aggregate_pair(level=1, ...)`, write the parent via
+    /// `reduction_proof_path`, then fold that single parent again at level 2 to
+    /// confirm the recursive read path (`reduction_proof_path(level-1, ..)`) and
+    /// the recursive fold both work with two real children and no padding.
+    ///
+    /// Runs under a per-process temp proof dir so it never collides with other
+    /// tests or a real run. Requires a large stack; run with
+    /// `RUST_MIN_STACK=4294967296 cargo test ... -- --test-threads=1`.
+    #[test]
+    fn aggregate_pair_folds_via_transport() {
+        use circuit::recursion::batch::BATCH_TARGET_INDEX;
+
+        // Isolate the transport under a unique temp dir.
+        let tmp = std::env::temp_dir()
+            .join(format!("lighter-reduction-agg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        set_proof_dir(Some(tmp.to_string_lossy().to_string()));
+
+        let mut timing = TimingTree::new("aggregate_pair_test", log::Level::Debug);
+
+        // Two adjacent leaves 10->20, 20->30 written to the transport.
+        write_proof(&leaf_proof_path(0), &prove_batch_leaf(&chained_batch(1, 10, 20)));
+        write_proof(&leaf_proof_path(1), &prove_batch_leaf(&chained_batch(2, 20, 30)));
+
+        // Level-1 fold of the two leaf proofs, persisted via reduction_proof_path.
+        let l1 = aggregate_pair(1, 0, 1, &mut timing);
+        write_proof(&reduction_proof_path(1, 0), &l1);
+
+        // To exercise the recursive (level-2) read+fold with two REAL children,
+        // materialise a second level-1 parent (fold the same pair again — a
+        // distinct interval in Phase 3; here it only needs to be a real,
+        // VK-matching level-1 reduction proof) and fold the two at level 2.
+        write_proof(&leaf_proof_path(2), &prove_batch_leaf(&chained_batch(3, 30, 40)));
+        write_proof(&leaf_proof_path(3), &prove_batch_leaf(&chained_batch(4, 40, 50)));
+        let l1_right = aggregate_pair(1, 2, 3, &mut timing);
+        write_proof(&reduction_proof_path(1, 1), &l1_right);
+
+        // Level-2 fold reads the two level-1 reduction proofs from the transport.
+        let root = aggregate_pair(2, 0, 1, &mut timing);
+        let root_batch =
+            Batch::<F>::from_public_inputs(&root.public_inputs[..BATCH_TARGET_INDEX]);
+
+        use plonky2::field::types::Field;
+        use plonky2::hash::hash_types::HashOut;
+        assert_eq!(
+            root_batch.old_state_root,
+            HashOut::from([F::from_canonical_u64(10); 4]),
+            "transport-folded root old_state_root must be leaf 0's"
+        );
+        assert_eq!(
+            root_batch.new_state_root,
+            HashOut::from([F::from_canonical_u64(50); 4]),
+            "transport-folded root new_state_root must be leaf 3's"
+        );
+        assert_eq!(
+            root_batch.batch_size, 4,
+            "transport-folded root batch_size must be the sum of all four leaves"
+        );
+
+        // Restore default resolution and clean up.
+        set_proof_dir(None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
