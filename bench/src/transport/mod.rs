@@ -973,6 +973,34 @@ pub fn tree_depth(n: usize, radix: usize) -> usize {
     depth
 }
 
+/// (#321 Phase 9) The object-store key the order-free REDUCTION pipeline commits
+/// its single ROOT proof under, for a run with `leaf_count` real leaves N.
+///
+/// CORRECTNESS-CRITICAL — this must equal EXACTLY the key the pipeline actually
+/// writes as the root, so a worker/coordinator waiting on it wakes on the real
+/// completion (not a key that never appears ⇒ guaranteed timeout, the attempt-46
+/// failure mode). Derived from the gate, not assumed:
+///   * [`GatingEngine::on_interval_committed`](gating::GatingEngine::on_interval_committed)
+///     declares `RootReached` when a committed interval satisfies
+///     `lo == 0 && hi == padded_leaf_count(N) - 1` — i.e. the root interval is
+///     `[0, padded-1]` over the PADDED perfect binary tree
+///     (`padded = padded_leaf_count(N) = N.next_power_of_two()`, with N∈{0,1}→1).
+///   * The gate publishes that final merge as
+///     `WorkDescriptor::reduction_fold(0, padded-1, ..)`, whose
+///     [`output_key`](WorkDescriptor::output_key) is `reduction_{lo}_{hi}.proof`.
+/// Therefore the reduction root key is `reduction_0_{padded-1}.proof`. This is
+/// asserted against both facts in the unit tests so it can never silently drift
+/// from the interval the gate treats as the root.
+///
+/// Contrast the HEX path, whose root key is `tree_L{depth}_N0.proof`
+/// (unchanged). Callers pick by `fold_strategy`.
+pub fn reduction_root_key(leaf_count: usize) -> String {
+    let padded = gating::padded_leaf_count(leaf_count);
+    // The single root interval spans [0, padded-1]; matches
+    // `WorkDescriptor::reduction_fold(0, padded-1, ..).output_key()`.
+    format!("reduction_0_{}.proof", padded - 1)
+}
+
 /// Number of nodes at `level` (>= 1): `ceil(n / radix^level)`, min 1.
 pub fn nodes_at_level(n: usize, radix: usize, level: usize) -> usize {
     assert!(level >= 1, "tree levels are 1-indexed");
@@ -1217,7 +1245,9 @@ fn reverse_bits(value: usize, bits: u32) -> usize {
 
 // Re-export the backend-agnostic CAS + gating primitives so callers and the
 // production backend can `use bench::transport::{ObjectStore, GatingEngine, ...}`.
-pub use gating::{CasStore, GatingEngine, GatingOutcome, InMemoryCasStore, Publisher};
+pub use gating::{
+    padded_leaf_count, CasStore, GatingEngine, GatingOutcome, InMemoryCasStore, Publisher,
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tests
@@ -1303,6 +1333,79 @@ mod tests {
         let back: WorkDescriptor = serde_json::from_str(&s).unwrap();
         assert_eq!(d, back);
         assert_eq!(back.output_key(), "reduction_4_7.proof");
+    }
+
+    /// (#321 Phase 9) `reduction_root_key(N)` must return the EXACT key the
+    /// pipeline commits as the root: `reduction_0_{padded-1}.proof` where
+    /// `padded = padded_leaf_count(N) = N.next_power_of_two()` (N∈{0,1}→1). This
+    /// is the fix for the attempt-46 GKE failure where the worker/coordinator
+    /// waited on the never-appearing hex key. Table-driven for the spec'd N.
+    #[test]
+    fn reduction_root_key_matches_padded_spanning_interval() {
+        // (N, expected padded, expected key).
+        let cases = [
+            (1usize, 1usize, "reduction_0_0.proof"),
+            (2, 2, "reduction_0_1.proof"),
+            (4, 4, "reduction_0_3.proof"),
+            (5, 8, "reduction_0_7.proof"),
+            (8, 8, "reduction_0_7.proof"),
+            (125, 128, "reduction_0_127.proof"),
+            (500, 512, "reduction_0_511.proof"),
+        ];
+        for (n, expected_padded, expected_key) in cases {
+            assert_eq!(
+                padded_leaf_count(n),
+                expected_padded,
+                "padded_leaf_count({n}) must be {expected_padded}"
+            );
+            assert_eq!(
+                reduction_root_key(n),
+                expected_key,
+                "reduction_root_key({n}) must be {expected_key}"
+            );
+        }
+    }
+
+    /// (#321 Phase 9) CORRECTNESS CRUX: `reduction_root_key(N)` must equal the
+    /// output key of the reduction fold the gate publishes as the ROOT — the merge
+    /// whose interval is `[0, padded-1]`, which `on_interval_committed` treats as
+    /// `RootReached` (`lo == 0 && hi == padded - 1`). We derive the key from BOTH
+    /// the descriptor's own `output_key()` and the gate's root-interval contract,
+    /// so `reduction_root_key` can never silently drift from what the pipeline
+    /// actually writes.
+    #[test]
+    fn reduction_root_key_equals_root_fold_output_key() {
+        for n in [2usize, 5, 8, 125, 500] {
+            let padded = padded_leaf_count(n);
+            // The root fold spans the padded tree [0, padded-1] at the top level.
+            // (level is not part of output_key, so any level yields the same key.)
+            let root_level = padded.trailing_zeros() as usize;
+            let root_fold = WorkDescriptor::reduction_fold(0, padded - 1, root_level, 2, n, 1);
+            assert_eq!(
+                reduction_root_key(n),
+                root_fold.output_key(),
+                "reduction_root_key({n}) must equal the root reduction_fold output_key"
+            );
+            // Cross-check the gate's RootReached predicate: the root interval is
+            // [0, padded-1]. Any other hi (e.g. [0, N-1] when N is not a power of
+            // two) is NOT the root and would be the wrong key to wait on.
+            assert_eq!(root_fold.lo, 0);
+            assert_eq!(root_fold.hi, padded - 1);
+        }
+    }
+
+    /// (#321 Phase 9) The HEX root key path is UNCHANGED: it is still
+    /// `tree_L{depth}_N0.proof`, distinct from any reduction key, so opting out to
+    /// hex keeps the legacy completion semantics exactly.
+    #[test]
+    fn hex_root_key_unchanged_and_distinct_from_reduction() {
+        // Hex root key is the top hex node's output key.
+        let depth = tree_depth(500, 16).max(1); // 500 leaves, radix 16 → depth 3
+        let hex_root = WorkDescriptor::tree_node(depth, 0, 16, 500, 1);
+        assert_eq!(hex_root.output_key(), format!("tree_L{depth}_N0.proof"));
+        // It must NEVER coincide with the reduction root key — mixing them is the
+        // exact bug this phase fixes.
+        assert_ne!(hex_root.output_key(), reduction_root_key(500));
     }
 
     #[test]

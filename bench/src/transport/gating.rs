@@ -162,6 +162,22 @@ pub struct GatingEngine<'a, S: CasStore, P: Publisher> {
     publisher: &'a P,
 }
 
+/// Smallest power of two >= `n` (with `pad(0)=pad(1)=1`). The padded leaf count
+/// P for the padded perfect binary reduction tree: real leaves are `[0, n)`,
+/// padding leaves `[n, P)`. Free function so both the generic
+/// [`GatingEngine::padded_leaf_count`] AND non-generic callers
+/// ([`crate::transport::reduction_root_key`]) share ONE definition of padding —
+/// the root interval `[0, P-1]` (which `on_interval_committed` treats as
+/// `RootReached`) is thus computed identically everywhere.
+pub fn padded_leaf_count(n: usize) -> usize {
+    if n == 0 {
+        1
+    } else {
+        // Smallest power of two >= n: 2->2, 4->4, 5->8, 125->128, 500->512.
+        n.next_power_of_two()
+    }
+}
+
 /// The explicit, inspectable pairing of a same-height interval in the padded
 /// perfect binary reduction tree (issue #321 Phase 4). Given any interval you
 /// can print exactly who its partner is, whether it owns the merge, and the
@@ -324,14 +340,12 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
     // ─────────────────────────────────────────────────────────────────────
 
     /// Smallest power of two >= `n` (with `pad(0)=pad(1)=1`). The padded leaf
-    /// count P: real leaves are `[0, n)`, padding leaves `[n, P)`.
+    /// count P: real leaves are `[0, n)`, padding leaves `[n, P)`. Delegates to
+    /// the free [`padded_leaf_count`] so non-generic callers (e.g.
+    /// [`crate::transport::reduction_root_key`]) can reuse the SAME padding logic
+    /// without naming the generic `GatingEngine` type parameters.
     pub fn padded_leaf_count(n: usize) -> usize {
-        if n == 0 {
-            1
-        } else {
-            // Smallest power of two >= n: 2->2, 4->4, 5->8, 125->128, 500->512.
-            n.next_power_of_two()
-        }
+        padded_leaf_count(n)
     }
 
     /// Marker recording that the interval `[lo, hi]` has committed.

@@ -866,7 +866,13 @@ _cloud_gke_bench_arch() {
 cloud_gke_bench() {
   local arch="all"
   local blocks="${BLOCKS:-2}"
-  local chunk="${CHUNK:-1}"
+  # (#321 Phase 9) GKE bench DEFAULT chunk size = 4 (was 1). C=4 gives 125 leaves
+  # for the 500-tx benchmark block vs 500 leaves at C=1; the attempt-45/46 GKE
+  # runs used C=1 and hit a leaf-count explosion (Phase-1 sizing analysis: C=4 is
+  # far better). Scoped to the GKE bench path only — the Makefile passes
+  # `--chunk=$(GKE_CHUNK)` (default 4); an explicit `--chunk=`/`CHUNK=` still
+  # overrides. Prefer GKE_CHUNK, then CHUNK, then 4.
+  local chunk="${GKE_CHUNK:-${CHUNK:-4}}"
   local image="default"
   local benchmark_id="${BENCHMARK_ID:-}"
   local radix="${RADIX:-2}"

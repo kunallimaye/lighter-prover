@@ -20,6 +20,14 @@ cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via
 
 JOBS ?= 1
 CHUNK ?= 1
+# (#321 Phase 9) DEFAULT chunk size for the GKE bench path specifically. C=4
+# (125 leaves for the 500-tx block) massively outperforms C=1 (500 leaves): the
+# attempt-45/46 GKE runs used C=1 and suffered a leaf-count explosion (the
+# Phase-1 sizing analysis showed C=4 is far better). Scoped to `cloud-gke-bench`
+# only — the other cloud paths (cloud-bench-run / cloud-run-distributed-cluster)
+# keep the C=1 default, and the local `test-distributed-fast` harness sets its
+# own C independently in container.sh. Override with `GKE_CHUNK=<n>`.
+GKE_CHUNK ?= 4
 BLOCKS ?= 2
 ENGINE ?= gke
 ARCH ?= c3d
@@ -39,7 +47,7 @@ cloud-gke-provision: ## Provision GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/a
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-provision --arch=$(GKE_ARCH)
 
 cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 FOLD_STRATEGY=reduction|hex)
-	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --benchmark-id=$(BENCHMARK_ID)
+	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(GKE_CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --benchmark-id=$(BENCHMARK_ID)
 
 cloud-gke-destroy: ## Tear down GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-destroy --arch=$(GKE_ARCH)

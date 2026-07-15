@@ -159,8 +159,24 @@ resource "google_pubsub_subscription" "agg_sub" {
 
   ack_deadline_seconds = 180
 
-  # Route folding tasks (both L1 folds and the L2 root fold) here
-  filter = "attributes.role = \"tree-node\""
+  # Route ALL folding tasks here, for BOTH fold strategies:
+  #   * hex fold descriptors carry attributes.role = "tree-node"
+  #     (Role::TreeNode.as_str()); and
+  #   * (#321 Phase 9) order-free REDUCTION fold descriptors carry
+  #     attributes.role = "reduction-fold" (Role::ReductionFold.as_str()).
+  # BUG B1: this filter previously matched only "tree-node", so reduction folds
+  # (the DEFAULT GKE strategy since #321 Phase 8) matched NEITHER this sub NOR
+  # the leaf sub and were silently dropped — workers stalled and no root was ever
+  # produced (the attempt-46 GKE failure). Both role names must be accepted.
+  #
+  # OPERATOR CAVEAT — Pub/Sub subscription filters are IMMUTABLE after creation.
+  # Changing this string forces Terraform to REPLACE (destroy + recreate) the
+  # subscription. A run against a PRE-EXISTING subscription that still carries the
+  # OLD "tree-node"-only filter will KEEP dropping reduction folds — so a GKE
+  # reduction run MUST use a subscription created (or replaced) with this updated
+  # filter. Verify with `terraform plan` that `agg_sub` is being replaced, not
+  # left in place, before the next reduction run.
+  filter = "attributes.role = \"tree-node\" OR attributes.role = \"reduction-fold\""
 
   retain_acked_messages = true
   message_retention_duration = "86400s"
