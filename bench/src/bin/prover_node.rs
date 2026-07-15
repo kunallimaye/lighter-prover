@@ -241,6 +241,16 @@ pub enum Role {
         node_idx: usize,
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
+        /// Reduction-tree fold strategy (issue #321 Phase 9). `reduction`
+        /// (default, matching the seeder/`work` pool default) harvests the
+        /// order-free reduction root committed under `reduction_0_{padded-1}.proof`
+        /// (interval [0, padded-1], the key the gate treats as `RootReached`) and
+        /// verifies it against the level-`log2(padded)` reduction-node VK; `hex`
+        /// is the explicit opt-out that harvests the legacy `tree_L{depth}_N0.proof`
+        /// hex root. Waiting on / harvesting the WRONG key never completes — this
+        /// flag makes the coordinator wait for the SAME key the pipeline commits.
+        #[arg(long, value_enum, default_value_t = FoldStrategy::Reduction)]
+        fold_strategy: FoldStrategy,
     },
     /// Fungible role-per-message dispatch loop over a work transport.
     ///
@@ -2218,11 +2228,21 @@ fn worker_identity() -> String {
 /// (SIGTERM) before the root existed — in which case remaining work stays on the
 /// queue for another worker and NO root is fabricated. See
 /// [`bench::shutdown`] for the drain contract.
+#[allow(clippy::too_many_arguments)]
 fn run_dispatch_loop<T: WorkTransport>(
     transport: &T,
     radix: usize,
     leaf_count: usize,
     tx_per_proof: usize,
+    // (#321 Phase 9) Which fold strategy this run drives. The loop is otherwise a
+    // pure consumer of whatever the seeder queued, but it MUST wait for + harvest
+    // the RIGHT root key: the reduction pipeline commits its root under
+    // `reduction_0_{padded-1}.proof` (interval [0, padded-1], the key
+    // `on_interval_committed` treats as `RootReached`), while the legacy hex path
+    // commits `tree_L{depth}_N0.proof`. Waiting on the wrong key never wakes ⇒
+    // guaranteed timeout with no root (the attempt-46 GKE failure). See
+    // [`bench::transport::reduction_root_key`].
+    fold_strategy: FoldStrategy,
     // (#321 Phase 6) The seed-ordering strategy this run used, echoed into each
     // completion event's `scheduling_class` so the run self-describes. Does NOT
     // change the loop's behaviour — the loop is a pure consumer of whatever order
@@ -2233,11 +2253,18 @@ fn run_dispatch_loop<T: WorkTransport>(
     use bench::transport::tree_depth as t_depth;
 
     let depth = t_depth(leaf_count, radix).max(1);
-    let root_key = tree_proof_path(depth, 0)
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
+    // The root key the pipeline actually commits, chosen by strategy. Hex is
+    // UNCHANGED (`tree_L{depth}_N0.proof`); reduction waits for the exact key the
+    // gate publishes as the root (`reduction_0_{padded-1}.proof`).
+    let root_key = if fold_strategy.is_reduction() {
+        bench::transport::reduction_root_key(leaf_count)
+    } else {
+        tree_proof_path(depth, 0)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    };
     let worker = worker_identity();
     // `tx_per_proof` is now only relevant to the SEEDER (it goes into the leaf
     // descriptors): the worker loop reads it from each pulled descriptor's
@@ -2528,7 +2555,21 @@ fn run_dispatch_loop<T: WorkTransport>(
         .expect("root output must exist after dispatch loop completes");
     let root_proof: ProofWithPublicInputs<F, C, D> =
         bincode::deserialize(&root_bytes).expect("deserialize root proof");
-    verify_root_proof(&root_proof, depth, radix);
+    // (#321 Phase 9) Verify against the correct circuit VK for the strategy. The
+    // reduction root proof is a level-`root_level` reduction-node proof, where
+    // `root_level = log2(padded_leaf_count(N))` (the reduction root interval
+    // [0, padded-1] has span `padded = 2^root_level`; `aggregate_pair` asserts
+    // `span == 1 << level`). Hex is UNCHANGED: level-`depth` hex node circuit.
+    if fold_strategy.is_reduction() {
+        let padded = bench::transport::padded_leaf_count(leaf_count);
+        let root_level = padded.trailing_zeros() as usize;
+        cached_reduction_node(root_level)
+            .data
+            .verify(root_proof.clone())
+            .expect("Reduction root proof failed cryptographic verification");
+    } else {
+        verify_root_proof(&root_proof, depth, radix);
+    }
     Some(root_proof)
 }
 
@@ -2635,22 +2676,39 @@ fn main() {
             leaf_count,
             node_idx,
             tx_per_proof,
+            fold_strategy,
         } => {
-            // Root level is computed DYNAMICALLY from the actual leaf count N,
-            // not hardcoded to 1. depth = ceil(log_radix(N)); the root is the
-            // single node at that top level.
-            let root_level = tree_depth(leaf_count, radix).max(1);
+            // (#321 Phase 9) The root proof key + verification circuit depend on
+            // the fold strategy. The reduction pipeline commits its root under
+            // `reduction_0_{padded-1}.proof` (interval [0, padded-1], the key the
+            // gate treats as `RootReached`), verified against the
+            // level-`log2(padded)` reduction-node VK. The legacy hex path harvests
+            // the single top hex node `tree_L{depth}_N0.proof`, verified against
+            // the level-`depth` hex node VK (UNCHANGED).
+            let (root_path, root_level) = if fold_strategy.is_reduction() {
+                let padded = bench::transport::padded_leaf_count(leaf_count);
+                let root_level = padded.trailing_zeros() as usize;
+                // Reuse the transport key so the coordinator waits for EXACTLY the
+                // key `on_interval_committed` / `reduction_fold(0, padded-1)` writes.
+                let key = bench::transport::reduction_root_key(leaf_count);
+                (Path::new(&proof_dir()).join(key), root_level)
+            } else {
+                // Hex: depth = ceil(log_radix(N)); root is the single top node.
+                let root_level = tree_depth(leaf_count, radix).max(1);
+                (tree_proof_path(root_level, node_idx), root_level)
+            };
             info!(
-                "Root coordinator: harvesting root proof for block #{block_number} \
-                 (radix {radix}, N={leaf_count}, root_level={root_level}) from {PROOF_DIR}/"
+                "Root coordinator: harvesting {fold_strategy:?} root proof for block \
+                 #{block_number} (radix {radix}, N={leaf_count}, root_level={root_level}, \
+                 key={}) from {PROOF_DIR}/",
+                root_path.display()
             );
 
-            let root_path = tree_proof_path(root_level, node_idx);
             if !root_path.exists() {
                 eprintln!(
-                    "Root proof {} not found (expected the single level-{root_level} node \
-                     for N={leaf_count}, radix={radix}). Run the leaf workers and all \
-                     {root_level} tree level(s) first; refusing to fabricate a root proof \
+                    "Root proof {} not found (expected the {fold_strategy:?} root for \
+                     N={leaf_count}, radix={radix}, root_level={root_level}). Run the leaf \
+                     workers and all fold level(s) first; refusing to fabricate a root proof \
                      or settlement.",
                     root_path.display()
                 );
@@ -2658,12 +2716,18 @@ fn main() {
             }
             let root_proof = read_proof(&root_path);
 
-            // Verify the root proof against the level-`root_level` circuit's VK.
-            // For radix-2 depth-1 the binary circuit was used (back-compat); for
-            // every other shape the dynamic-depth Hex node circuit chain is
-            // rebuilt deterministically to the same VK that produced the proof.
+            // Verify the root proof against the correct VK for the strategy.
+            // Reduction: level-`root_level` reduction-node circuit. Hex: the
+            // radix-2 depth-1 binary circuit (back-compat) or the dynamic-depth
+            // Hex node circuit chain, rebuilt deterministically to the same VK
+            // that produced the proof.
             let verify_start = Instant::now();
-            if radix == 2 && root_level == 1 {
+            if fold_strategy.is_reduction() {
+                cached_reduction_node(root_level)
+                    .data
+                    .verify(root_proof.clone())
+                    .expect("Reduction root proof failed cryptographic verification");
+            } else if radix == 2 && root_level == 1 {
                 // Cached (#322): reuse the binary root circuit.
                 let bin = cached_binary_node_circuit();
                 bin.data
@@ -3029,6 +3093,7 @@ fn run_local_work(
             radix,
             leaf_count,
             tx_per_proof,
+            fold_strategy,
             seed_order.to_scheduling_class(),
             timing,
         )
@@ -3062,10 +3127,16 @@ fn run_local_work(
         use circuit::recursion::batch::BATCH_TARGET_INDEX;
         let root_batch =
             Batch::<F>::from_public_inputs(&root_proof.public_inputs[..BATCH_TARGET_INDEX]);
-        let root_key = tree_proof_path(depth, 0)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        // (#321 Phase 9) Report the key the pipeline actually committed under, by
+        // strategy: reduction → `reduction_0_{padded-1}.proof`, hex unchanged.
+        let root_key = if fold_strategy.is_reduction() {
+            bench::transport::reduction_root_key(leaf_count)
+        } else {
+            tree_proof_path(depth, 0)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
 
         let report = json!({
             "telemetry_event": "FUNGIBLE_DISPATCH_ROOT_VERIFIED",
@@ -3492,6 +3563,7 @@ fn run_pubsub_work(
         radix,
         leaf_count,
         tx_per_proof,
+        fold_strategy,
         seed_order.to_scheduling_class(),
         &mut TimingTree::new("prover_node::pubsub_dispatch", Level::Info),
     )
@@ -3531,8 +3603,13 @@ fn run_pubsub_work(
         "radix": radix,
         "leaf_count": leaf_count,
         "tree_depth": depth,
-        "root_proof_key": tree_proof_path(depth, 0).file_name()
-            .map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        // (#321 Phase 9) The key the pipeline committed under, by strategy.
+        "root_proof_key": if fold_strategy.is_reduction() {
+            bench::transport::reduction_root_key(leaf_count)
+        } else {
+            tree_proof_path(depth, 0).file_name()
+                .map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+        },
         "proof_digest_sha256_8": digest,
         "ack_deadline_secs": transport.ack_deadline_secs(),
         "live_cloud_action_performed": true,
@@ -3818,6 +3895,7 @@ mod tests {
                 2,
                 4,
                 1,
+                FoldStrategy::Reduction,
                 bench::telemetry::SchedulingClass::Sequential,
                 &mut TimingTree::default(),
             );
@@ -3827,6 +3905,7 @@ mod tests {
                 2,
                 4,
                 1,
+                FoldStrategy::Reduction,
                 bench::telemetry::SchedulingClass::Sequential,
                 &mut TimingTree::default(),
             );
