@@ -192,6 +192,12 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
             Role::Leaf => (0usize, child.chunk_idx),
             Role::TreeNode => (child.level, child.node_idx),
             Role::RootCoordinator => return Ok(GatingOutcome::RootReached),
+            // (#321 Phase 3) ReductionFold is gated by the interval-addressed
+            // opportunistic adjacent-pair engine added in Phase 4, not this
+            // fixed-node hex gating. No reduction descriptor is dispatched until
+            // Phase 4 wires `--fold-strategy=reduction` into dispatch, so this
+            // arm is unreached at runtime; treat as a no-op (nothing to gate).
+            Role::ReductionFold => return Ok(GatingOutcome::Recorded { have: 0, needed: 0 }),
         };
 
         let radix = child.radix;

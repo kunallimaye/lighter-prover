@@ -771,19 +771,20 @@ fn tree_proof_path(level: usize, node_idx: usize) -> PathBuf {
     Path::new(&proof_dir()).join(format!("tree_L{level}_N{node_idx}.proof"))
 }
 
-/// Filesystem transport path for a level-`level` SAME-HEIGHT binary reduction
-/// node proof (issue #321 Phase 2). Mirrors [`tree_proof_path`] but writes under
-/// a distinct `reduction_*` prefix so the additive reduction path never collides
-/// with the hex fold's `tree_*` proofs (both strategies can materialise proofs in
-/// the same store without clobbering each other). The full interval-descriptor
-/// bookkeeping (which exact proofs map to an interval `[lo, hi)`) is finalized in
-/// #321 Phase 3; for Phase 2 the `idx` is a plain node index within the level.
-// Called by `aggregate_pair` (the Phase-2 building block, exercised by the tests)
-// and wired into TreeNode/Work dispatch in #321 Phase 3. The non-test build has
-// no dispatch call site yet, so gate the transitional dead-code warning here.
+/// Filesystem transport path for a SAME-HEIGHT binary reduction proof covering
+/// the inclusive leaf interval `[lo, hi]` (issue #321 Phase 3 — INTERVAL
+/// addressing). Writes under a distinct `reduction_*` prefix so the additive
+/// reduction path never collides with the hex fold's `tree_*` proofs. The name
+/// MATCHES [`WorkDescriptor::output_key`] for `Role::ReductionFold`
+/// (`reduction_{lo}_{hi}.proof`) so the transport and role code agree on
+/// locations. A leaf `i` is the interval `[i, i]` (see [`leaf_proof_path`], which
+/// the level-1 fold reads from); every fold output covers `[lo, hi]`.
+// Called by `aggregate_pair`; wired into TreeNode/Work dispatch in #321 Phase 4.
+// The non-test build has no dispatch call site yet, so gate the transitional
+// dead-code warning here.
 #[cfg_attr(not(test), allow(dead_code))]
-fn reduction_proof_path(level: usize, idx: usize) -> PathBuf {
-    Path::new(&proof_dir()).join(format!("reduction_L{level}_N{idx}.proof"))
+fn reduction_proof_path(lo: usize, hi: usize) -> PathBuf {
+    Path::new(&proof_dir()).join(format!("reduction_{lo}_{hi}.proof"))
 }
 
 fn write_proof(path: &Path, proof: &ProofWithPublicInputs<F, C, D>) {
@@ -2002,21 +2003,33 @@ fn aggregate_pair(
     timing: &mut TimingTree,
 ) -> ProofWithPublicInputs<F, C, D> {
     assert!(level >= 1, "reduction levels are 1-indexed");
+    assert!(hi >= lo, "reduction interval [lo, hi] must be non-empty");
+    let span = hi - lo + 1;
+    assert!(
+        span == 1usize << level,
+        "same-height fold: interval [{lo}, {hi}] (span {span}) must be exactly 2^level (2^{level}) \
+         — mixed-height merges are not permitted (issue #321 VK-scheme option a)"
+    );
 
     // Reuse the cached level-`level` reduction node circuit (pinned to the
     // level-(L-1) child VK).
     let node = cached_reduction_node(level);
 
-    // Read the LEFT and RIGHT child proofs from the filesystem transport. At
-    // level 1 the children are leaf proofs; at level >= 2 they are level-(L-1)
-    // reduction-node proofs. Both are REAL (same-height fold), so there is no
-    // padding slot to read.
+    // Split [lo, hi] into its two adjacent same-height child intervals at the
+    // midpoint: left = [lo, mid], right = [mid+1, hi], each of span 2^(level-1).
+    let mid = lo + (span / 2) - 1;
+
+    // Read the LEFT and RIGHT child proofs from the filesystem transport by
+    // INTERVAL. At level 1 the children are single leaves ([lo,lo], [hi,hi] read
+    // from `leaf_proof_path`); at level >= 2 they are level-(L-1) reduction
+    // proofs covering [lo, mid] and [mid+1, hi]. Both are REAL (same-height
+    // fold), so there is no padding slot to read.
     let (left_path, right_path) = if level == 1 {
         (leaf_proof_path(lo), leaf_proof_path(hi))
     } else {
         (
-            reduction_proof_path(level - 1, lo),
-            reduction_proof_path(level - 1, hi),
+            reduction_proof_path(lo, mid),
+            reduction_proof_path(mid + 1, hi),
         )
     };
     let left = read_proof(&left_path);
@@ -2233,6 +2246,22 @@ fn run_dispatch_loop<T: WorkTransport>(
             WorkRole::RootCoordinator => {
                 // Not seeded by this loop (the loop verifies the root itself);
                 // ack and continue if one ever appears.
+                lease.ack();
+                continue;
+            }
+            WorkRole::ReductionFold => {
+                // (#321 Phase 3) The interval-addressed reduction-fold role is
+                // not routed by this loop yet — Phase 4 adds `aggregate_pair`
+                // dispatch + opportunistic adjacent-pair gating. No seeded run
+                // emits a ReductionFold descriptor until then (the
+                // `--fold-strategy` flag defaults to Hex), so this arm is not
+                // reached at runtime; ack defensively and continue rather than
+                // silently drop a lease if one ever appears.
+                info!(
+                    "[dispatch] worker={worker} ReductionFold [{},{}] level {} — reduction \
+                     dispatch lands in #321 Phase 4; acking without folding",
+                    d.lo, d.hi, d.level
+                );
                 lease.ack();
                 continue;
             }
@@ -3419,6 +3448,9 @@ mod tests {
                 Role::Leaf => (0usize, descriptor.chunk_idx),
                 Role::TreeNode => (descriptor.level, descriptor.node_idx),
                 Role::RootCoordinator => return outcome,
+                // (#321 Phase 3) reduction gating is Phase 4; this hex test double
+                // does not gate reduction folds.
+                Role::ReductionFold => return outcome,
             };
             let radix = descriptor.radix;
             let leaf_count = descriptor.leaf_count;
@@ -4457,25 +4489,22 @@ mod tests {
 
         let mut timing = TimingTree::new("aggregate_pair_test", log::Level::Debug);
 
-        // Two adjacent leaves 10->20, 20->30 written to the transport.
+        // Four adjacent leaves 10->20->30->40->50, each the interval [i, i].
         write_proof(&leaf_proof_path(0), &prove_batch_leaf(&chained_batch(1, 10, 20)));
         write_proof(&leaf_proof_path(1), &prove_batch_leaf(&chained_batch(2, 20, 30)));
-
-        // Level-1 fold of the two leaf proofs, persisted via reduction_proof_path.
-        let l1 = aggregate_pair(1, 0, 1, &mut timing);
-        write_proof(&reduction_proof_path(1, 0), &l1);
-
-        // To exercise the recursive (level-2) read+fold with two REAL children,
-        // materialise a second level-1 parent (fold the same pair again — a
-        // distinct interval in Phase 3; here it only needs to be a real,
-        // VK-matching level-1 reduction proof) and fold the two at level 2.
         write_proof(&leaf_proof_path(2), &prove_batch_leaf(&chained_batch(3, 30, 40)));
         write_proof(&leaf_proof_path(3), &prove_batch_leaf(&chained_batch(4, 40, 50)));
-        let l1_right = aggregate_pair(1, 2, 3, &mut timing);
-        write_proof(&reduction_proof_path(1, 1), &l1_right);
 
-        // Level-2 fold reads the two level-1 reduction proofs from the transport.
-        let root = aggregate_pair(2, 0, 1, &mut timing);
+        // Level-1 folds by INTERVAL: [0,1] and [2,3]. Each output is persisted
+        // at reduction_proof_path(lo, hi) == the descriptor's output_key.
+        let l1_left = aggregate_pair(1, 0, 1, &mut timing);
+        write_proof(&reduction_proof_path(0, 1), &l1_left);
+        let l1_right = aggregate_pair(1, 2, 3, &mut timing);
+        write_proof(&reduction_proof_path(2, 3), &l1_right);
+
+        // Level-2 fold of interval [0,3]: reads the two level-1 reduction proofs
+        // [0,1] and [2,3] from the transport (recursive, two REAL children).
+        let root = aggregate_pair(2, 0, 3, &mut timing);
         let root_batch =
             Batch::<F>::from_public_inputs(&root.public_inputs[..BATCH_TARGET_INDEX]);
 
