@@ -217,11 +217,14 @@ pub enum Role {
         leaf_count: usize,
         #[arg(long, default_value_t = 1)]
         tx_per_proof: usize,
-        /// Reduction-tree fold strategy (issue #321). `hex` (default) is the
-        /// existing radix-16 hexadecimal fold; `reduction` selects the additive
-        /// same-height radix-2 binary reducer. Phase 2: PLUMBED + stored only —
-        /// dispatch is wired into the fold path in #321 Phases 3-4.
-        #[arg(long, value_enum, default_value_t = FoldStrategy::Hex)]
+        /// Reduction-tree fold strategy (issue #321). `reduction` (default,
+        /// since #321 Phase 8) selects the additive order-free reducer;
+        /// `hex` is the explicit opt-out radix-16 hexadecimal fold. NOTE:
+        /// `TreeNode` is the OLD per-level HEX CLI path (per-level job
+        /// topology); the reduction path is coordinator+`work`-driven and does
+        /// NOT use per-level `TreeNode` jobs, so this flag only records the
+        /// strategy here — the hex aggregate remains correct for this subcommand.
+        #[arg(long, value_enum, default_value_t = FoldStrategy::Reduction)]
         fold_strategy: FoldStrategy,
     },
     /// Harvest and verify the root proof, then report real metrics.
@@ -347,12 +350,14 @@ pub enum Role {
         /// If absent, prewarming is skipped.
         #[arg(long)]
         prewarm_port: Option<u16>,
-        /// Reduction-tree fold strategy (issue #321). `hex` (default) is the
-        /// existing radix-16 hexadecimal fold; `reduction` selects the additive
-        /// same-height radix-2 binary reducer. Phase 2: PLUMBED + stored only —
-        /// dispatch is wired into the fold path in #321 Phases 3-4; the hex path
-        /// remains the behaviour until then.
-        #[arg(long, value_enum, default_value_t = FoldStrategy::Hex)]
+        /// Reduction-tree fold strategy (issue #321). `reduction` (default,
+        /// since #321 Phase 8) selects the additive order-free reducer and is
+        /// the strategy that runs on GKE via the fungible `work` pool; `hex`
+        /// is the explicit opt-out radix-16 hexadecimal fold. The seeder emits
+        /// leaves tagged with this strategy and the coordinator routes folds by
+        /// the descriptor's `fold_strategy`, so this switch engages the whole
+        /// reduction pipeline end-to-end.
+        #[arg(long, value_enum, default_value_t = FoldStrategy::Reduction)]
         fold_strategy: FoldStrategy,
         /// (#321 Phase 6) Leaf SEED ORDER. `sequential` (default) preserves the
         /// historical `0..N` order; `critical-path-first` front-loads the leaves
@@ -403,17 +408,27 @@ pub enum TransportKind {
     Pubsub,
 }
 
-/// Which reduction-tree fold strategy to use (issue #321). ADDITIVE: `Hex` is the
-/// existing radix-16 hexadecimal fold (unchanged default); `Reduction` selects
-/// the same-height radix-2 binary reducer (issue #321 Phase 2). The flag is
-/// PLUMBED and stored in Phase 2; dispatch is wired into the fold path in
-/// #321 Phases 3-4. Selecting `Reduction` never removes or alters the hex path.
+/// Which reduction-tree fold strategy to use (issue #321). As of #321 Phase 8
+/// `Reduction` is the DEFAULT (order-free reducer, the strategy that runs on GKE
+/// via the fungible `work` pool) and `Hex` is the explicit opt-out (the legacy
+/// radix-16 hexadecimal fold). ADDITIVE: selecting `Hex` runs the full hex path
+/// end-to-end, unchanged. NOTE: the SERDE WIRE default in
+/// [`bench::transport::FoldStrategy`] stays `Hex` for descriptor back-compat —
+/// this CLI default is a separate decision.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
 pub enum FoldStrategy {
-    /// Radix-16 hexadecimal reduction tree (the existing default fold).
+    /// Radix-16 hexadecimal reduction tree (the legacy fold; explicit opt-out).
     Hex,
-    /// Same-height radix-2 binary reducer (issue #321 Phase 2, additive).
+    /// Order-free same-height radix-2 binary reducer (issue #321). The default.
     Reduction,
+}
+
+impl FoldStrategy {
+    /// `true` iff this is the order-free reduction strategy (vs. legacy hex).
+    /// The `work` seeder branches on this to pick the reduction vs. hex seeder.
+    fn is_reduction(self) -> bool {
+        matches!(self, FoldStrategy::Reduction)
+    }
 }
 
 /// (#321 Phase 6) CLI mirror of [`bench::transport::SeedOrder`]: which order the
@@ -2726,10 +2741,15 @@ fn main() {
             fold_strategy,
             seed_order,
         } => {
-            // Issue #321 Phase 2: the fold-strategy flag is PLUMBED + stored here
-            // (echoed for operator visibility); dispatch into the reduction path
-            // is wired in Phases 3-4. Until then the hex fold governs regardless.
-            info!("[fold] strategy={fold_strategy:?} (hex fold active until #321 Phases 3-4)");
+            // Issue #321 Phase 8: the fold-strategy flag now GOVERNS which leaves
+            // the `work` pool seeds — `Reduction` (the default) seeds reduction
+            // leaves that engage the order-free pipeline; `Hex` seeds the legacy
+            // hex leaves. The coordinator routes folds by each descriptor's
+            // `fold_strategy`, so seeding is the switch for the whole pipeline.
+            info!(
+                "[fold] strategy={fold_strategy:?} ACTIVE \
+                 (reduction = order-free default; hex = explicit opt-out)"
+            );
             // #321 Phase 6: the seed order is a deterministic scheduling mechanism;
             // echoed for operator visibility. Default `sequential` = unchanged.
             info!("[seed] order={seed_order:?} (leaf dispatch order; telemetry echoes scheduling_class)");
@@ -2762,7 +2782,15 @@ fn main() {
 
             match transport {
                 TransportKind::Local => {
-                    run_local_work(&plan, block_number, seed, seed_order, &mut timing, start);
+                    run_local_work(
+                        &plan,
+                        block_number,
+                        seed,
+                        seed_order,
+                        fold_strategy,
+                        &mut timing,
+                        start,
+                    );
                 }
                 TransportKind::Pubsub => {
                     // Effective-plan echo (also printed inside the pubsub seeder).
@@ -2778,6 +2806,7 @@ fn main() {
                         block_number,
                         seed,
                         seed_order,
+                        fold_strategy,
                         project,
                         topic,
                         subscription,
@@ -2909,10 +2938,15 @@ fn run_local_work(
     seed: bool,
     // (#321 Phase 6) The chosen leaf seed order (default sequential = unchanged).
     seed_order: SeedOrderArg,
+    // (#321 Phase 8) Which fold strategy to seed: `Reduction` (default) seeds
+    // order-free reduction leaves; `Hex` seeds the legacy hex leaves.
+    fold_strategy: FoldStrategy,
     timing: &mut TimingTree,
     start: Instant,
 ) {
-    use bench::transport::seed_leaf_descriptors_scheduled;
+    use bench::transport::{
+        seed_leaf_descriptors_scheduled, seed_reduction_leaf_descriptors_scheduled,
+    };
 
     let radix = plan.radix;
     let leaf_count = plan.leaf_count_per_block;
@@ -2958,18 +2992,30 @@ fn run_local_work(
         // accepted for symmetry with the pubsub path.
         // #321 Phase 6: seed in the chosen order; each leaf is stamped with its
         // dispatch timestamp so the worker can compute the honest queue_wait_ms.
-        let seeds = seed_leaf_descriptors_scheduled(
-            radix,
-            leaf_count,
-            tx_per_proof,
-            seed_order.to_seed_order(),
-        );
+        // #321 Phase 8: branch on fold_strategy — reduction (default) seeds
+        // FoldStrategy::Reduction leaves that engage the order-free pipeline; hex
+        // seeds the legacy FoldStrategy::Hex leaves. Ordering is identical.
+        let seeds = if fold_strategy.is_reduction() {
+            seed_reduction_leaf_descriptors_scheduled(
+                radix,
+                leaf_count,
+                tx_per_proof,
+                seed_order.to_seed_order(),
+            )
+        } else {
+            seed_leaf_descriptors_scheduled(
+                radix,
+                leaf_count,
+                tx_per_proof,
+                seed_order.to_seed_order(),
+            )
+        };
         let seeded = seeds.len();
         for d in seeds {
             transport.publish(d);
         }
         info!(
-            "[dispatch] seeded {seeded} leaf descriptor(s) onto LocalTransport \
+            "[dispatch] seeded {seeded} {fold_strategy:?} leaf descriptor(s) onto LocalTransport \
              (radix {radix}, N={leaf_count}, tx_per_proof={tx_per_proof}, seed_order={seed_order:?}){}",
             if seed {
                 " [--seed requested: local seeds inline then runs the loop]"
@@ -3191,6 +3237,9 @@ fn run_pubsub_work(
     seed: bool,
     // (#321 Phase 6) The chosen leaf seed order (default sequential = unchanged).
     seed_order: SeedOrderArg,
+    // (#321 Phase 8) Which fold strategy to seed: `Reduction` (default) seeds
+    // order-free reduction leaves; `Hex` seeds the legacy hex leaves.
+    fold_strategy: FoldStrategy,
     project: Option<String>,
     topic: String,
     subscription: String,
@@ -3351,6 +3400,7 @@ fn run_pubsub_work(
                 leaf_count,
                 tx_per_proof,
                 seed_order.to_seed_order(),
+                fold_strategy.is_reduction(),
             );
             total_seeded += leaf_count;
             info!(
@@ -3373,6 +3423,7 @@ fn run_pubsub_work(
             "txs_per_block": plan.txs_per_block,
             "txs_per_chunk": plan.txs_per_chunk,
             "tree_depth": depth,
+            "fold_strategy": format!("{fold_strategy:?}"),
             "seeded_leaf_descriptors": total_seeded,
             "run_config_path": RUN_CONFIG_PATH,
             "status": "SEEDED_AND_EXITING",
@@ -3506,6 +3557,7 @@ fn run_pubsub_work(
     _block_number: u64,
     _seed: bool,
     _seed_order: SeedOrderArg,
+    _fold_strategy: FoldStrategy,
     _project: Option<String>,
     _topic: String,
     _subscription: String,
@@ -3527,9 +3579,55 @@ fn run_pubsub_work(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use plonky2::util::timing::TimingTree;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+
+    /// (#321 Phase 8) The CLI `--fold-strategy` default for BOTH the `work`
+    /// (fungible pool) and `tree-node` subcommands is `Reduction`: parsing them
+    /// with no `--fold-strategy` flag yields `FoldStrategy::Reduction`. This is
+    /// the switch that makes the order-free reduction path the DEFAULT on GKE.
+    /// (The serde WIRE default stays `Hex` — see the transport-crate test.)
+    #[test]
+    fn cli_fold_strategy_default_is_reduction() {
+        let cli = Cli::parse_from(["prover-node", "work"]);
+        match cli.role {
+            Role::Work { fold_strategy, .. } => {
+                assert_eq!(
+                    fold_strategy,
+                    FoldStrategy::Reduction,
+                    "`work` fold-strategy default must be Reduction (#321 Phase 8)"
+                );
+            }
+            _ => panic!("expected Role::Work"),
+        }
+
+        let cli = Cli::parse_from(["prover-node", "tree-node", "--level", "1", "--node-idx", "0"]);
+        match cli.role {
+            Role::TreeNode { fold_strategy, .. } => {
+                assert_eq!(
+                    fold_strategy,
+                    FoldStrategy::Reduction,
+                    "`tree-node` fold-strategy default must be Reduction (#321 Phase 8)"
+                );
+            }
+            _ => panic!("expected Role::TreeNode"),
+        }
+    }
+
+    /// (#321 Phase 8) The hex opt-out is preserved: `--fold-strategy hex` parses
+    /// to `FoldStrategy::Hex` so the legacy hex path still runs end-to-end.
+    #[test]
+    fn cli_fold_strategy_hex_opt_out_parses() {
+        let cli = Cli::parse_from(["prover-node", "work", "--fold-strategy", "hex"]);
+        match cli.role {
+            Role::Work { fold_strategy, .. } => {
+                assert_eq!(fold_strategy, FoldStrategy::Hex);
+            }
+            _ => panic!("expected Role::Work"),
+        }
+    }
 
     // ── Generic dispatch-loop signature: drives ANY WorkTransport ────────────
     //

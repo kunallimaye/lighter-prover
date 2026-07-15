@@ -35,6 +35,7 @@ steps:
             --image="${_IMAGE}" \
             --radix="${_RADIX}" \
             --benchmark-id="${_BENCHMARK_ID}" \
+            --fold-strategy="${_FOLD_STRATEGY}" \
             --emit-fungible \
             --baseload=10 \
             --burst=0 \
@@ -152,6 +153,8 @@ substitutions:
   _ENGINE: 'gke'
   _ARCH: 'c3d'
   _RADIX: '16'
+  # #321 Phase 8: reduction is the DEFAULT fold strategy on GKE; 'hex' opts out.
+  _FOLD_STRATEGY: 'reduction'
   _CHUNK_SIZE: '1'
   _BLOCK_CONCURRENCY: '10'
   _REGION: 'us-east4'
