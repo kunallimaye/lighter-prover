@@ -12,4 +12,5 @@
 pub mod prestate;
 pub mod prestate_store;
 pub mod shutdown;
+pub mod telemetry;
 pub mod transport;

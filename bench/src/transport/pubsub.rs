@@ -68,6 +68,7 @@ use tokio::runtime::Runtime;
 
 use super::gating::{CasError, CasStore, Publisher};
 use super::{CommitOutcome, WorkDescriptor, WorkLease, WorkTransport, ProverEvent};
+use crate::telemetry::TaskTelemetry;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Configuration
@@ -595,18 +596,34 @@ impl WorkTransport for PubSubGcsTransport {
         bytes: &[u8],
         prove_time_ms: u64,
         total_time_ms: u64,
+        telemetry: &TaskTelemetry,
     ) -> CommitOutcome {
         let gcs_start = std::time::Instant::now();
         let outcome = self.commit_output(&descriptor.output_key(), bytes);
         let gcs_time_ms = gcs_start.elapsed().as_millis() as u64;
 
         if outcome == CommitOutcome::Committed {
+            // Fold the #328 Phase-1 per-task telemetry into the completion event.
+            // `prove_ms`/`gcs_write_ms` mirror the existing `prove_time_ms`/
+            // `gcs_time_ms` under the uniform phase-timer naming; the descriptor
+            // geometry (`chunk_size`/`leaf_count`) is echoed so a report
+            // self-describes. Unmeasured phase timers stay 0 (honest zero).
             let event = ProverEvent {
                 descriptor: descriptor.clone(),
                 status: "success".to_string(),
                 prove_time_ms,
                 gcs_time_ms,
                 total_time_ms,
+                peak_rss_bytes: telemetry.peak_rss_bytes,
+                prestate_source: telemetry.prestate_source.as_str().to_string(),
+                pull_ms: telemetry.pull_ms,
+                pre_exec_ms: telemetry.pre_exec_ms,
+                prove_ms: prove_time_ms,
+                gcs_write_ms: gcs_time_ms,
+                queue_wait_ms: telemetry.queue_wait_ms,
+                is_first_task_on_pod: telemetry.is_first_task_on_pod,
+                chunk_size: descriptor.tx_per_proof,
+                leaf_count: descriptor.leaf_count,
             };
             self.event_publisher
                 .publish_event(&event)
