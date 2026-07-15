@@ -49,6 +49,7 @@ use serde_json::json;
 
 use bench::prestate::ChunkPreState;
 use bench::prestate_store::load_prestate_corpus_from_path;
+use bench::telemetry::{PrestateSource as TelemetryPrestateSource, TaskTelemetry};
 use bench::transport::{
     CommitOutcome, LocalTransport, Role as WorkRole, WorkLease, WorkTransport,
 };
@@ -973,7 +974,19 @@ enum PreStateSource {
 /// requested chunk index is absent from the corpus, we fall back to the original
 /// prefix-replay path and log which path was taken. Pre-state is never
 /// fabricated and the resulting `Batch` is identical on either path.
-fn prove_leaf_batch(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTree) -> Batch<F> {
+///
+/// # Returns (#328 Phase 1)
+///
+/// Returns the real [`Batch`] aggregate PLUS the [`PreStateSource`] the target
+/// chunk's pre-state was obtained from (`Corpus` fast path or `Replay`
+/// fallback), so the dispatch loop can surface honest pre-state provenance into
+/// the completion-event telemetry. Previously this was discarded (`let _ =
+/// pre_state_source`); it is now threaded out.
+fn prove_leaf_batch(
+    chunk_idx: usize,
+    tx_per_proof: usize,
+    timing: &mut TimingTree,
+) -> (Batch<F>, PreStateSource) {
     let block = load_test_block();
 
     // ── Real pre-state from BlockPreExecutionCircuit (as in bench.rs) ──
@@ -1097,7 +1110,9 @@ fn prove_leaf_batch(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTr
              pre-state (no prefix to replay)"
         );
     }
-    let _ = pre_state_source; // surfaced via the per-path info! logs above.
+    // `pre_state_source` is surfaced both via the per-path info! logs above AND
+    // (#328) returned to the caller so the completion-event telemetry can carry
+    // honest pre-state provenance ("corpus" vs "replay-fallback").
 
     // Phase 2: Real Proving for the target chunk_idx
     let old_state_root = account_tree_root;
@@ -1146,7 +1161,7 @@ fn prove_leaf_batch(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTr
     // delta-tree transitions for this chunk, so the continuity the tree enforces
     // is genuine, not synthetic.
     let seq = chunk_idx as u64 + 1;
-    Batch::<F> {
+    let batch = Batch::<F> {
         end_block_number: seq,
         batch_size: 1,
         first_created_at: block.created_at + chunk_idx as i64,
@@ -1159,7 +1174,8 @@ fn prove_leaf_batch(chunk_idx: usize, tx_per_proof: usize, timing: &mut TimingTr
         new_account_delta_tree_root: tx_witness.new_account_delta_tree_root,
         priority_operations_count: tx_witness.priority_operations_count,
         ..Batch::<F>::default()
-    }
+    };
+    (batch, pre_state_source)
 }
 
 /// Prove a `BatchTarget`-shaped leaf proof carrying `batch`, then verify it.
@@ -1190,7 +1206,9 @@ fn load_or_prove_leaf(
         timing.pop();
         return proof;
     }
-    let batch = prove_leaf_batch(chunk_idx, tx_per_proof, timing);
+    // #328: `load_or_prove_leaf` does not itself thread pre-state provenance out
+    // (it is only used by the non-dispatch Role::LeafWorker path); discard it.
+    let (batch, _pre_state_source) = prove_leaf_batch(chunk_idx, tx_per_proof, timing);
     
     timing.push("batch_leaf_proving", Level::Info);
     let proof = prove_batch_leaf(&batch);
@@ -2223,7 +2241,9 @@ fn run_dispatch_loop<T: WorkTransport>(
         // the file before the transport CAS and turn every commit into an
         // `AlreadyExists` no-win that never advances readiness gating.
         let prove_start = Instant::now();
-        let (bytes, role_tag) = match d.role {
+        // #328 Phase 1: capture the pre-state provenance for the completion-event
+        // telemetry. Only the leaf role has a pre-state; fold/root are "n/a".
+        let (bytes, role_tag, prestate_source) = match d.role {
             WorkRole::Leaf => {
                 info!(
                     "[dispatch] worker={worker} leaf chunk {} -> {}",
@@ -2231,11 +2251,18 @@ fn run_dispatch_loop<T: WorkTransport>(
                     d.output_key()
                 );
                 // Reuse the exact leaf execution: real batch + verified batch leaf.
-                let batch = prove_leaf_batch(d.chunk_idx, d.tx_per_proof, timing);
+                // #328: `prove_leaf_batch` now returns the real pre-state source
+                // (corpus fast path vs replay fallback) so it can be surfaced.
+                let (batch, src) = prove_leaf_batch(d.chunk_idx, d.tx_per_proof, timing);
                 let proof = prove_batch_leaf(&batch);
+                let prestate = match src {
+                    PreStateSource::Corpus => TelemetryPrestateSource::Corpus,
+                    PreStateSource::Replay => TelemetryPrestateSource::ReplayFallback,
+                };
                 (
                     bincode::serialize(&proof).expect("serialize leaf proof"),
                     "leaf",
+                    prestate,
                 )
             }
             WorkRole::TreeNode => {
@@ -2262,6 +2289,8 @@ fn run_dispatch_loop<T: WorkTransport>(
                 (
                     bincode::serialize(&parent).expect("serialize parent proof"),
                     "fold",
+                    // Folds have no pre-state.
+                    TelemetryPrestateSource::NotApplicable,
                 )
             }
             WorkRole::RootCoordinator => {
@@ -2289,11 +2318,33 @@ fn run_dispatch_loop<T: WorkTransport>(
                 (
                     bincode::serialize(&parent).expect("serialize reduction parent proof"),
                     "reduction-fold",
+                    // Reduction folds have no pre-state.
+                    TelemetryPrestateSource::NotApplicable,
                 )
             }
         };
         let prove_total_latency_ms = prove_start.elapsed().as_millis();
         let total_time_ms = iter_start.elapsed().as_millis() as u64;
+
+        // ── [#328 Phase 1] per-task telemetry ────────────────────────────────
+        // Build the TaskTelemetry from what the dispatch loop already has:
+        //   * peak_rss_bytes: read AFTER prove (captures the task's high-water).
+        //   * prestate_source: from the role match above.
+        //   * pull_ms: the measured pull latency for this iteration.
+        //   * is_first_task_on_pod: process-global cold/warm flag, taken once
+        //     per task (first task = true = paid the circuit build).
+        //   * pre_exec_ms / queue_wait_ms: NOT separately isolatable with the
+        //     current single-loop plumbing (pre-exec is fused into the prove
+        //     span inside `prove_leaf_batch`; there is no broker-side enqueue
+        //     timestamp to subtract for a true queue-wait). Emitted as honest 0.
+        let mut task_telemetry = TaskTelemetry::new(
+            bench::telemetry::read_peak_rss_bytes(),
+            prestate_source,
+            bench::telemetry::take_is_first_task_on_pod(),
+        );
+        task_telemetry.pull_ms = pull_latency_ms as u64;
+        // pre_exec_ms / queue_wait_ms left at 0 (see comment above): not
+        // separable yet — reported honestly, never fabricated.
 
         // ── [instrumentation] COMMIT_latency_ms + outcome ────────────────────
         // Atomic idempotent commit + readiness gating (publishes the parent fold
@@ -2301,7 +2352,13 @@ fn run_dispatch_loop<T: WorkTransport>(
         // CAS result: exactly one pod observes `Committed` per descriptor — the
         // `worker={id}` field makes that single winner attributable across pods.
         let commit_start = Instant::now();
-        let outcome = transport.commit_and_gate(&d, &bytes, prove_total_latency_ms as u64, total_time_ms);
+        let outcome = transport.commit_and_gate(
+            &d,
+            &bytes,
+            prove_total_latency_ms as u64,
+            total_time_ms,
+            &task_telemetry,
+        );
         let commit_latency_ms = commit_start.elapsed().as_millis();
         let outcome_str = match outcome {
             CommitOutcome::Committed => "Committed",
@@ -3460,6 +3517,7 @@ mod tests {
             bytes: &[u8],
             _prove_time_ms: u64,
             _total_time_ms: u64,
+            _telemetry: &bench::telemetry::TaskTelemetry,
         ) -> CommitOutcome {
             use bench::transport::{real_children_for_node, tree_depth, Role, WorkDescriptor};
             let outcome = self.commit_output(&descriptor.output_key(), bytes);
@@ -3555,7 +3613,17 @@ mod tests {
             // Cheap sentinel "proof" bytes (NOT a real STARK) — we are testing
             // the generic loop's transport progression, not the circuits.
             let bytes = format!("sentinel:{}", d.output_key()).into_bytes();
-            let _ = transport.commit_and_gate(&d, &bytes, 0, 0);
+            let _ = transport.commit_and_gate(
+                &d,
+                &bytes,
+                0,
+                0,
+                &bench::telemetry::TaskTelemetry::new(
+                    0,
+                    bench::telemetry::PrestateSource::NotApplicable,
+                    false,
+                ),
+            );
             lease.ack();
             iters += 1;
             assert!(iters < 10_000, "loop must terminate");
@@ -4080,7 +4148,7 @@ mod tests {
 
         let mut timing_opt = TimingTree::new("Optimized (Option A)", Level::Info);
         info!("Running optimized proving...");
-        let batch_opt = prove_leaf_batch(chunk_idx, tx_per_proof, &mut timing_opt);
+        let (batch_opt, _src) = prove_leaf_batch(chunk_idx, tx_per_proof, &mut timing_opt);
         timing_opt.print();
 
         // Assert equivalence
@@ -4129,7 +4197,7 @@ mod tests {
     fn batch_via_corpus(chunk_idx: usize, tx_per_proof: usize) -> Batch<F> {
         set_prestate_corpus_path(Some(committed_corpus_abs_path()));
         let mut timing = TimingTree::new("corpus-read", Level::Info);
-        let batch = prove_leaf_batch(chunk_idx, tx_per_proof, &mut timing);
+        let (batch, _src) = prove_leaf_batch(chunk_idx, tx_per_proof, &mut timing);
         set_prestate_corpus_path(None); // restore default resolution.
         batch
     }

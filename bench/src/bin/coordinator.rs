@@ -106,15 +106,32 @@ fn main() {
             }
         };
 
-        let desc = event.descriptor;
+        let desc = event.descriptor.clone();
+        // #328 Phase 1: log the per-task telemetry alongside the original timers
+        // so a benchmark run yields the resource-sizing data WITHOUT GCP metrics.
+        // `status` is the REAL published status (not hardcoded) — telemetry must
+        // never inherit a fabricated status.
         info!(
-            "Received event: role={}, idx={}, status={}, prove_time_ms={}, gcs_time_ms={}, total_time_ms={}",
+            "Received event: role={}, idx={}, status={}, prove_time_ms={}, gcs_time_ms={}, \
+             total_time_ms={}, peak_rss_bytes={}, prestate_source={}, is_first_task_on_pod={}, \
+             chunk_size={}, leaf_count={}, pull_ms={}, pre_exec_ms={}, prove_ms={}, \
+             gcs_write_ms={}, queue_wait_ms={}",
             desc.role.as_str(),
             desc.chunk_idx,
             event.status,
             event.prove_time_ms,
             event.gcs_time_ms,
-            event.total_time_ms
+            event.total_time_ms,
+            event.peak_rss_bytes,
+            event.prestate_source,
+            event.is_first_task_on_pod,
+            event.chunk_size,
+            event.leaf_count,
+            event.pull_ms,
+            event.pre_exec_ms,
+            event.prove_ms,
+            event.gcs_write_ms,
+            event.queue_wait_ms,
         );
 
         if event.status != "success" {
@@ -123,7 +140,10 @@ fn main() {
             continue;
         }
 
-        // Run the gating engine (sync)
+        // Run the gating engine (sync). NOTE: the `CommitOutcome::Committed`
+        // argument here is a known-separate gating-outcome concern tracked
+        // elsewhere and is intentionally left unchanged by #328 — this task only
+        // enriches telemetry, it does not alter gating semantics.
         match gating_engine.on_child_committed(&desc, CommitOutcome::Committed) {
             Ok(outcome) => {
                 match outcome {

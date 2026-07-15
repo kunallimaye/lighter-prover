@@ -50,6 +50,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::telemetry::TaskTelemetry;
+
 /// Backend-agnostic, cloud-free CAS object-store abstraction + readiness-gating
 /// engine. This is the durable, unit-testable core that BOTH the [`LocalTransport`]
 /// (filesystem CAS) and the production [`pubsub::PubSubGcsTransport`] (GCS native
@@ -233,6 +235,21 @@ impl WorkDescriptor {
 
 /// Event published by workers upon successful completion of a task.
 /// Listened to by the external coordinator to drive the gating logic.
+///
+/// # Per-task telemetry (issue #328 Phase 1)
+///
+/// The fields below the original five enrich the completion payload with the
+/// application-derived facts a benchmark run needs to derive resource sizing
+/// WITHOUT GCP node metrics: peak memory, pre-state provenance, phase timers,
+/// cold/warm separation, and the descriptor geometry that makes a report
+/// self-describing. Every added field is `#[serde(default)]` so a pre-#328
+/// payload (only the original five fields) still deserializes — wire back-compat,
+/// exactly like the Phase-3 `WorkDescriptor::{lo,hi}` addition.
+///
+/// # Anti-fabrication
+///
+/// An unavailable metric is `0` (numeric) or `"n/a"` (string) — never a made-up
+/// number. See `crate::telemetry` and `reports/PROVENANCE.md`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProverEvent {
     pub descriptor: WorkDescriptor,
@@ -240,6 +257,56 @@ pub struct ProverEvent {
     pub prove_time_ms: u64,
     pub gcs_time_ms: u64,
     pub total_time_ms: u64,
+
+    // ── #328 Phase 1: per-task telemetry (all serde(default) for back-compat) ──
+    /// Peak resident memory for the task/pod, in bytes. `0` if no cgroup/proc
+    /// source was readable (honest zero — never fabricated). See
+    /// [`crate::telemetry::read_peak_rss_bytes`].
+    #[serde(default)]
+    pub peak_rss_bytes: u64,
+    /// Pre-state provenance: `"corpus"` | `"replay-fallback"` | `"n/a"`
+    /// (folds/root have no pre-state). Surfaced from the leaf path's
+    /// `PreStateSource`. Defaults to `"n/a"` for pre-#328 payloads.
+    #[serde(default = "prestate_source_default")]
+    pub prestate_source: String,
+    /// Phase timer: time to pull the message off the queue, in ms (best-effort).
+    #[serde(default)]
+    pub pull_ms: u64,
+    /// Phase timer: pre-execution / setup time NOT part of the prove, in ms.
+    /// Emitted `0` when not separately isolatable in the current plumbing.
+    #[serde(default)]
+    pub pre_exec_ms: u64,
+    /// Phase timer: prove time, in ms. Duplicates `prove_time_ms` under the
+    /// uniform phase-timer naming so a report can iterate phases uniformly.
+    #[serde(default)]
+    pub prove_ms: u64,
+    /// Phase timer: object-store (GCS) write time, in ms. Duplicates
+    /// `gcs_time_ms` under the uniform phase-timer naming.
+    #[serde(default)]
+    pub gcs_write_ms: u64,
+    /// Phase timer: time the task waited in the queue before pull, in ms.
+    /// Emitted `0` when not separately measurable with the current plumbing.
+    #[serde(default)]
+    pub queue_wait_ms: u64,
+    /// `true` when this was the FIRST task executed on the pod (cold,
+    /// circuit-build-paying); `false` for every subsequent task (warm, cached
+    /// circuits). Separates cold vs cached folds (#322).
+    #[serde(default)]
+    pub is_first_task_on_pod: bool,
+    /// Echo of `descriptor.tx_per_proof` — transactions per leaf proof — so a
+    /// report self-describes without cross-referencing the descriptor.
+    #[serde(default)]
+    pub chunk_size: usize,
+    /// Echo of `descriptor.leaf_count` — total leaves feeding the tree.
+    #[serde(default)]
+    pub leaf_count: usize,
+}
+
+/// serde default for [`ProverEvent::prestate_source`]: `"n/a"` so a pre-#328
+/// payload (which omits the field) deserializes to the fold/root sentinel rather
+/// than an empty string.
+fn prestate_source_default() -> String {
+    "n/a".to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -327,7 +394,23 @@ pub trait WorkTransport: Send + Sync {
     /// markers for [`LocalTransport`], GCS-native `ifGenerationMatch=0` CAS
     /// markers for the production backend) so the "publish each fold exactly
     /// once" invariant holds across pods.
-    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8], prove_time_ms: u64, total_time_ms: u64) -> CommitOutcome;
+    ///
+    /// # Per-task telemetry (#328 Phase 1)
+    ///
+    /// `telemetry` carries the application-derived facts (peak RSS, pre-state
+    /// provenance, phase timers, cold/warm flag) that a backend able to publish
+    /// completion events folds into the [`ProverEvent`]. Threading ONE struct
+    /// instead of six scalar params keeps the trait/impl churn minimal. The
+    /// [`LocalTransport`] has no event bus and treats `telemetry` as a no-op
+    /// (debug-logged); only the Pub/Sub path publishes it.
+    fn commit_and_gate(
+        &self,
+        descriptor: &WorkDescriptor,
+        bytes: &[u8],
+        prove_time_ms: u64,
+        total_time_ms: u64,
+        telemetry: &TaskTelemetry,
+    ) -> CommitOutcome;
 }
 
 /// A leased message. Holds the [`WorkDescriptor`] and the consumption verbs.
@@ -643,7 +726,24 @@ impl WorkTransport for LocalTransport {
     /// This is the primitive the dispatch loop uses so that completing the last
     /// child of a node automatically enqueues that node's fold. Implemented as
     /// the [`WorkTransport`] trait method so the generic dispatch loop drives it.
-    fn commit_and_gate(&self, descriptor: &WorkDescriptor, bytes: &[u8], _prove_time_ms: u64, _total_time_ms: u64) -> CommitOutcome {
+    fn commit_and_gate(
+        &self,
+        descriptor: &WorkDescriptor,
+        bytes: &[u8],
+        _prove_time_ms: u64,
+        _total_time_ms: u64,
+        telemetry: &TaskTelemetry,
+    ) -> CommitOutcome {
+        // Local dev/test transport has no event bus, so per-task telemetry
+        // (#328) is not published — only observed here at debug for parity.
+        log::debug!(
+            "[LocalTransport] commit_and_gate {} telemetry: peak_rss_bytes={} \
+             prestate_source={} is_first_task_on_pod={}",
+            descriptor.output_key(),
+            telemetry.peak_rss_bytes,
+            telemetry.prestate_source.as_str(),
+            telemetry.is_first_task_on_pod,
+        );
         let outcome = self.commit_output(&descriptor.output_key(), bytes);
         self.maybe_publish_parent(descriptor, outcome == CommitOutcome::Committed);
         outcome
@@ -759,6 +859,12 @@ mod tests {
 
     static TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+    /// A neutral telemetry value for gating tests that only exercise the CAS +
+    /// publish semantics (the telemetry param is a no-op on `LocalTransport`).
+    fn test_telem() -> TaskTelemetry {
+        TaskTelemetry::new(0, crate::telemetry::PrestateSource::NotApplicable, false)
+    }
+
     fn tmp_store(tag: &str) -> PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now()
@@ -835,6 +941,85 @@ mod tests {
         assert_eq!(d, back);
         // role serialises kebab-case
         assert!(s.contains("\"tree-node\""), "got: {s}");
+    }
+
+    /// (#328 Phase 1) A `ProverEvent` carrying the new telemetry fields round-
+    /// trips through JSON with every field intact.
+    #[test]
+    fn prover_event_with_telemetry_round_trips_through_json() {
+        let event = ProverEvent {
+            descriptor: WorkDescriptor::leaf(3, 2, 8, 300),
+            status: "success".to_string(),
+            prove_time_ms: 1234,
+            gcs_time_ms: 56,
+            total_time_ms: 1400,
+            peak_rss_bytes: 4_294_967_296,
+            prestate_source: "corpus".to_string(),
+            pull_ms: 7,
+            pre_exec_ms: 0,
+            prove_ms: 1234,
+            gcs_write_ms: 56,
+            queue_wait_ms: 0,
+            is_first_task_on_pod: true,
+            chunk_size: 300,
+            leaf_count: 8,
+        };
+        let s = serde_json::to_string(&event).unwrap();
+        let back: ProverEvent = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.status, "success");
+        assert_eq!(back.prove_time_ms, 1234);
+        assert_eq!(back.gcs_time_ms, 56);
+        assert_eq!(back.total_time_ms, 1400);
+        assert_eq!(back.peak_rss_bytes, 4_294_967_296);
+        assert_eq!(back.prestate_source, "corpus");
+        assert_eq!(back.pull_ms, 7);
+        assert_eq!(back.pre_exec_ms, 0);
+        assert_eq!(back.prove_ms, 1234);
+        assert_eq!(back.gcs_write_ms, 56);
+        assert_eq!(back.queue_wait_ms, 0);
+        assert!(back.is_first_task_on_pod);
+        assert_eq!(back.chunk_size, 300);
+        assert_eq!(back.leaf_count, 8);
+        assert_eq!(back.descriptor, WorkDescriptor::leaf(3, 2, 8, 300));
+    }
+
+    /// (#328 Phase 1) A pre-#328 `ProverEvent` JSON carrying ONLY the original
+    /// five fields must still deserialize — `#[serde(default)]` supplies the new
+    /// telemetry fields (`0` / `"n/a"` / `false`). This guards wire back-compat
+    /// for in-flight pre-#328 events, mirroring the Phase-3 descriptor test.
+    #[test]
+    fn pre_phase328_event_without_telemetry_fields_still_deserializes() {
+        let legacy = r#"{
+            "descriptor":{
+                "role":"leaf","radix":2,"leaf_count":8,"tx_per_proof":300,
+                "chunk_idx":3,"level":0,"node_idx":0,"lo":0,"hi":0
+            },
+            "status":"success",
+            "prove_time_ms":1234,
+            "gcs_time_ms":56,
+            "total_time_ms":1400
+        }"#;
+        let e: ProverEvent =
+            serde_json::from_str(legacy).expect("legacy event must deserialize");
+        // Original fields intact.
+        assert_eq!(e.status, "success");
+        assert_eq!(e.prove_time_ms, 1234);
+        assert_eq!(e.gcs_time_ms, 56);
+        assert_eq!(e.total_time_ms, 1400);
+        // New telemetry fields default honestly.
+        assert_eq!(e.peak_rss_bytes, 0, "missing peak_rss_bytes defaults to 0");
+        assert_eq!(
+            e.prestate_source, "n/a",
+            "missing prestate_source defaults to the n/a sentinel"
+        );
+        assert_eq!(e.pull_ms, 0);
+        assert_eq!(e.pre_exec_ms, 0);
+        assert_eq!(e.prove_ms, 0);
+        assert_eq!(e.gcs_write_ms, 0);
+        assert_eq!(e.queue_wait_ms, 0);
+        assert!(!e.is_first_task_on_pod, "missing flag defaults to false");
+        assert_eq!(e.chunk_size, 0);
+        assert_eq!(e.leaf_count, 0);
     }
 
     #[test]
@@ -979,14 +1164,14 @@ mod tests {
         let l1 = WorkDescriptor::leaf(1, 2, 4, 1);
 
         // Commit first child: parent not yet ready, nothing published.
-        assert_eq!(t.commit_and_gate(&l0, b"leaf0", 0, 0), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&l0, b"leaf0", 0, 0, &test_telem()), CommitOutcome::Committed);
         assert!(
             t.pull_one().is_none(),
             "parent fold must not publish until all children done"
         );
 
         // Commit second child: parent ready, fold descriptor published.
-        assert_eq!(t.commit_and_gate(&l1, b"leaf1", 0, 0), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&l1, b"leaf1", 0, 0, &test_telem()), CommitOutcome::Committed);
         let lease = t.pull_one().expect("parent fold should be published");
         let d = lease.descriptor();
         assert_eq!(d.role, Role::TreeNode);
@@ -1002,10 +1187,10 @@ mod tests {
         let n0 = WorkDescriptor::tree_node(1, 0, 2, 4, 1);
         let n1 = WorkDescriptor::tree_node(1, 1, 2, 4, 1);
 
-        assert_eq!(t.commit_and_gate(&n0, b"node10", 0, 0), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&n0, b"node10", 0, 0, &test_telem()), CommitOutcome::Committed);
         assert!(t.pull_one().is_none(), "root not ready after one level-1 node");
 
-        assert_eq!(t.commit_and_gate(&n1, b"node11", 0, 0), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&n1, b"node11", 0, 0, &test_telem()), CommitOutcome::Committed);
         let lease = t.pull_one().expect("root fold should publish");
         let d = lease.descriptor();
         assert_eq!(d.role, Role::TreeNode);
@@ -1019,11 +1204,11 @@ mod tests {
         // A redelivered child (AlreadyExists on commit) must not advance gating.
         let t = LocalTransport::new(tmp_store("gate-redeliver"));
         let l0 = WorkDescriptor::leaf(0, 2, 4, 1);
-        assert_eq!(t.commit_and_gate(&l0, b"leaf0", 0, 0), CommitOutcome::Committed);
+        assert_eq!(t.commit_and_gate(&l0, b"leaf0", 0, 0, &test_telem()), CommitOutcome::Committed);
         // Re-commit the SAME child (simulating redelivery): AlreadyExists, and
         // it must NOT make the parent (which still needs leaf 1) ready.
         assert_eq!(
-            t.commit_and_gate(&l0, b"leaf0-dup", 0, 0),
+            t.commit_and_gate(&l0, b"leaf0-dup", 0, 0, &test_telem()),
             CommitOutcome::AlreadyExists
         );
         assert!(
