@@ -21,14 +21,14 @@ cloud-zkp-build: ## Build and push isolated ZKP STARK container image on GCP via
 JOBS ?= 1
 CHUNK ?= 1
 BLOCKS ?= 2
- ENGINE ?= gke
- ARCH ?= c3d
- RADIX ?= 16
- # #321 Phase 8: reduction is the DEFAULT fold strategy on GKE; opt out with
- # `FOLD_STRATEGY=hex make cloud-gke-bench ...`. Empty passes through to the
- # cloud.sh/CLI reduction default, so an unset var keeps the reduction default.
- FOLD_STRATEGY ?= reduction
- IMAGE := $(if $(IMAGE),$(IMAGE),default)
+ENGINE ?= gke
+ARCH ?= c3d
+RADIX ?= 16
+# #321 Phase 8: reduction is the DEFAULT fold strategy on GKE; opt out with
+# `FOLD_STRATEGY=hex make cloud-gke-bench ...`. Empty passes through to the
+# cloud.sh/CLI reduction default, so an unset var keeps the reduction default.
+FOLD_STRATEGY ?= reduction
+IMAGE := $(if $(IMAGE),$(IMAGE),default)
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)" "$(IMAGE)" "$(BENCHMARK_ID)"
 
