@@ -78,6 +78,12 @@ pub enum Role {
     Leaf,
     /// Fold the `radix` children of one node at `level` into a parent proof.
     TreeNode,
+    /// (#321 Phase 3) Fold two ADJACENT same-height children spanning the leaf
+    /// interval `[lo, hi]` into a parent covering that interval. The order-free
+    /// reduction analogue of `TreeNode`: addressed by interval, not by a fixed
+    /// `(level, node_idx)` slot. `level` still records the reduction height for
+    /// telemetry + circuit selection.
+    ReductionFold,
     /// Harvest and verify the single root proof.
     RootCoordinator,
 }
@@ -88,6 +94,7 @@ impl Role {
         match self {
             Role::Leaf => "leaf",
             Role::TreeNode => "tree-node",
+            Role::ReductionFold => "reduction-fold",
             Role::RootCoordinator => "root-coordinator",
         }
     }
@@ -118,6 +125,15 @@ pub struct WorkDescriptor {
     pub level: usize,
     /// Tree-node role: the node index within `level`. Ignored by leaf.
     pub node_idx: usize,
+    /// (#321 Phase 3) ReductionFold role: inclusive LEAF-index interval `[lo, hi]`
+    /// this fold's OUTPUT covers. `#[serde(default)]` so descriptors serialized
+    /// before Phase 3 (which lack these fields) still deserialize — for those the
+    /// interval is `[0, 0]` and is simply unused by the non-reduction roles.
+    #[serde(default)]
+    pub lo: usize,
+    /// Inclusive upper leaf index of the interval this fold's output covers.
+    #[serde(default)]
+    pub hi: usize,
 }
 
 impl WorkDescriptor {
@@ -131,6 +147,8 @@ impl WorkDescriptor {
             chunk_idx,
             level: 0,
             node_idx: 0,
+            lo: 0,
+            hi: 0,
         }
     }
 
@@ -150,6 +168,32 @@ impl WorkDescriptor {
             chunk_idx: 0,
             level,
             node_idx,
+            lo: 0,
+            hi: 0,
+        }
+    }
+
+    /// (#321 Phase 3) A reduction-fold descriptor: fold the two adjacent
+    /// same-height children whose combined output spans leaf interval `[lo, hi]`,
+    /// at reduction `level`. Interval-addressed rather than `(level, node_idx)`.
+    pub fn reduction_fold(
+        lo: usize,
+        hi: usize,
+        level: usize,
+        radix: usize,
+        leaf_count: usize,
+        tx_per_proof: usize,
+    ) -> Self {
+        Self {
+            role: Role::ReductionFold,
+            radix,
+            leaf_count,
+            tx_per_proof,
+            chunk_idx: 0,
+            level,
+            node_idx: 0,
+            lo,
+            hi,
         }
     }
 
@@ -163,6 +207,8 @@ impl WorkDescriptor {
             chunk_idx: 0,
             level: 0,
             node_idx: 0,
+            lo: 0,
+            hi: 0,
         }
     }
 
@@ -174,6 +220,10 @@ impl WorkDescriptor {
         match self.role {
             Role::Leaf => format!("leaf_{}.proof", self.chunk_idx),
             Role::TreeNode => format!("tree_L{}_N{}.proof", self.level, self.node_idx),
+            // (#321 Phase 3) Interval-addressed output: any pod can name the
+            // proof covering leaf interval [lo, hi] unambiguously, independent of
+            // a radix-node slot. Enables opportunistic adjacent-pair merging.
+            Role::ReductionFold => format!("reduction_{}_{}.proof", self.lo, self.hi),
             // The root coordinator produces no new proof; it verifies the
             // existing top node. Use a sentinel completion marker key.
             Role::RootCoordinator => "root_verified.marker".to_string(),
@@ -402,6 +452,14 @@ impl LocalTransport {
             Role::Leaf => (0usize, child.chunk_idx),
             Role::TreeNode => (child.level, child.node_idx),
             Role::RootCoordinator => return, // root has no parent to publish
+            // (#321 Phase 3) ReductionFold uses the interval-addressed,
+            // opportunistic adjacent-pair gating introduced in Phase 4
+            // (`maybe_publish_merge`), NOT this fixed-node hex gating. Until that
+            // lands, a reduction commit publishes no parent here. Reduction
+            // descriptors are not dispatched by any seeded run yet (the
+            // `--fold-strategy` flag defaults to Hex and is not routed into
+            // dispatch until Phase 4), so this arm is not reached at runtime.
+            Role::ReductionFold => return,
         };
 
         let radix = child.radix;
@@ -724,6 +782,14 @@ mod tests {
         assert_eq!(node.output_key(), "tree_L2_N1.proof");
         let root = WorkDescriptor::root(2, 4, 1);
         assert_eq!(root.output_key(), "root_verified.marker");
+
+        // (#321 Phase 3) reduction-fold output is interval-addressed.
+        let red = WorkDescriptor::reduction_fold(0, 3, 2, 2, 4, 1);
+        assert_eq!(red.output_key(), "reduction_0_3.proof");
+        assert_eq!(red.lo, 0);
+        assert_eq!(red.hi, 3);
+        assert_eq!(red.level, 2);
+        assert_eq!(red.role, Role::ReductionFold);
     }
 
     #[test]
@@ -731,6 +797,34 @@ mod tests {
         assert_eq!(Role::Leaf.as_str(), "leaf");
         assert_eq!(Role::TreeNode.as_str(), "tree-node");
         assert_eq!(Role::RootCoordinator.as_str(), "root-coordinator");
+        assert_eq!(Role::ReductionFold.as_str(), "reduction-fold");
+    }
+
+    /// (#321 Phase 3) A descriptor serialized BEFORE the interval fields existed
+    /// (no `lo`/`hi`) must still deserialize — `#[serde(default)]` supplies 0/0.
+    /// This guards wire back-compat for in-flight pre-Phase-3 descriptors.
+    #[test]
+    fn pre_phase3_descriptor_without_interval_fields_still_deserializes() {
+        let legacy = r#"{
+            "role":"tree-node","radix":2,"leaf_count":4,"tx_per_proof":1,
+            "chunk_idx":0,"level":1,"node_idx":0
+        }"#;
+        let d: WorkDescriptor = serde_json::from_str(legacy).expect("legacy descriptor must deserialize");
+        assert_eq!(d.lo, 0, "missing lo must default to 0");
+        assert_eq!(d.hi, 0, "missing hi must default to 0");
+        assert_eq!(d.role, Role::TreeNode);
+        assert_eq!(d.level, 1);
+    }
+
+    /// (#321 Phase 3) A reduction-fold descriptor round-trips through JSON with
+    /// its interval intact.
+    #[test]
+    fn reduction_fold_descriptor_round_trips_through_json() {
+        let d = WorkDescriptor::reduction_fold(4, 7, 2, 2, 8, 1);
+        let s = serde_json::to_string(&d).unwrap();
+        let back: WorkDescriptor = serde_json::from_str(&s).unwrap();
+        assert_eq!(d, back);
+        assert_eq!(back.output_key(), "reduction_4_7.proof");
     }
 
     #[test]
