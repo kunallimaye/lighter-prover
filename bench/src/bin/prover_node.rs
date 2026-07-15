@@ -2009,6 +2009,7 @@ fn aggregate_pair(
     level: usize,
     lo: usize,
     hi: usize,
+    leaf_count: usize,
     timing: &mut TimingTree,
 ) -> ProofWithPublicInputs<F, C, D> {
     assert!(level >= 1, "reduction levels are 1-indexed");
@@ -2028,29 +2029,40 @@ fn aggregate_pair(
     // midpoint: left = [lo, mid], right = [mid+1, hi], each of span 2^(level-1).
     let mid = lo + (span / 2) - 1;
 
-    // Read the LEFT and RIGHT child proofs from the filesystem transport by
-    // INTERVAL. At level 1 the children are single leaves ([lo,lo], [hi,hi] read
-    // from `leaf_proof_path`); at level >= 2 they are level-(L-1) reduction
-    // proofs covering [lo, mid] and [mid+1, hi]. Both are REAL (same-height
-    // fold), so there is no padding slot to read.
-    let (left_path, right_path) = if level == 1 {
-        (leaf_proof_path(lo), leaf_proof_path(hi))
+    // Read the LEFT child proof (always real: padding only lands on the high
+    // end, so the left child of any fold covers real leaves). At level 1 the
+    // child is a single leaf; at level >= 2 it is a level-(L-1) reduction proof.
+    let left_path = if level == 1 {
+        leaf_proof_path(lo)
     } else {
-        (
-            reduction_proof_path(lo, mid),
-            reduction_proof_path(mid + 1, hi),
-        )
+        reduction_proof_path(lo, mid)
     };
     let left = read_proof(&left_path);
-    let right = read_proof(&right_path);
 
     timing.push("reduction_pair_aggregation", Level::Info);
-    // Same call at every level: both children real, no padding proof. This holds
-    // for recursive (level >= 2) children too — the child VK is pinned in
-    // `define` and both proofs verify against it; `prove` sets `right_is_real =
-    // true` and folds with the single seam assert.
-    let parent = BinaryTreeChainCircuit::prove(&node.target, &node.data, &left, &right)
-        .expect("same-height binary reduction fold failed to prove");
+    // Is the RIGHT child entirely PADDING (covers only leaves >= leaf_count)?
+    // In the padded perfect binary tree (issue #321 Phase 4) padding always
+    // lands on the high end, so a fold whose right interval starts past the last
+    // real leaf is a no-op passthrough of the left child — no right proof exists
+    // to read; use `prove_padding` (`right_is_real = false`).
+    let right_lo = mid + 1;
+    let parent = if right_lo >= leaf_count {
+        BinaryTreeChainCircuit::prove_padding(&node.target, &node.data, &left)
+            .expect("same-height binary reduction padding fold failed to prove")
+    } else {
+        // Right child is real: read it and fold both. Holds for recursive
+        // (level >= 2) children too — the child VK is pinned in `define` and both
+        // proofs verify against it; `prove` sets `right_is_real = true` and folds
+        // with the single seam assert.
+        let right_path = if level == 1 {
+            leaf_proof_path(hi)
+        } else {
+            reduction_proof_path(right_lo, hi)
+        };
+        let right = read_proof(&right_path);
+        BinaryTreeChainCircuit::prove(&node.target, &node.data, &left, &right)
+            .expect("same-height binary reduction fold failed to prove")
+    };
     timing.pop();
     parent
 }
@@ -2273,7 +2285,7 @@ fn run_dispatch_loop<T: WorkTransport>(
                     d.level,
                     d.output_key()
                 );
-                let parent = aggregate_pair(d.level, d.lo, d.hi, timing);
+                let parent = aggregate_pair(d.level, d.lo, d.hi, d.leaf_count, timing);
                 (
                     bincode::serialize(&parent).expect("serialize reduction parent proof"),
                     "reduction-fold",
@@ -4511,14 +4523,14 @@ mod tests {
 
         // Level-1 folds by INTERVAL: [0,1] and [2,3]. Each output is persisted
         // at reduction_proof_path(lo, hi) == the descriptor's output_key.
-        let l1_left = aggregate_pair(1, 0, 1, &mut timing);
+        let l1_left = aggregate_pair(1, 0, 1, 4, &mut timing);
         write_proof(&reduction_proof_path(0, 1), &l1_left);
-        let l1_right = aggregate_pair(1, 2, 3, &mut timing);
+        let l1_right = aggregate_pair(1, 2, 3, 4, &mut timing);
         write_proof(&reduction_proof_path(2, 3), &l1_right);
 
         // Level-2 fold of interval [0,3]: reads the two level-1 reduction proofs
         // [0,1] and [2,3] from the transport (recursive, two REAL children).
-        let root = aggregate_pair(2, 0, 3, &mut timing);
+        let root = aggregate_pair(2, 0, 3, 4, &mut timing);
         let root_batch =
             Batch::<F>::from_public_inputs(&root.public_inputs[..BATCH_TARGET_INDEX]);
 

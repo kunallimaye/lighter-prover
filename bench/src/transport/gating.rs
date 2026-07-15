@@ -145,6 +145,27 @@ pub struct GatingEngine<'a, S: CasStore, P: Publisher> {
     publisher: &'a P,
 }
 
+/// The explicit, inspectable pairing of a same-height interval in the padded
+/// perfect binary reduction tree (issue #321 Phase 4). Given any interval you
+/// can print exactly who its partner is, whether it owns the merge, and the
+/// single merged-parent interval the pair produces — the debuggability the
+/// linked-list-style framing was chosen for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PairRole {
+    /// `true` if this interval is the LEFT member and thus the OWNER of the pair
+    /// (it names its required right sibling). `false` if it is the RIGHT member,
+    /// owned by its predecessor.
+    pub is_left_owner: bool,
+    /// The fixed same-height sibling this interval pairs with: the right sibling
+    /// if this is the left owner, else the left sibling. Fixed by POSITION, never
+    /// "whichever neighbour commits first" — the property that makes
+    /// double-consumption impossible.
+    pub partner: (usize, usize),
+    /// The single deterministic merged-parent interval `[left.lo, right.hi]` this
+    /// pair produces, identical no matter which member computes it.
+    pub merged: (usize, usize),
+}
+
 impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
     /// Build an engine over `store` (for markers) and `publisher` (for folds).
     pub fn new(store: &'a S, publisher: &'a P) -> Self {
@@ -250,36 +271,53 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
     // Order-free adjacent-pair (interval) gating — issue #321 Phase 4
     //
     // The hex `on_child_committed` above waits for ALL `radix` children of a
-    // fixed `(level, node_idx)` node before publishing that node. The reduction
-    // path instead merges ADJACENT same-height intervals opportunistically, the
-    // moment BOTH members of a pair are committed — so folding overlaps leaf
-    // proving and a straggler only delays its own pair, not the whole level.
+    // fixed `(level, node_idx)` node. The reduction path instead merges ADJACENT
+    // same-height intervals opportunistically, the moment both members of a pair
+    // are committed — so folding overlaps leaf proving and a straggler only
+    // delays its own pair, not the whole level.
     //
-    // TWO correctness hazards and how this design defeats them:
+    // PADDED PERFECT BINARY TREE (handles ANY leaf count, incl. non-powers-of-2).
+    // We pad N leaves up to P = next_power_of_two(N). Real leaves are indices
+    // [0, N); padding leaves are [N, P). This makes the tree a PERFECT binary
+    // tree, so every interval has EXACTLY ONE same-height sibling at every level
+    // — no "carry"/leftover element is ever stranded (the failure mode of strict
+    // same-height pairing on an odd count). Padding always lands on the RIGHT
+    // (high indices), so a fold whose right child is entirely padding is a no-op
+    // passthrough of the left child (`right_is_real = false`, already supported by
+    // `BinaryTreeChainCircuit`). Padding leaves need NO proof — they are treated
+    // as already-present, so a right-padding fold fires as soon as its real left
+    // child commits. For N=125, P=128 costs just 3 such no-op folds.
     //
-    // 1. DOUBLE-CONSUMPTION RACE (the silent-deadlock hazard). If an interval
-    //    could be merged by EITHER neighbour, two concurrent commits could each
-    //    claim it into a DIFFERENT merged interval (different CAS keys, both
-    //    succeed) — consuming it twice and producing overlapping intervals that
-    //    can never span [0, N-1]: a silent deadlock, no root.
-    //    DEFEAT: a DETERMINISTIC PAIRING RULE. In a same-height binary tree,
-    //    every interval is either the LEFT or the RIGHT child of its unique
-    //    parent pair. Its partner is FIXED by position (not "whichever neighbour
-    //    commits first"), so an interval belongs to EXACTLY ONE pair and can be
-    //    consumed by EXACTLY ONE merge. Whichever member commits SECOND finds the
-    //    partner present and drives the (single, deterministic) merged interval
-    //    [left.lo, right.hi]; the merge identity is independent of arrival order.
+    // EXPLICIT PAIRING (debuggable, linked-list-flavored). Every interval has an
+    // inspectable role via `pair_role`: it is the LEFT owner of its pair (and
+    // names its required right sibling), or the RIGHT member (owned by its
+    // predecessor). The merged parent is always `[left.lo, right.hi]`, a single
+    // deterministic identity per pair — so at any moment you can point at a proof
+    // and say exactly who its partner is and who owns the merge.
     //
-    // 2. EXACTLY-ONCE + RECOVERY. The merged parent is published under a CAS
-    //    publish-marker keyed by the MERGED interval, so even if both members
-    //    race to drive the same pair only one publishes. The marker VALUE carries
-    //    a lease stamp so a lost/timed-out merge task can be re-driven (Phase 5
-    //    coordinator), rather than the seam being stuck forever (the
-    //    TTL-is-GC-not-lease hazard).
+    // TWO correctness hazards, both defeated:
+    // 1. DOUBLE-CONSUMPTION (silent-deadlock). An interval could be merged by only
+    //    ONE pair because its partner is FIXED by position, never "whichever
+    //    neighbour commits first". So no interval is consumed by two merges; no
+    //    overlapping intervals; the tree always reaches the single root [0, P-1].
+    // 2. EXACTLY-ONCE + RECOVERY. The merged parent publishes under a CAS marker
+    //    keyed by the MERGED interval, so racing members publish once. The marker
+    //    value is a lease stamp for Phase-5 crash-recovery re-drive (not a mere
+    //    TTL-GC).
     // ─────────────────────────────────────────────────────────────────────
 
-    /// Marker recording that the interval `[lo, hi]` (span `2^level`) has
-    /// committed. Interval-addressed, independent of any radix-node slot.
+    /// Smallest power of two >= `n` (with `pad(0)=pad(1)=1`). The padded leaf
+    /// count P: real leaves are `[0, n)`, padding leaves `[n, P)`.
+    pub fn padded_leaf_count(n: usize) -> usize {
+        if n == 0 {
+            1
+        } else {
+            // Smallest power of two >= n: 2->2, 4->4, 5->8, 125->128, 500->512.
+            n.next_power_of_two()
+        }
+    }
+
+    /// Marker recording that the interval `[lo, hi]` has committed.
     fn interval_marker_key(lo: usize, hi: usize) -> String {
         format!("rgate/committed/{lo}_{hi}")
     }
@@ -290,35 +328,43 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         format!("rgate/published/{lo}_{hi}")
     }
 
-    /// Given a committed same-height interval `[lo, hi]` (span `s = hi-lo+1 =
-    /// 2^level`), return `(is_right_child, partner)` where `partner` is the
-    /// adjacent SAME-HEIGHT sibling it pairs with under its parent:
-    ///   * right child (odd block index `lo/s`): partner = the LEFT sibling
-    ///     `[lo - s, lo - 1]`.
-    ///   * left child (even block index): partner = the RIGHT sibling
-    ///     `[hi + 1, hi + s]`.
-    /// The merged parent is always `[left.lo, right.hi]` regardless of which
-    /// member calls, giving every pair a single deterministic merge identity.
-    fn sibling_of(lo: usize, hi: usize) -> (bool, (usize, usize)) {
+    /// The explicit pairing of a same-height interval `[lo, hi]` (span
+    /// `2^level`) in the padded perfect binary tree.
+    fn pair_role(lo: usize, hi: usize) -> PairRole {
         let span = hi - lo + 1;
-        let block = lo / span; // index of this interval among same-height blocks
-        if block % 2 == 1 {
-            (true, (lo - span, lo - 1)) // right child → left sibling
+        let block = lo / span; // index among same-height siblings at this level
+        if block % 2 == 0 {
+            // LEFT owner: its required partner is the right sibling.
+            PairRole {
+                is_left_owner: true,
+                partner: (hi + 1, hi + span),
+                merged: (lo, hi + span),
+            }
         } else {
-            (false, (hi + 1, hi + span)) // left child → right sibling
+            // RIGHT member: owned by its predecessor (the left sibling).
+            PairRole {
+                is_left_owner: false,
+                partner: (lo - span, lo - 1),
+                merged: (lo - span, hi),
+            }
         }
     }
 
+    /// Whether interval `[lo, hi]` is ENTIRELY padding (`lo >= real_leaf_count`),
+    /// i.e. it covers only padding leaves and therefore needs no proof — a fold
+    /// with such a right child is a `right_is_real = false` no-op passthrough.
+    fn is_all_padding(lo: usize, real_leaf_count: usize) -> bool {
+        lo >= real_leaf_count
+    }
+
     /// Advance order-free reduction gating for a just-committed reduction/leaf
-    /// interval and, when its adjacent same-height partner is also present,
-    /// publish the merged parent fold EXACTLY once.
+    /// interval and, when its explicit same-height partner is present (or is
+    /// entirely padding), publish the merged parent fold EXACTLY once.
     ///
-    /// `committed` must be the output-commit CAS outcome (only the output winner
-    /// drives the gate, so redeliveries never double-drive). A leaf `i` is
-    /// `[i, i]` at level 0; a reduction fold output is `[lo, hi]` at its level.
-    ///
-    /// Deterministic pairing (see the module note) guarantees no interval is
-    /// consumed by two merges, so overlapping-interval deadlock cannot occur.
+    /// `leaf_count` is the REAL leaf count N; the tree is padded internally to
+    /// `padded_leaf_count(N)`. `committed` must be the output-commit CAS outcome
+    /// (only the output winner drives the gate). A leaf `i` is `[i, i]` at level
+    /// 0; a reduction fold output is `[lo, hi]` at its level.
     #[allow(clippy::too_many_arguments)]
     pub fn on_interval_committed(
         &self,
@@ -334,33 +380,38 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
             return Ok(GatingOutcome::NotWinner);
         }
 
+        let padded = Self::padded_leaf_count(leaf_count);
+
         // Record THIS interval as committed (idempotent via the marker name).
         let _ = self
             .store
             .cas_create(&Self::interval_marker_key(lo, hi), b"1")?;
 
-        // The whole tree spans [0, leaf_count-1]. If this interval already spans
-        // it, it is the root — nothing above to merge.
-        if lo == 0 && hi == leaf_count - 1 {
+        // The padded tree spans [0, padded-1]. If this interval already spans it,
+        // it is the root — nothing above to merge.
+        if lo == 0 && hi == padded - 1 {
             return Ok(GatingOutcome::RootReached);
         }
 
-        let (is_right, (plo, phi)) = Self::sibling_of(lo, hi);
-        let (mlo, mhi) = if is_right { (plo, hi) } else { (lo, phi) };
+        let role = Self::pair_role(lo, hi);
+        let (mlo, mhi) = role.merged;
         let merged_level = level + 1;
+        let (plo, phi) = role.partner;
 
-        // Is the partner committed yet? If not, record + wait; the partner's own
-        // commit will re-evaluate this same pair. This symmetric check fires the
-        // merge the moment the SECOND of the pair lands, any arrival order — the
-        // deterministic [left,right] merged key gives it a single identity.
-        let partner_present = self
-            .store
-            .exists(&Self::interval_marker_key(plo, phi))?;
+        // The partner is available if it is committed OR it is entirely padding
+        // (padding needs no proof — it is virtually present from the start). A
+        // padding partner is always the RIGHT sibling of a real left owner, so
+        // this is exactly the `right_is_real = false` no-op fold.
+        let partner_is_padding = Self::is_all_padding(plo, leaf_count);
+        let partner_present = partner_is_padding
+            || self
+                .store
+                .exists(&Self::interval_marker_key(plo, phi))?;
         if !partner_present {
             return Ok(GatingOutcome::Recorded { have: 1, needed: 2 });
         }
 
-        // Both present → publish the merged parent EXACTLY once, guarded by the
+        // Both available → publish the merged parent EXACTLY once, guarded by the
         // merged-interval publish marker (value = lease stamp for Phase-5
         // crash-recovery re-drive). Whichever of the pair wins the CAS is the
         // sole publisher; the other observes AlreadyExists.
@@ -765,9 +816,54 @@ mod tests {
             .unwrap()
     }
 
+    /// Drive a FULL reduction to the root for `n` real leaves, feeding each
+    /// published merge output back in as its own commit (as the Phase-5
+    /// coordinator will). Returns the set of distinct published fold keys and
+    /// whether the padded root `[0, padded-1]` was reached. Leaves commit in the
+    /// given `order` (indices into `0..n`) to exercise arrival-order independence.
+    fn run_full_reduction(n: usize, order: &[usize]) -> (std::collections::HashSet<String>, bool) {
+        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let eng = GatingEngine::new(&store, &pubr);
+        let padded = G::padded_leaf_count(n);
+
+        // Queue of committed intervals to process; seed with the real leaves in
+        // `order`. Each published merge is fed back in as a new commit.
+        let mut queue: std::collections::VecDeque<(usize, usize, usize)> =
+            order.iter().map(|&i| (i, i, 0usize)).collect();
+        let mut root_reached = false;
+        let mut guard = 0usize;
+        while let Some((lo, hi, level)) = queue.pop_front() {
+            guard += 1;
+            assert!(guard < 100_000, "reduction did not terminate for n={n}");
+            match eng
+                .on_interval_committed(lo, hi, level, 2, n, 1, CommitOutcome::Committed)
+                .unwrap()
+            {
+                GatingOutcome::PublishedParent(d) => {
+                    if d.lo == 0 && d.hi == padded - 1 {
+                        // Root fold published; committing it will report RootReached.
+                        let r = eng
+                            .on_interval_committed(d.lo, d.hi, d.level, 2, n, 1, CommitOutcome::Committed)
+                            .unwrap();
+                        if r == GatingOutcome::RootReached {
+                            root_reached = true;
+                        }
+                    } else {
+                        // Feed the merged output back in as a committed interval.
+                        queue.push_back((d.lo, d.hi, d.level));
+                    }
+                }
+                GatingOutcome::RootReached => root_reached = true,
+                _ => {}
+            }
+        }
+        (pubr.distinct_keys(), root_reached)
+    }
+
     /// The merge fires the moment the SECOND member of a pair lands, regardless
-    /// of arrival order, and publishes the merged interval exactly once — for
-    /// BOTH orders (left-then-right and right-then-left).
+    /// of arrival order, publishing the merged interval exactly once — both orders.
     #[test]
     fn adjacent_pair_merges_on_second_commit_either_order() {
         for right_first in [false, true] {
@@ -796,10 +892,9 @@ mod tests {
         }
     }
 
-    /// THE double-consumption race guard. Three+ adjacent committed intervals
-    /// where a naive impl could merge the mis-aligned [1,2] pair. The
-    /// deterministic pairing rule must yield only the valid [0,1] and [2,3]
-    /// merges — never [1,2] — even under an adversarial commit order.
+    /// THE double-consumption race guard. Adversarial commit order where a naive
+    /// impl could merge the mis-aligned [1,2] pair; the deterministic pairing must
+    /// yield only the valid [0,1] and [2,3] merges, never [1,2].
     #[test]
     fn no_double_consumption_three_adjacent_intervals() {
         let store = InMemoryCasStore::new();
@@ -821,28 +916,61 @@ mod tests {
         assert_eq!(pubr.published().len(), 2, "exactly two level-1 merges");
     }
 
-    /// A full same-height reduction over N=4 reaches the single root [0,3] with
-    /// no overlaps. Drives level-1 outputs back in as commits (as Phase 5 will).
+    /// Power-of-two count reaches the root (baseline).
     #[test]
-    fn full_reduction_n4_reaches_root() {
-        let store = InMemoryCasStore::new();
-        let pubr = RecordingPublisher::new();
-        let eng = GatingEngine::new(&store, &pubr);
-        for i in 0..4 {
-            commit_interval(&eng, i, i, 0, 4);
+    fn full_reduction_power_of_two_reaches_root() {
+        for n in [2usize, 4, 8] {
+            let order: Vec<usize> = (0..n).collect();
+            let (_keys, reached) = run_full_reduction(n, &order);
+            assert!(reached, "n={n} must reach the root");
         }
-        let a = commit_interval(&eng, 0, 1, 1, 4);
-        assert!(matches!(a, GatingOutcome::Recorded { .. }), "[0,1] waits for [2,3]");
-        let b = commit_interval(&eng, 2, 3, 1, 4);
-        match b {
-            GatingOutcome::PublishedParent(d) => {
-                assert_eq!(d.output_key(), "reduction_0_3.proof");
-                assert_eq!(d.level, 2);
+    }
+
+    /// ODD / non-power-of-two counts reach the root via PADDING — the case the
+    /// original strict same-height design STRANDED. N=5 pads to 8, N=125 pads to
+    /// 128. This is the regression guard for the carry hole.
+    #[test]
+    fn full_reduction_odd_counts_reach_root_via_padding() {
+        for n in [3usize, 5, 6, 7, 9, 125] {
+            let order: Vec<usize> = (0..n).collect();
+            let (keys, reached) = run_full_reduction(n, &order);
+            assert!(
+                reached,
+                "n={n} (padded to {}) must reach the root — no stranded carry",
+                GatingEngine::<InMemoryCasStore, RecordingPublisher>::padded_leaf_count(n)
+            );
+            // Sanity: at least one right-padding no-op fold exists for non-powers
+            // of two (the merged interval extends past the last real leaf).
+            let has_padding_fold = keys.iter().any(|k| {
+                // reduction_{lo}_{hi}.proof with hi >= n indicates padding on the right.
+                k.strip_prefix("reduction_")
+                    .and_then(|r| r.strip_suffix(".proof"))
+                    .and_then(|r| r.split_once('_'))
+                    .and_then(|(_, hi)| hi.parse::<usize>().ok())
+                    .map(|hi| hi >= n)
+                    .unwrap_or(false)
+            });
+            if !n.is_power_of_two() {
+                assert!(has_padding_fold, "n={n} must include a right-padding no-op fold");
             }
-            other => panic!("[2,3] commit must publish root [0,3]: {other:?}"),
         }
-        let r = commit_interval(&eng, 0, 3, 2, 4);
-        assert_eq!(r, GatingOutcome::RootReached);
+    }
+
+    /// Root is reached regardless of leaf ARRIVAL ORDER (reverse + a rotation),
+    /// for both an even and an odd count.
+    #[test]
+    fn full_reduction_reaches_root_any_arrival_order() {
+        for n in [4usize, 5, 8] {
+            let mut rev: Vec<usize> = (0..n).collect();
+            rev.reverse();
+            let (_k, reached_rev) = run_full_reduction(n, &rev);
+            assert!(reached_rev, "n={n} reversed order must reach root");
+
+            let mut rot: Vec<usize> = (0..n).collect();
+            rot.rotate_left(n / 2);
+            let (_k2, reached_rot) = run_full_reduction(n, &rot);
+            assert!(reached_rot, "n={n} rotated order must reach root");
+        }
     }
 
     /// Exactly-once merge publication under concurrency: both members of a pair
@@ -877,14 +1005,35 @@ mod tests {
         assert_eq!(pubr.published().len(), 1, "exactly one descriptor published");
     }
 
-    /// `sibling_of` computes the correct same-height partner + initiator flag.
+    /// `padded_leaf_count` and the explicit `pair_role` are correct + inspectable.
     #[test]
-    fn sibling_of_is_correct() {
+    fn padding_and_pair_role_are_correct() {
         type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
-        assert_eq!(G::sibling_of(0, 0), (false, (1, 1)));
-        assert_eq!(G::sibling_of(1, 1), (true, (0, 0)));
-        assert_eq!(G::sibling_of(2, 3), (true, (0, 1)));
-        assert_eq!(G::sibling_of(0, 1), (false, (2, 3)));
+        assert_eq!(G::padded_leaf_count(1), 1);
+        assert_eq!(G::padded_leaf_count(2), 2);
+        assert_eq!(G::padded_leaf_count(5), 8);
+        assert_eq!(G::padded_leaf_count(125), 128);
+        assert_eq!(G::padded_leaf_count(500), 512);
+
+        // [0,0] is a LEFT owner; partner = right sibling [1,1]; merged [0,1].
+        let r0 = G::pair_role(0, 0);
+        assert!(r0.is_left_owner);
+        assert_eq!(r0.partner, (1, 1));
+        assert_eq!(r0.merged, (0, 1));
+        // [1,1] is a RIGHT member; partner = left sibling [0,0]; merged [0,1].
+        let r1 = G::pair_role(1, 1);
+        assert!(!r1.is_left_owner);
+        assert_eq!(r1.partner, (0, 0));
+        assert_eq!(r1.merged, (0, 1));
+        // [2,3] (level 1) is a RIGHT member; partner [0,1]; merged [0,3].
+        let r23 = G::pair_role(2, 3);
+        assert!(!r23.is_left_owner);
+        assert_eq!(r23.partner, (0, 1));
+        assert_eq!(r23.merged, (0, 3));
+
+        // is_all_padding: for N=5, leaf [5,5] is padding, [4,4] is real.
+        assert!(G::is_all_padding(5, 5));
+        assert!(!G::is_all_padding(4, 5));
     }
 }
 
