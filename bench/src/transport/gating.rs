@@ -956,6 +956,36 @@ mod tests {
         }
     }
 
+    /// Padding tracks the CHUNK SIZE C, because the real leaf count is
+    /// `N = ceil(txs_per_block / C)` — it is NOT a hardcoded number. Same 500-tx
+    /// block at different C yields different N, each padded to its own P and each
+    /// reaching the root. Guards against ever baking a fixed padding boundary.
+    #[test]
+    fn padding_tracks_chunk_size_derived_leaf_count() {
+        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        let txs_per_block = 500usize;
+        // (C, expected N = ceil(500/C), expected padded P)
+        let cases = [
+            (1usize, 500usize, 512usize),
+            (2, 250, 256),
+            (4, 125, 128),
+            (8, 63, 64),
+        ];
+        for (c, expected_n, expected_p) in cases {
+            let n = txs_per_block.div_ceil(c);
+            assert_eq!(n, expected_n, "C={c}: N must be ceil(500/C)");
+            assert_eq!(
+                G::padded_leaf_count(n),
+                expected_p,
+                "C={c}: padded leaf count must track N (never hardcoded)"
+            );
+            // And the reduction actually reaches the root at this C-derived N.
+            let order: Vec<usize> = (0..n).collect();
+            let (_keys, reached) = run_full_reduction(n, &order);
+            assert!(reached, "C={c} (N={n}, P={expected_p}) must reach the root");
+        }
+    }
+
     /// Root is reached regardless of leaf ARRIVAL ORDER (reverse + a rotation),
     /// for both an even and an odd count.
     #[test]
