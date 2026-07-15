@@ -14,9 +14,9 @@ use google_cloud_pubsub::client::{Client as PubSubClient, ClientConfig as PubSub
 use futures_util::StreamExt as _;
 use log::{info, error, warn, LevelFilter};
 
-use bench::transport::gating::{GatingEngine, RedisCasStore, GatingOutcome};
+use bench::transport::gating::{CasStore, GatingEngine, RedisCasStore, GatingOutcome};
 use bench::transport::pubsub::PubSubPublisher;
-use bench::transport::{CommitOutcome, ProverEvent};
+use bench::transport::{CommitOutcome, FoldStrategy, ProverEvent};
 
 fn main() {
     env_logger::Builder::new()
@@ -77,6 +77,11 @@ fn main() {
 
     info!("Coordinator initialized. Entering event loop...");
 
+    // #321 Phase 5: local counter of reduction tasks that arrived flagged as
+    // re-driven by a crash-recovery re-drive (`GatingEngine::redrive_stale_merges`).
+    // Surfaced in logs so a stuck-seam recovery is observable operationally.
+    let mut stale_lease_redrive_count: u64 = 0;
+
     // 5. Run the synchronous event loop
     loop {
         // Pull one event message (blocking on the async stream)
@@ -112,12 +117,15 @@ fn main() {
         // `status` is the REAL published status (not hardcoded) — telemetry must
         // never inherit a fabricated status.
         info!(
-            "Received event: role={}, idx={}, status={}, prove_time_ms={}, gcs_time_ms={}, \
-             total_time_ms={}, peak_rss_bytes={}, prestate_source={}, is_first_task_on_pod={}, \
-             chunk_size={}, leaf_count={}, pull_ms={}, pre_exec_ms={}, prove_ms={}, \
-             gcs_write_ms={}, queue_wait_ms={}",
+            "Received event: role={}, idx={}, fold_strategy={:?}, level={}, status={}, \
+             prove_time_ms={}, gcs_time_ms={}, total_time_ms={}, peak_rss_bytes={}, \
+             prestate_source={}, is_first_task_on_pod={}, chunk_size={}, leaf_count={}, \
+             pull_ms={}, pre_exec_ms={}, prove_ms={}, gcs_write_ms={}, queue_wait_ms={}, \
+             fold_kind={}, merge_interval_span={}, redriven_after_lease_expiry={}",
             desc.role.as_str(),
             desc.chunk_idx,
+            desc.fold_strategy,
+            desc.level,
             event.status,
             event.prove_time_ms,
             event.gcs_time_ms,
@@ -132,7 +140,22 @@ fn main() {
             event.prove_ms,
             event.gcs_write_ms,
             event.queue_wait_ms,
+            event.fold_kind,
+            event.merge_interval_span,
+            event.redriven_after_lease_expiry,
         );
+
+        // #321 Phase 5: count re-driven tasks so a recovery re-drive is
+        // operationally observable. A task is re-driven when a crash-recovery
+        // pass (`GatingEngine::redrive_stale_merges`) re-published a lost merge.
+        if event.redriven_after_lease_expiry {
+            stale_lease_redrive_count += 1;
+            info!(
+                "Task {} was RE-DRIVEN by crash recovery (stale-lease re-drive count now {}).",
+                desc.output_key(),
+                stale_lease_redrive_count
+            );
+        }
 
         if event.status != "success" {
             warn!("Skipping non-success event for role={}, idx={}", desc.role.as_str(), desc.chunk_idx);
@@ -140,11 +163,40 @@ fn main() {
             continue;
         }
 
-        // Run the gating engine (sync). NOTE: the `CommitOutcome::Committed`
-        // argument here is a known-separate gating-outcome concern tracked
-        // elsewhere and is intentionally left unchanged by #328 — this task only
-        // enriches telemetry, it does not alter gating semantics.
-        match gating_engine.on_child_committed(&desc, CommitOutcome::Committed) {
+        // Derive the REAL commit outcome from the event status rather than
+        // hardcoding `Committed`. This removes the hardcoded-`Committed`
+        // telemetry-lie noted in #328/#321: a completion event only reaches the
+        // gate on success (non-success `continue`s above), but we still pass the
+        // truthfully-mapped outcome instead of inventing one. `"success"` maps to
+        // `Committed`; anything else is treated as not-committed (`AlreadyExists`),
+        // which the gate treats as `NotWinner` — never advancing readiness.
+        let outcome = if event.status == "success" {
+            CommitOutcome::Committed
+        } else {
+            CommitOutcome::AlreadyExists
+        };
+
+        // Route by the descriptor's fold strategy (#321 Phase 5). Reduction
+        // descriptors drive the order-free interval gate (`on_interval_committed`);
+        // hex descriptors keep the existing fixed-node gate (`on_child_committed`)
+        // UNCHANGED. A reduction LEAF is the interval [chunk_idx, chunk_idx] at
+        // level 0 (the `reduction_leaf` ctor sets lo=hi=chunk_idx, level 0), so
+        // routing on `desc.lo`/`desc.hi`/`desc.level` is correct for both leaves
+        // and folds.
+        let gating_result = match desc.fold_strategy {
+            FoldStrategy::Reduction => gating_engine.on_interval_committed(
+                desc.lo,
+                desc.hi,
+                desc.level,
+                desc.radix,
+                desc.leaf_count,
+                desc.tx_per_proof,
+                outcome,
+            ),
+            FoldStrategy::Hex => gating_engine.on_child_committed(&desc, outcome),
+        };
+
+        match gating_result {
             Ok(outcome) => {
                 match outcome {
                     GatingOutcome::NotWinner => {
@@ -154,16 +206,48 @@ fn main() {
                         info!("Recorded child {}. Progress: {}/{} completed.", desc.output_key(), have, needed);
                     }
                     GatingOutcome::PublishedParent(parent_desc) => {
-                        info!("Gate OPENED for parent {}. Published fold task to queue.", parent_desc.output_key());
+                        info!(
+                            "Gate OPENED for parent {} (fold_strategy={:?}, level={}). Published fold task to queue.",
+                            parent_desc.output_key(),
+                            parent_desc.fold_strategy,
+                            parent_desc.level,
+                        );
                     }
                     GatingOutcome::ParentAlreadyPublished => {
                         info!("Gate OPENED for parent {}, but it was already published by another instance.", desc.output_key());
                     }
                     GatingOutcome::RootReached => {
-                        info!("ROOT REACHED! Tree reduction complete for {}", desc.output_key());
+                        match desc.fold_strategy {
+                            FoldStrategy::Reduction => {
+                                // #321 Phase 5: interval termination. The padded
+                                // reduction tree reached its single root spanning
+                                // [0, padded-1]. Make termination OBSERVABLE (a
+                                // clear log + a completion marker in the store) but
+                                // do NOT `std::process::exit` mid-loop — the
+                                // coordinator is a long-lived daemon that may serve
+                                // other runs/replays.
+                                let padded = GatingEngine::<RedisCasStore, PubSubPublisher>::padded_leaf_count(desc.leaf_count);
+                                info!(
+                                    "REDUCTION ROOT REACHED [0, {}] — reduction complete for leaf_count={} (padded={}).",
+                                    padded.saturating_sub(1),
+                                    desc.leaf_count,
+                                    padded,
+                                );
+                                // Best-effort completion marker; a failure to write
+                                // it is logged but does not crash the daemon.
+                                let complete_key = format!("rgate/complete/{}", desc.leaf_count);
+                                match redis_store.cas_create(&complete_key, b"1") {
+                                    Ok(_) => info!("Marked run complete: {complete_key}"),
+                                    Err(e) => warn!("Failed to write completion marker {complete_key}: {e}"),
+                                }
+                            }
+                            FoldStrategy::Hex => {
+                                info!("ROOT REACHED! Tree reduction complete for {}", desc.output_key());
+                            }
+                        }
                     }
                 }
-                
+
                 // Successfully processed, ACK the event
                 if let Err(e) = rt.block_on(async { msg.ack().await }) {
                     error!("Failed to ACK event for {}: {e}", desc.output_key());

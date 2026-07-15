@@ -2243,7 +2243,10 @@ fn run_dispatch_loop<T: WorkTransport>(
         let prove_start = Instant::now();
         // #328 Phase 1: capture the pre-state provenance for the completion-event
         // telemetry. Only the leaf role has a pre-state; fold/root are "n/a".
-        let (bytes, role_tag, prestate_source) = match d.role {
+        // #321 Phase 5: also capture the reduction fold_kind + merged-interval
+        // span so real folds size separately from padding no-op folds. Both are
+        // NotApplicable/0 for non-reduction roles (honest sentinels).
+        let (bytes, role_tag, prestate_source, fold_kind, merge_interval_span) = match d.role {
             WorkRole::Leaf => {
                 info!(
                     "[dispatch] worker={worker} leaf chunk {} -> {}",
@@ -2263,6 +2266,9 @@ fn run_dispatch_loop<T: WorkTransport>(
                     bincode::serialize(&proof).expect("serialize leaf proof"),
                     "leaf",
                     prestate,
+                    // Leaves are not folds; fold_kind is n/a and span 0.
+                    bench::telemetry::FoldKind::NotApplicable,
+                    0usize,
                 )
             }
             WorkRole::TreeNode => {
@@ -2291,6 +2297,10 @@ fn run_dispatch_loop<T: WorkTransport>(
                     "fold",
                     // Folds have no pre-state.
                     TelemetryPrestateSource::NotApplicable,
+                    // Hex tree-node folds are not the reduction path; fold_kind is
+                    // n/a (the real/padding-noop distinction is a reduction concept).
+                    bench::telemetry::FoldKind::NotApplicable,
+                    0usize,
                 )
             }
             WorkRole::RootCoordinator => {
@@ -2315,11 +2325,27 @@ fn run_dispatch_loop<T: WorkTransport>(
                     d.output_key()
                 );
                 let parent = aggregate_pair(d.level, d.lo, d.hi, d.leaf_count, timing);
+                // #321 Phase 5: surface the fold kind so a report can size real
+                // folds separately from nearly-free padding no-op folds. This
+                // mirrors `aggregate_pair`'s dispatch EXACTLY: the right child is
+                // entirely padding (the `right_is_real = false` no-op passthrough)
+                // when its interval starts past the last real leaf.
+                let span = d.hi - d.lo + 1;
+                let mid = d.lo + (span / 2) - 1;
+                let right_lo = mid + 1;
+                let fold_kind = if right_lo >= d.leaf_count {
+                    bench::telemetry::FoldKind::PaddingNoop
+                } else {
+                    bench::telemetry::FoldKind::Real
+                };
                 (
                     bincode::serialize(&parent).expect("serialize reduction parent proof"),
                     "reduction-fold",
                     // Reduction folds have no pre-state.
                     TelemetryPrestateSource::NotApplicable,
+                    fold_kind,
+                    // The merged interval span this fold's output covers.
+                    span,
                 )
             }
         };
@@ -2345,6 +2371,10 @@ fn run_dispatch_loop<T: WorkTransport>(
         task_telemetry.pull_ms = pull_latency_ms as u64;
         // pre_exec_ms / queue_wait_ms left at 0 (see comment above): not
         // separable yet — reported honestly, never fabricated.
+        // #321 Phase 5: reduction fold_kind + merged-interval span (n/a / 0 for
+        // non-reduction roles).
+        task_telemetry.fold_kind = fold_kind;
+        task_telemetry.merge_interval_span = merge_interval_span;
 
         // ── [instrumentation] COMMIT_latency_ms + outcome ────────────────────
         // Atomic idempotent commit + readiness gating (publishes the parent fold

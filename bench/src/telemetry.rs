@@ -145,6 +145,39 @@ pub struct TaskTelemetry {
     pub queue_wait_ms: u64,
     /// Whether this was the FIRST task on the pod (cold, circuit-build-paying).
     pub is_first_task_on_pod: bool,
+    /// (#321 Phase 5) The reduction fold kind for this task, so real folds size
+    /// separately from nearly-free padding no-op folds. See
+    /// [`FoldKind`]. Defaults to [`FoldKind::NotApplicable`] (leaf/hex).
+    pub fold_kind: FoldKind,
+    /// (#321 Phase 5) The merged interval span `hi - lo + 1` for a reduction
+    /// event; `0` for non-reduction (honest zero — no interval).
+    pub merge_interval_span: usize,
+}
+
+/// (#321 Phase 5) The kind of reduction fold a task performed, so REAL folds are
+/// sized separately from the nearly-free PADDING no-op passthrough folds.
+/// Surfaced from the prover's `Role::ReductionFold` dispatch (which already
+/// decides `prove_padding` when the right child is entirely padding).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldKind {
+    /// A real same-height fold of two real children.
+    Real,
+    /// The `right_is_real = false` right-padding passthrough (nearly free).
+    PaddingNoop,
+    /// Leaf / hex / non-reduction task — no fold-kind concept applies.
+    NotApplicable,
+}
+
+impl FoldKind {
+    /// The stable wire string emitted in the completion event
+    /// ([`crate::transport::ProverEvent::fold_kind`]).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FoldKind::Real => "real",
+            FoldKind::PaddingNoop => "padding-noop",
+            FoldKind::NotApplicable => "n/a",
+        }
+    }
 }
 
 impl TaskTelemetry {
@@ -163,6 +196,9 @@ impl TaskTelemetry {
             pre_exec_ms: 0,
             queue_wait_ms: 0,
             is_first_task_on_pod,
+            // Non-reduction default; the reduction dispatch arm sets these.
+            fold_kind: FoldKind::NotApplicable,
+            merge_interval_span: 0,
         }
     }
 }
