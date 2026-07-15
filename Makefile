@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster cloud-gke-provision cloud-gke-bench cloud-gke-destroy test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast lint-reports
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster cloud-gke-provision cloud-gke-bench cloud-gke-destroy test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast bench-reduction-local lint-reports
 
 # Dynamic GKE architecture default (defaults to 'all' unless ARCH is explicitly overridden on command line)
 GKE_ARCH = $(if $(filter command line,$(origin ARCH)),$(ARCH),all)
@@ -89,6 +89,9 @@ local-build-and-run: ## Build and run local ZKP benchmark binary (bench/Makefile
 
 test-distributed-fast: ## Execute 2-minute scaled developer distributed proving simulation (C=4 chunks over local Pub/Sub)
 	@bash infra-as-code/scripts/container.sh test-distributed-fast
+
+bench-reduction-local: ## Run local reduction pipeline, capture logs, and extract a provenance-stamped sizing report (#321 Phase 7 / #328)
+	@bash infra-as-code/scripts/container.sh bench-reduction-local
 
 lint-reports: ## Anti-fabrication guard: fail if fabricated benchmark metrics reappear in scripts or reports (#282)
 	@bash infra-as-code/scripts/check_no_fabricated_reports.sh

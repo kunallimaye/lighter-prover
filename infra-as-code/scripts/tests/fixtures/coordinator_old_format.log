@@ -1,0 +1,8 @@
+SYNTHETIC FIXTURE (issue #321 Phase 7) — NOT a real benchmark.
+Pre-#328 coordinator lines: ONLY the original five fields. Used to prove the
+extended parser is BACK-COMPATIBLE (old logs still parse, #328 fields read as
+None, nothing crashes). Numbers are invented for the test; never measured.
+2026-06-01T00:00:00.000000000Z INFO coordinator: Received event: role=leaf, idx=0, status=success, prove_time_ms=1000, gcs_time_ms=200, total_time_ms=1200
+2026-06-01T00:00:01.000000000Z INFO coordinator: Received event: role=leaf, idx=1, status=success, prove_time_ms=1100, gcs_time_ms=210, total_time_ms=1310
+2026-06-01T00:00:02.000000000Z INFO coordinator: Received event: role=node, idx=0, status=success, prove_time_ms=800, gcs_time_ms=100, total_time_ms=900
+2026-06-01T00:00:03.000000000Z INFO coordinator: ROOT REACHED!
