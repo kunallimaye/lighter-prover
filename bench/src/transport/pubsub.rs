@@ -317,6 +317,12 @@ pub struct PubSubPublisher {
 
 impl Publisher for PubSubPublisher {
     fn publish(&self, descriptor: WorkDescriptor) -> Result<(), CasError> {
+        // #321 Phase 6: stamp the dispatch time AT THE PUBLISH BOUNDARY (not in
+        // the pure GatingEngine, which emits `dispatch_ts_ms = 0`). This is where
+        // a fold descriptor is actually handed to the transport for a worker to
+        // pull, so `now` is the true "published for dispatch" instant a worker
+        // subtracts on pull to get the honest `queue_wait_ms`.
+        let descriptor = descriptor.stamped_now();
         let data = serde_json::to_vec(&descriptor)
             .map_err(|e| CasError(format!("descriptor serialize: {e}")))?;
         let topic = self.topic.clone();
@@ -631,6 +637,12 @@ impl WorkTransport for PubSubGcsTransport {
                 fold_kind: telemetry.fold_kind.as_str().to_string(),
                 merge_interval_span: telemetry.merge_interval_span,
                 redriven_after_lease_expiry: descriptor.redriven,
+                // #321 Phase 6: dispatch-scheduling telemetry. `pull_ts_ms` (the
+                // wall-clock pull time) and `scheduling_class` (which seed order
+                // this run used) come from the dispatch loop; both let a later
+                // extractor compute the leaf wave width and self-describe the run.
+                pull_ts_ms: telemetry.pull_ts_ms,
+                scheduling_class: telemetry.scheduling_class.as_str().to_string(),
             };
             self.event_publisher
                 .publish_event(&event)
@@ -641,9 +653,19 @@ impl WorkTransport for PubSubGcsTransport {
 }
 
 impl PubSubGcsTransport {
-    /// Seed the N leaf descriptors onto the topic (the dispatch loop's bootstrap).
-    pub fn seed_leaves(&self, radix: usize, leaf_count: usize, tx_per_proof: usize) {
-        for d in super::seed_leaf_descriptors(radix, leaf_count, tx_per_proof) {
+    /// Seed the N leaf descriptors onto the topic (the dispatch loop's bootstrap),
+    /// in the requested [`SeedOrder`](super::SeedOrder). Each publish re-stamps the
+    /// descriptor's `dispatch_ts_ms` at the true publish instant (see
+    /// [`super::WorkDescriptor::stamped_now`]) so a worker computes an honest
+    /// `queue_wait_ms`; only the ORDER differs between seed orders.
+    pub fn seed_leaves(
+        &self,
+        radix: usize,
+        leaf_count: usize,
+        tx_per_proof: usize,
+        order: super::SeedOrder,
+    ) {
+        for d in super::seed_leaf_descriptors_scheduled(radix, leaf_count, tx_per_proof, order) {
             self.publish(d);
         }
     }
@@ -671,12 +693,15 @@ impl PubSubGcsTransport {
         radix: usize,
         leaf_count: usize,
         tx_per_proof: usize,
+        order: super::SeedOrder,
     ) {
         log::info!(
             "[seed] seeding {leaf_count} leaf descriptor(s) intended for object-prefix \
-             namespace '{prefix}' (radix={radix}, tx_per_proof={tx_per_proof})"
+             namespace '{prefix}' (radix={radix}, tx_per_proof={tx_per_proof}, \
+             seed_order={})",
+            order.as_str()
         );
-        self.seed_leaves(radix, leaf_count, tx_per_proof);
+        self.seed_leaves(radix, leaf_count, tx_per_proof, order);
     }
 
     /// The configured ack deadline (seconds).
