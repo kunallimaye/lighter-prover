@@ -50,9 +50,13 @@ resource "google_container_node_pool" "proving_pool" {
       mode = "GKE_METADATA"
     }
 
-    # Starvation Prevention & Topology Affinity
+    # Image Streaming DISABLED: it lazily streams file content and does not
+    # reliably present the large baked circuit artifacts (/data/circuits, up to
+    # ~1.2GB each) to the container, forcing cold circuit BUILDS (~80s/fold)
+    # instead of warm LOADS (~10s). Full image pull is required for baked
+    # circuits to be visible. See issue #344.
     gcfs_config {
-      enabled = true
+      enabled = false
     }
 
     kubelet_config {
@@ -112,8 +116,13 @@ resource "google_container_node_pool" "fungible_leaf_pool" {
       mode = "GKE_METADATA"
     }
 
+    # Image Streaming DISABLED: it lazily streams file content and does not
+    # reliably present the large baked circuit artifacts (/data/circuits, up to
+    # ~1.2GB each) to the container, forcing cold circuit BUILDS (~80s/fold)
+    # instead of warm LOADS (~10s). Full image pull is required for baked
+    # circuits to be visible. See issue #344.
     gcfs_config {
-      enabled = true
+      enabled = false
     }
 
     kubelet_config {
@@ -168,8 +177,13 @@ resource "google_container_node_pool" "fungible_agg_pool" {
       mode = "GKE_METADATA"
     }
 
+    # Image Streaming DISABLED: it lazily streams file content and does not
+    # reliably present the large baked circuit artifacts (/data/circuits, up to
+    # ~1.2GB each) to the container, forcing cold circuit BUILDS (~80s/fold)
+    # instead of warm LOADS (~10s). Full image pull is required for baked
+    # circuits to be visible. See issue #344.
     gcfs_config {
-      enabled = true
+      enabled = false
     }
 
     kubelet_config {
