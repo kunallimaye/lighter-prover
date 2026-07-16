@@ -43,20 +43,39 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
 # for cold-start cost, set --build-arg BAKE_NODE_LEVELS=0 (bakes only the app
 # circuits; nodes build on demand, exactly the #322 Phase B behaviour).
 #
-# Best-effort: if bake fails the runtime safely falls back to building (see
-# prover_node.rs `try_load_recursion_circuit` / `try_load_block_circuit`). Bump
-# CIRCUIT_ARTIFACT_VERSION on a plonky2/param change to invalidate stale art.
+# FAIL LOUD: bake must succeed or the build fails (issue #342). The old
+# `|| echo WARNING` swallowed a bake crash and shipped an EMPTY /data/circuits,
+# so every pod silently cold-BUILT every circuit (~80s hex folds instead of
+# ~10s loads) on EVERY image since #322/#338. Bump CIRCUIT_ARTIFACT_VERSION on a
+# plonky2/param change to invalidate stale art.
+#
+# PORTABLE BAKE BINARY (issue #342): the runtime binary above is compiled with
+# RUSTFLAGS=-C target-cpu=znver4 / x86-64-v4 (AVX-512). The Cloud Build worker
+# does NOT support AVX-512, so RUNNING that binary here crashes with SIGILL
+# ("Illegal instruction"). Cross-COMPILING AVX-512 is fine (the compiler emits
+# instructions it never runs); baking is the only step that EXECUTES the binary
+# on the worker. So we build a SEPARATE bake-only prover-node at x86-64-v3 (AVX2,
+# supported by every Cloud Build worker) into a distinct CARGO_TARGET_DIR and
+# bake with THAT. Baked artifacts are serialised CircuitData (plain data, no
+# machine code) stamped with the plonky2 rev (CIRCUIT_ARTIFACT_VERSION), NOT the
+# CPU — so a v3-baked artifact loads and VK-verifies identically under the v4
+# runtime. The runtime binaries above stay at the fast znver4/v4 target.
+RUN if [ -n "${CARGO_FEATURES}" ]; then \
+      CARGO_TARGET_DIR=/app/bake-target RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --target x86_64-unknown-linux-gnu --bin prover-node --features "${CARGO_FEATURES}"; \
+    else \
+      CARGO_TARGET_DIR=/app/bake-target RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release --target x86_64-unknown-linux-gnu --bin prover-node; \
+    fi
+
 # Comma-separated chunk sizes to bake the BlockTx circuit for, so the image
 # is warm for whatever C a run selects (bake vs run must not drift — attempt-49
 # baked s1 but ran C=4). Default "1,4" covers the C=1 smoke + C=4 GKE default.
 ARG BAKE_TX_PER_PROOF=1,4
 ARG BAKE_NODE_LEVELS=2
 RUN mkdir -p /artifacts && RUST_MIN_STACK=4294967296 \
-      /app/target/x86_64-unknown-linux-gnu/release/prover-node bake \
+      /app/bake-target/x86_64-unknown-linux-gnu/release/prover-node bake \
       --tx-per-proof "${BAKE_TX_PER_PROOF}" \
       --bake-node-levels "${BAKE_NODE_LEVELS}" \
-      --artifact-dir /artifacts \
-    || echo '[bake] WARNING: circuit bake failed; runtime will build on demand';
+      --artifact-dir /artifacts
 
 # ─── Stage 2: Minimal High-Throughput Compute Runtime ────────────────
 FROM debian:bookworm-slim AS runtime
