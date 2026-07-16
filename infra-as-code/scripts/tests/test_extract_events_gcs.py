@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+# Copyright (c) Elliot Technologies, Inc.
+# SPDX-License-Identifier: BUSL-1.1
+
+"""Unit tests for the #347 events-GCS input mode of extract_gke_telemetry.py.
+
+These tests feed the extractor SYNTHETIC ProverEvent JSON dicts (the exact shape
+a prover pod writes to `<run-prefix>/events/<key>.json`) and assert that:
+
+  * a ProverEvent JSON maps into the same event-dict shape the coordinator-log
+    parser produces (so the SAME derivation math runs),
+  * dedup by logical key collapses concurrent-pod / redrive duplicates to ONE
+    logical task while COUNTING the extra attempts,
+  * build_metrics_from_events computes the SAME bench_summary fields
+    (core_sec_per_block, fleet_sizing_projection, leaf/fold split, peak RSS)
+    the coordinator-log path computes.
+
+The fixtures are invented for deterministic MATH tests — NOT measured benchmark
+data, and never written under reports/. This validates the CODE, not perf. No
+GCS/network is touched: only the pure mapping + math functions are exercised.
+
+Runs two ways:
+  * pytest infra-as-code/scripts/tests/test_extract_events_gcs.py
+  * python3 infra-as-code/scripts/tests/test_extract_events_gcs.py  (self-test)
+"""
+
+import importlib.util
+import os
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPT = os.path.join(_HERE, "..", "extract_gke_telemetry.py")
+
+_spec = importlib.util.spec_from_file_location("extract_gke_telemetry", _SCRIPT)
+ext = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ext)
+
+
+def _prover_event(role, *, level=0, chunk_idx=0, node_idx=0, lo=0, hi=0,
+                  prove_ms=1000, peak_rss=0, fold_kind="n/a",
+                  is_first=False, status="success", tx_per_proof=4,
+                  leaf_count=4, merge_span=0):
+  """Build ONE ProverEvent JSON dict exactly as a prover pod serializes it."""
+  return {
+      "descriptor": {
+          "role": role,
+          "radix": 2,
+          "leaf_count": leaf_count,
+          "tx_per_proof": tx_per_proof,
+          "chunk_idx": chunk_idx,
+          "level": level,
+          "node_idx": node_idx,
+          "lo": lo,
+          "hi": hi,
+          "fold_strategy": "reduction" if role == "reduction-fold" else "hex",
+          "redriven": False,
+          "dispatch_ts_ms": 0,
+      },
+      "status": status,
+      "prove_time_ms": prove_ms,
+      "gcs_time_ms": 50,
+      "total_time_ms": prove_ms + 50,
+      "peak_rss_bytes": peak_rss,
+      "prestate_source": "corpus" if role == "leaf" else "n/a",
+      "pull_ms": 0,
+      "pre_exec_ms": 0,
+      "prove_ms": prove_ms,
+      "gcs_write_ms": 50,
+      "queue_wait_ms": 0,
+      "is_first_task_on_pod": is_first,
+      "chunk_size": tx_per_proof,
+      "leaf_count": leaf_count,
+      "fold_kind": fold_kind,
+      "merge_interval_span": merge_span,
+      "redriven_after_lease_expiry": False,
+      "pull_ts_ms": 0,
+      "scheduling_class": "sequential",
+  }
+
+
+# ---------------------------------------------------------------------------
+# Mapping: ProverEvent JSON -> extractor event-dict.
+# ---------------------------------------------------------------------------
+def test_map_leaf_event():
+  ev = ext.prover_event_json_to_event(
+      _prover_event("leaf", chunk_idx=3, prove_ms=990, peak_rss=4_200_000_000)
+  )
+  assert ev is not None
+  assert ev["role"] == "leaf"
+  assert ev["idx"] == 3          # leaf addressed by chunk_idx
+  assert ev["prove_ms"] == 990
+  assert ev["peak_rss_bytes"] == 4_200_000_000
+  assert ev["status"] == "success"
+
+
+def test_map_reduction_fold_derives_span():
+  # No explicit merge_interval_span -> derived from lo/hi interval [2,3] -> 2.
+  ev = ext.prover_event_json_to_event(
+      _prover_event("reduction-fold", level=1, lo=2, hi=3, merge_span=0)
+  )
+  assert ev["role"] == "reduction-fold"
+  assert ev["merge_interval_span"] == 2
+  assert ev["level"] == 1
+
+
+def test_map_rejects_garbage():
+  assert ext.prover_event_json_to_event({"no": "descriptor"}) is None
+  assert ext.prover_event_json_to_event("not a dict") is None
+
+
+# ---------------------------------------------------------------------------
+# Dedup by logical key: concurrent pods + redrives collapse; count preserved.
+# ---------------------------------------------------------------------------
+def test_dedup_counts_redrives():
+  # Same logical leaf proved by TWO pods (redrive/race): distinct GCS objects,
+  # same logical key -> collapses to 1, with 1 extra attempt counted.
+  raw = [
+      ext.prover_event_json_to_event(_prover_event("leaf", chunk_idx=0, prove_ms=100)),
+      ext.prover_event_json_to_event(_prover_event("leaf", chunk_idx=0, prove_ms=110)),
+      ext.prover_event_json_to_event(_prover_event("leaf", chunk_idx=1, prove_ms=200)),
+  ]
+  deduped, redrive_extra = ext.dedupe_events_by_logical_key(raw)
+  assert len(deduped) == 2          # two DISTINCT logical leaves
+  assert redrive_extra == 1         # one extra attempt on leaf 0
+
+
+def test_dedup_prefers_success():
+  raw = [
+      ext.prover_event_json_to_event(_prover_event("leaf", chunk_idx=0, status="failed")),
+      ext.prover_event_json_to_event(_prover_event("leaf", chunk_idx=0, status="success", prove_ms=123)),
+  ]
+  deduped, redrive_extra = ext.dedupe_events_by_logical_key(raw)
+  assert len(deduped) == 1
+  assert deduped[0]["status"] == "success"
+  assert deduped[0]["prove_ms"] == 123
+  assert redrive_extra == 1
+
+
+# ---------------------------------------------------------------------------
+# Metrics build: same core_sec_per_block + fleet projection as the log path.
+# ---------------------------------------------------------------------------
+def _sample_run_events():
+  # 4 leaves @ prove_ms=1000 each, 3 folds @ prove_ms=500 each (a 4-leaf
+  # reduction tree). total_cpu = 4*1.0 + 3*0.5 = 5.5 core-sec.
+  leaves = [
+      ext.prover_event_json_to_event(_prover_event("leaf", chunk_idx=i, prove_ms=1000,
+                                                    peak_rss=4_200_000_000))
+      for i in range(4)
+  ]
+  folds = [
+      ext.prover_event_json_to_event(_prover_event("reduction-fold", level=1, lo=0, hi=1,
+                                                    prove_ms=500, fold_kind="real")),
+      ext.prover_event_json_to_event(_prover_event("reduction-fold", level=1, lo=2, hi=3,
+                                                    prove_ms=500, fold_kind="real")),
+      ext.prover_event_json_to_event(_prover_event("reduction-fold", level=2, lo=0, hi=3,
+                                                    prove_ms=500, fold_kind="real")),
+  ]
+  return leaves + folds
+
+
+def test_metrics_core_sec_per_block():
+  events = _sample_run_events()
+  m = ext.build_metrics_from_events(events, run_config={"blocks": 1},
+                                    target_bps=[10, 12])
+  tp = m["throughput"]
+  assert tp["measured"] is True
+  assert abs(tp["leaf_cpu_core_sec"] - 4.0) < 1e-9
+  assert abs(tp["fold_cpu_core_sec"] - 1.5) < 1e-9
+  assert abs(tp["total_cpu_core_sec"] - 5.5) < 1e-9
+  # 1 block -> core_sec_per_block == total_cpu_core_sec.
+  assert abs(tp["core_sec_per_block"] - 5.5) < 1e-9
+  # Fleet projection: cores = core_sec_per_block * bps; nodes = ceil(cores/60).
+  proj = {r["target_bps"]: r for r in tp["fleet_sizing_projection"]["by_target_bps"]}
+  assert abs(proj[10]["cores_required"] - 55.0) < 1e-9
+  assert proj[10]["c3d_nodes_required"] == 1     # ceil(55/60)
+  assert abs(proj[12]["cores_required"] - 66.0) < 1e-9
+  assert proj[12]["c3d_nodes_required"] == 2     # ceil(66/60)
+
+
+def test_metrics_core_sec_per_block_multi_block():
+  # Same per-task cost, but 2 blocks -> core_sec_per_block halves.
+  events = _sample_run_events()
+  m = ext.build_metrics_from_events(events, run_config={"blocks": 2})
+  assert abs(m["throughput"]["core_sec_per_block"] - 2.75) < 1e-9
+
+
+def test_metrics_peak_rss_and_redrive_surfaced():
+  events = _sample_run_events()
+  m = ext.build_metrics_from_events(events, run_config={"blocks": 1},
+                                    redrive_extra=3)
+  # peak RSS max over successful leaf events x safety margin (via sizing).
+  leaf_rss = m["derived"]["leaf_peak_rss"]
+  assert leaf_rss["peak_rss_measured"] is True
+  assert leaf_rss["peak_rss_bytes_max"] == 4_200_000_000
+  # #347 redrive count from GCS objects is preserved in recovery.
+  assert m["derived"]["recovery"]["redrive_extra_attempts_from_gcs_events"] == 3
+
+
+def test_metrics_full_summary_shape_matches_log_path():
+  # The events-GCS metrics must feed build_summary just like the log path.
+  events = _sample_run_events()
+  m = ext.build_metrics_from_events(events, run_config={"blocks": 1})
+  sizing = ext.build_sizing_derivation(m)
+  summary = ext.build_summary(m, {"engine": "gke"}, {"source_kind": "events-gcs"}, sizing)
+  # Same top-level keys the coordinator-log path produces.
+  for key in ("cryptographic_phase_telemetry", "throughput", "derived_sizing_metrics",
+              "sizing_derivation", "descriptors", "provenance", "metadata"):
+    assert key in summary
+  assert summary["throughput"]["core_sec_per_block"] is not None
+
+
+def _run_self_test():
+  tests = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and callable(v)]
+  failures = 0
+  for t in tests:
+    try:
+      t()
+      print(f"[PASS] {t.__name__}")
+    except AssertionError as e:
+      failures += 1
+      print(f"[FAIL] {t.__name__}: {e}")
+    except Exception as e:  # noqa: BLE001
+      failures += 1
+      print(f"[ERROR] {t.__name__}: {e!r}")
+  print(f"\n{len(tests) - failures}/{len(tests)} passed")
+  return 1 if failures else 0
+
+
+if __name__ == "__main__":
+  import sys
+  sys.exit(_run_self_test())
