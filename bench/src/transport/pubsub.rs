@@ -52,6 +52,7 @@
 //! descriptor at a time, so there is no benefit to overlapping async pulls, and
 //! `block_on` keeps the trait surface unchanged.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use google_cloud_googleapis::pubsub::v1::PubsubMessage;
@@ -195,6 +196,60 @@ impl GcsCasStore {
             format!("{}{}", self.object_prefix, key)
         }
     }
+
+    /// (#347) The GCS prefix of the durable per-pod telemetry directory: a
+    /// SIBLING of the `stark_proofs/` dir the pod writes proofs under. The proof
+    /// `object_prefix` is always `<run-prefix>/stark_proofs/` (see
+    /// `render_pod_spec.py`), so the events prefix is `<run-prefix>/events/`.
+    /// Derived by swapping the trailing `stark_proofs/` segment for `events/`;
+    /// if the prefix does not end in `stark_proofs/` (unexpected), fall back to
+    /// appending `events/` so the write is still scoped under the run prefix and
+    /// never lands at the bucket root.
+    fn events_prefix(&self) -> String {
+        const PROOFS_SEG: &str = "stark_proofs/";
+        if let Some(base) = self.object_prefix.strip_suffix(PROOFS_SEG) {
+            format!("{base}events/")
+        } else if self.object_prefix.is_empty() {
+            "events/".to_string()
+        } else if self.object_prefix.ends_with('/') {
+            format!("{}events/", self.object_prefix)
+        } else {
+            format!("{}/events/", self.object_prefix)
+        }
+    }
+
+    /// (#347) Durably persist ONE per-task telemetry object to the run's
+    /// `events/` GCS prefix — the decoupled, coordinator-independent telemetry
+    /// source. `unique_key` MUST be collision-free across pods AND redrives (the
+    /// caller builds it from the descriptor identity + a pod/uuid suffix) so two
+    /// pods proving the same logical key each land their OWN object and no attempt
+    /// is lost. This is a PLAIN upload (NOT the `ifGenerationMatch=0` CAS): every
+    /// attempt is its own object, so a redrive/dupe never 412s away a record.
+    ///
+    /// Best-effort: the caller treats any error as non-fatal (a telemetry write
+    /// must never fail a proof) and logs it. Returns the full object path on
+    /// success for an INFO log.
+    fn write_event(&self, unique_key: &str, json_bytes: &[u8]) -> Result<String, CasError> {
+        let object = format!("{}{}", self.events_prefix(), unique_key);
+        // Plain upload (no if_generation_match): each event is a distinct object
+        // keyed by a uuid-suffixed unique_key, so no CAS is needed or wanted —
+        // we WANT every attempt recorded for redrive analysis.
+        let req = UploadObjectRequest {
+            bucket: self.bucket.clone(),
+            ..Default::default()
+        };
+        let media = Media::new(object.clone());
+        let upload_type = UploadType::Simple(media);
+        let data = json_bytes.to_vec();
+        let client = self.client.clone();
+        let result = self
+            .rt
+            .block_on(async move { client.upload_object(&req, data, &upload_type).await });
+        match result {
+            Ok(_) => Ok(object),
+            Err(e) => Err(CasError(format!("gcs event upload error: {e}"))),
+        }
+    }
 }
 
 /// Map a GCS HTTP error to a CAS result. A **412 Precondition Failed** (or 409
@@ -210,6 +265,55 @@ fn classify_upload_err(err: &GcsHttpError) -> Result<CommitOutcome, CasError> {
         }
     }
     Err(CasError(format!("gcs upload error: {err}")))
+}
+
+/// (#347) Monotonic per-process counter mixed into every event object key so two
+/// events emitted by the SAME pod (e.g. one pod proving several tasks) can never
+/// collide even within the same wall-clock nanosecond.
+static EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// (#347) Build a collision-free object key for a durable per-pod telemetry
+/// event, e.g. `evt_leaf_L0_N3_lo3_hi3_<pod>_<nanos>_<seq>.json`.
+///
+/// The key encodes the descriptor's LOGICAL identity (role + level + node/chunk
+/// idx + reduction interval) so a downstream extractor can dedupe by logical key,
+/// PLUS a pod/uuid-style suffix (hostname + wall-clock nanos + a per-process
+/// monotonic counter) so that:
+///   * two DIFFERENT pods proving the SAME logical key (a redrive or a race)
+///     each land their OWN object and never overwrite each other, and
+///   * the same pod emitting many events never self-collides.
+/// Every attempt is therefore recorded — the extractor dedupes by logical key
+/// later while still COUNTING redrives.
+fn event_object_key(descriptor: &WorkDescriptor) -> String {
+    // Role-appropriate index: leaves are addressed by chunk_idx, tree nodes by
+    // node_idx; reduction folds carry their interval in lo/hi.
+    let idx = match descriptor.role {
+        super::Role::Leaf => descriptor.chunk_idx,
+        _ => descriptor.node_idx,
+    };
+    // Pod identity: GKE sets HOSTNAME to the pod name; fall back to the pid so
+    // the suffix is always present (local runs / tests).
+    let pod = std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| format!("pid-{}", std::process::id()));
+    // Sanitize the pod component so it never introduces a `/` (a new GCS "dir").
+    let pod: String = pod
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "evt_{role}_L{level}_N{idx}_lo{lo}_hi{hi}_{pod}_{nanos}_{seq}.json",
+        role = descriptor.role.as_str(),
+        level = descriptor.level,
+        lo = descriptor.lo,
+        hi = descriptor.hi,
+    )
 }
 
 impl CasStore for GcsCasStore {
@@ -647,6 +751,50 @@ impl WorkTransport for PubSubGcsTransport {
             self.event_publisher
                 .publish_event(&event)
                 .unwrap_or_else(|e| panic!("failed to publish completion event for {}: {e}", descriptor.output_key()));
+
+            // (#347) DURABLE per-pod telemetry: ALSO persist the SAME event JSON
+            // directly to GCS at `<run-prefix>/events/<unique-key>.json` (a
+            // sibling of the stark_proofs/ dir the proof was just written to).
+            // This decouples telemetry survival from the coordinator stdout, the
+            // later kubectl-logs pipeline step, and the cluster lifetime: the
+            // events sit in GCS regardless of any downstream failure (attempt-57
+            // lost its throughput number because telemetry lived ONLY in the
+            // coordinator stdout — this makes it recoverable).
+            //
+            // BEST-EFFORT + NON-FATAL: a telemetry-write failure must NEVER fail
+            // a proof, so we log (WARN on failure, INFO on success) and continue.
+            // Gated on the same bucket condition as proof writes — a run with no
+            // GCS bucket (local/no-GCS) never reaches this transport, and an
+            // empty bucket is a no-op skip so nothing lands at a bogus location.
+            if self.gcs.bucket.trim().is_empty() {
+                log::warn!(
+                    "[telemetry-gcs] skipping durable event write for {}: no GCS bucket configured",
+                    descriptor.output_key()
+                );
+            } else {
+                match serde_json::to_vec(&event) {
+                    Ok(json_bytes) => {
+                        let unique_key = event_object_key(descriptor);
+                        match self.gcs.write_event(&unique_key, &json_bytes) {
+                            Ok(object) => log::info!(
+                                "[telemetry-gcs] wrote durable event for {} -> gs://{}/{}",
+                                descriptor.output_key(),
+                                self.gcs.bucket,
+                                object
+                            ),
+                            Err(e) => log::warn!(
+                                "[telemetry-gcs] durable event write FAILED for {} (non-fatal, \
+                                 event still published to Pub/Sub): {e}",
+                                descriptor.output_key()
+                            ),
+                        }
+                    }
+                    Err(e) => log::warn!(
+                        "[telemetry-gcs] failed to serialize event for {} (non-fatal): {e}",
+                        descriptor.output_key()
+                    ),
+                }
+            }
         }
         outcome
     }

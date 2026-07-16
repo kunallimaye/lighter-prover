@@ -85,6 +85,12 @@ steps:
         if [ "${_ENGINE}" = "gke" ]; then
           echo "[INFO] Cleaning GCS stark_proofs directory..."
           gsutil -m rm -rf "gs://${_TF_STATE_BUCKET}/benchmark-reports/${_BENCHMARK_ID}/${_IMAGE}/${_ARCH}/stark_proofs/*" || true
+          # (#347) Also clear the durable per-pod events/ prefix so this run's
+          # telemetry is not polluted by stale events from a prior run under the
+          # same benchmark-id (each event is uniquely keyed, so old objects would
+          # otherwise accumulate and be re-counted by the extractor).
+          echo "[INFO] Cleaning GCS events directory (#347 durable telemetry)..."
+          gsutil -m rm -rf "gs://${_TF_STATE_BUCKET}/benchmark-reports/${_BENCHMARK_ID}/${_IMAGE}/${_ARCH}/events/*" || true
         fi
 
   # 2.5 Clean Pub/Sub subscriptions to avoid stale tasks/events
@@ -157,18 +163,31 @@ steps:
           echo "[INFO] Waiting for pipeline completion (waiting on coordinator)..."
           kubectl wait --for=condition=complete job/lighter-coordinator --timeout=1200s || WORKLOAD_FAILED=true
           
-          echo "[INFO] Extracting coordinator logs..."
-          kubectl logs deployment/lighter-active-coordinator -c coordinator > active_coordinator.log
-          kubectl logs job/lighter-coordinator -c coordinator > passive_coordinator.log
-          cat active_coordinator.log passive_coordinator.log > coordinator.log
+          # Best-effort coordinator log grab (the FALLBACK telemetry source). The
+          # PRIMARY source is now the durable per-pod events/ prefix in GCS (#347),
+          # which survives even when these logs are unavailable — so a failure here
+          # is NON-FATAL and must never abort the build before telemetry runs.
+          echo "[INFO] Extracting coordinator logs (best-effort fallback source)..."
+          kubectl logs deployment/lighter-active-coordinator -c coordinator > active_coordinator.log 2>/dev/null || true
+          kubectl logs job/lighter-coordinator -c coordinator > passive_coordinator.log 2>/dev/null || true
+          cat active_coordinator.log passive_coordinator.log > coordinator.log 2>/dev/null || true
           
+          # (#347) DO NOT `exit 1` here on workload failure: that aborted the whole
+          # build and the telemetry+upload step never ran (attempt-57 lost its
+          # throughput number this way). Instead persist a marker so the telemetry
+          # step ALWAYS runs (the events are durable in GCS regardless), uploads
+          # the summary, and only THEN re-surfaces the failure as the build status.
           if [ "$${WORKLOAD_FAILED}" = "true" ]; then
-            echo "[ERROR] Coordinator Job failed or timed out. Check coordinator.log for details."
-            exit 1
+            echo "[WARNING] Coordinator Job failed or timed out. Proceeding to durable telemetry extraction (events are in GCS); the build will be marked failed AFTER upload."
+            echo "true" > workload_failed.marker
           fi
         fi
 
-  # 7. Extract GKE Telemetry & Upload bench_summary.json
+  # 7. Extract GKE Telemetry & Upload bench_summary.json.
+  #    (#347) PREFERS the durable per-pod events/ GCS prefix (decoupled from
+  #    coordinator stdout / this pipeline step / cluster lifetime) and falls back
+  #    to coordinator.log. Runs + uploads even when the workload failed, so the
+  #    throughput number is never lost to a downstream failure.
   - id: gke-telemetry
     name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'bash'
@@ -176,14 +195,52 @@ steps:
       - '-c'
       - |
         if [ "${_ENGINE}" = "gke" ]; then
+          set +e  # never let a single command abort before the upload runs
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
-          gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
+          BUCKET="${_TF_STATE_BUCKET}"
+          DEST_PREFIX="gs://$${BUCKET}/benchmark-reports/${_BENCHMARK_ID}/${_IMAGE}/${_ARCH}"
+          EVENTS_PREFIX="$${DEST_PREFIX}/events/"
+
+          # Coordinator-log fallback only needs cluster creds; the events-GCS
+          # primary source does not. Grab creds best-effort (the cluster may be
+          # gone — the events are still in GCS).
+          gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID} || true
+
+          COORD_ARG=""
+          if [ -s coordinator.log ]; then
+            COORD_ARG="--coordinator-log=coordinator.log"
+          fi
+
+          echo "[INFO] Extracting telemetry (PRIMARY: durable events-GCS $${EVENTS_PREFIX}; FALLBACK: coordinator.log)..."
           python3 infra-as-code/scripts/extract_gke_telemetry.py \
             --arch="${_ARCH}" \
-            --coordinator-log=coordinator.log \
+            --events-gcs-prefix="$${EVENTS_PREFIX}" \
+            $${COORD_ARG} \
             --config=config.toml \
             --benchmark-id="${_BENCHMARK_ID}" \
-            --image="${_IMAGE}"
+            --image="${_IMAGE}" \
+            --no-upload \
+            --out=bench_summary.json || echo "[WARNING] extractor returned non-zero; uploading whatever was produced."
+
+          # ALWAYS upload the summary + coordinator.log (if any), even when the
+          # workload failed — the durable artifacts must land regardless (#347).
+          if [ -f bench_summary.json ]; then
+            echo "[INFO] Uploading bench_summary.json -> $${DEST_PREFIX}/bench_summary.json"
+            gcloud storage cp bench_summary.json "$${DEST_PREFIX}/bench_summary.json" || echo "[WARNING] bench_summary.json upload failed."
+          else
+            echo "[WARNING] No bench_summary.json produced; nothing to upload."
+          fi
+          if [ -s coordinator.log ]; then
+            echo "[INFO] Uploading coordinator.log -> $${DEST_PREFIX}/coordinator.log"
+            gcloud storage cp coordinator.log "$${DEST_PREFIX}/coordinator.log" || echo "[WARNING] coordinator.log upload failed."
+          fi
+
+          # Re-surface a workload failure AFTER the durable upload so the build
+          # status is honest but the telemetry is never lost.
+          if [ -f workload_failed.marker ]; then
+            echo "[ERROR] Coordinator Job had failed/timed out; telemetry uploaded to $${DEST_PREFIX} regardless. Failing the build now."
+            exit 1
+          fi
         fi
 
 substitutions:

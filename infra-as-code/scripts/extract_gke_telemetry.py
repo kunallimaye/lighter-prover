@@ -392,8 +392,17 @@ def compute_derived(events):
       lvl = e.get("level")
       return f"tree_L{lvl}_N{e['idx']}"
     if role in ("reduction", "reduction-fold"):
-      # Interval identity: idx + span uniquely name the merged interval when
-      # present; fall back to (idx, level) if span is absent.
+      # Interval identity. When the exact endpoints are known (events-GCS source,
+      # #347) key on (level, lo, hi) — the TRUE logical identity of a reduction
+      # fold — so two distinct same-span intervals at one level (e.g. [0,1] and
+      # [2,3], both span 2) are NOT collapsed into a false duplicate. When only
+      # the span is known (coordinator-log source, which logs idx + span but not
+      # the endpoints) keep the existing (idx, span) key — unchanged behavior.
+      lo = e.get("lo")
+      hi = e.get("hi")
+      if lo is not None and hi is not None:
+        lvl = e.get("level")
+        return f"reduction_L{lvl}_lo{lo}_hi{hi}"
       span = e.get("merge_interval_span")
       return f"reduction_{e['idx']}_span{span}"
     return f"{role}_{e['idx']}"
@@ -640,6 +649,297 @@ def load_run_config(path):
   except Exception as e:  # noqa: BLE001
     print(f"[WARNING] Failed to read run_config {path}: {e}", file=sys.stderr)
     return None
+
+
+# ---------------------------------------------------------------------------
+# EVENTS-GCS mode (#347): durable per-pod telemetry read directly from the GCS
+# `events/` prefix — decoupled from coordinator stdout, later pipeline steps, and
+# cluster lifetime. Each prover pod writes its ProverEvent JSON to
+# `<run-prefix>/events/<unique-key>.json` at completion (a sibling of the
+# stark_proofs/ dir), so telemetry survives ANY downstream failure. This is the
+# ADDITIONAL, PREFERRED source; the coordinator-log/local-file modes stay intact.
+# ---------------------------------------------------------------------------
+
+# Map the Rust `Role` kebab-case serde tag -> the extractor's canonical role
+# string used by compute_derived/compute_throughput. (The extractor already
+# treats "tree-node" and "reduction-fold" as folds, so these pass straight
+# through; the map is explicit so an unexpected tag is visible rather than silent.)
+_GCS_ROLE_MAP = {
+    "leaf": "leaf",
+    "tree-node": "tree-node",
+    "reduction-fold": "reduction-fold",
+    "root-coordinator": "root-coordinator",
+}
+
+
+def prover_event_json_to_event(obj):
+  """Map ONE deserialized ProverEvent JSON dict (as written to GCS by a prover
+  pod) into the SAME event-dict shape `parse_event_line` produces, so the exact
+  same compute_derived / compute_throughput / stats path builds bench_summary.
+
+  The ProverEvent nests the geometry under `descriptor` (role, level, chunk_idx,
+  node_idx, lo, hi, tx_per_proof) and carries the phase timers + sizing fields at
+  the top level. Returns None if the object is not a well-formed event.
+  """
+  if not isinstance(obj, dict):
+    return None
+  desc = obj.get("descriptor")
+  if not isinstance(desc, dict):
+    return None
+
+  raw_role = desc.get("role")
+  role = _GCS_ROLE_MAP.get(raw_role, raw_role)
+  if role is None:
+    return None
+
+  # Role-appropriate index: leaves -> chunk_idx; folds/nodes -> node_idx. This
+  # mirrors the coordinator log's `idx=` field so the extractor's output_key()
+  # dedup groups the same logical keys identically across both sources.
+  if role == "leaf":
+    idx = desc.get("chunk_idx", 0)
+  else:
+    idx = desc.get("node_idx", 0)
+
+  # Reduction folds are interval-addressed; the extractor's output_key() dedup
+  # for reductions keys on (idx, merge_interval_span). The pod emits lo/hi on the
+  # descriptor and merge_interval_span at the top level (0 for non-reductions);
+  # prefer the explicit field, else derive the span from the interval so
+  # concurrent redrives of the same interval dedupe to ONE logical key.
+  merge_span = obj.get("merge_interval_span")
+  if (not merge_span) and role in ("reduction", "reduction-fold"):
+    lo = desc.get("lo", 0)
+    hi = desc.get("hi", 0)
+    merge_span = (hi - lo + 1) if hi >= lo else 0
+
+  fold_strategy = desc.get("fold_strategy")
+  if isinstance(fold_strategy, str):
+    fold_strategy = fold_strategy.lower()
+
+  return {
+      # No wall-clock timestamp travels in the ProverEvent payload (the pull_ts_ms
+      # field is a dispatch timestamp, not an emit timestamp); None is honest.
+      "ts": None,
+      "role": role,
+      "idx": int(idx),
+      "status": obj.get("status", "success"),
+      "prove_time_ms": int(obj.get("prove_time_ms", 0)),
+      "gcs_time_ms": int(obj.get("gcs_time_ms", 0)),
+      "total_time_ms": int(obj.get("total_time_ms", 0)),
+      # ---- per-task sizing fields (present in every #347 event; None-tolerant) --
+      "fold_strategy": fold_strategy,
+      "level": desc.get("level"),
+      "peak_rss_bytes": obj.get("peak_rss_bytes"),
+      "prestate_source": obj.get("prestate_source"),
+      "is_first_task_on_pod": obj.get("is_first_task_on_pod"),
+      "chunk_size": obj.get("chunk_size"),
+      "leaf_count": obj.get("leaf_count"),
+      "pull_ms": obj.get("pull_ms"),
+      "pre_exec_ms": obj.get("pre_exec_ms"),
+      "prove_ms": obj.get("prove_ms"),
+      "gcs_write_ms": obj.get("gcs_write_ms"),
+      "queue_wait_ms": obj.get("queue_wait_ms"),
+      "fold_kind": obj.get("fold_kind"),
+      "merge_interval_span": merge_span,
+      "redriven_after_lease_expiry": obj.get("redriven_after_lease_expiry"),
+      # #347: the reduction interval endpoints. Present ONLY on events-GCS
+      # events (the ProverEvent descriptor carries lo/hi); coordinator-log
+      # events lack them. output_key() uses them, WHEN present, to disambiguate
+      # distinct same-span intervals at the same level (two folds covering
+      # [0,1] and [2,3] both have span 2 but are DIFFERENT logical tasks).
+      "lo": desc.get("lo"),
+      "hi": desc.get("hi"),
+      # #347 dedup helper: the LOGICAL key (role+level+idx+interval) shared by all
+      # attempts (redrives) of the same task. Not emitted into bench_summary; used
+      # only to dedupe + count redrives below.
+      "_logical_key": (
+          f"{role}|L{desc.get('level', 0)}|N{idx}"
+          f"|lo{desc.get('lo', 0)}|hi{desc.get('hi', 0)}"
+      ),
+  }
+
+
+def _list_gcs_events(gcs_prefix):
+  """List every `events/*.json` object under `gcs_prefix` (a gs:// URI) via
+  `gcloud storage ls`. Returns a list of full gs:// object URIs (JSON only)."""
+  prefix = gcs_prefix.rstrip("/") + "/"
+  cmd = ["gcloud", "storage", "ls", f"{prefix}**"]
+  res = subprocess.run(cmd, capture_output=True, text=True)
+  if res.returncode != 0:
+    # Fall back to a non-recursive listing (older gsutil-style globbing).
+    cmd = ["gcloud", "storage", "ls", prefix]
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+      print(f"[WARNING] Failed to list {prefix}: {res.stderr}", file=sys.stderr)
+      return []
+  uris = []
+  for line in res.stdout.splitlines():
+    line = line.strip()
+    if line.endswith(".json") and line.startswith("gs://"):
+      uris.append(line)
+  return uris
+
+
+def _download_gcs_object(uri):
+  """Download ONE gs:// object's bytes via `gcloud storage cat`. None on error."""
+  cmd = ["gcloud", "storage", "cat", uri]
+  res = subprocess.run(cmd, capture_output=True, text=True)
+  if res.returncode != 0:
+    print(f"[WARNING] Failed to read {uri}: {res.stderr}", file=sys.stderr)
+    return None
+  return res.stdout
+
+
+def dedupe_events_by_logical_key(events):
+  """Dedupe events by their logical key (role+level+idx+interval), keeping the
+  LAST successful attempt (or the last attempt if none succeeded) while COUNTING
+  redrives — the extra attempts beyond the first for any key.
+
+  Returns `(deduped_events, redrive_extra_count)`. Every event carries its own
+  object (uuid-suffixed) so concurrent pods + redrives never clobbered each other
+  in GCS; here we collapse them to ONE per logical task for the sizing math, and
+  surface how many EXTRA attempts existed (the redrive/dupe count) so that signal
+  is preserved rather than silently discarded.
+  """
+  by_key = {}
+  attempts = {}
+  for e in events:
+    k = e.get("_logical_key", f"{e['role']}_{e['idx']}")
+    attempts[k] = attempts.get(k, 0) + 1
+    prev = by_key.get(k)
+    # Keep a success over a non-success; otherwise keep the latest seen.
+    if prev is None:
+      by_key[k] = e
+    elif prev.get("status") != "success" and e.get("status") == "success":
+      by_key[k] = e
+    elif e.get("status") == "success":
+      by_key[k] = e  # latest successful attempt
+  redrive_extra = sum(c - 1 for c in attempts.values() if c > 1)
+  return list(by_key.values()), redrive_extra
+
+
+def build_metrics_from_events(events, run_config=None, target_bps=None,
+                              redrive_extra=0):
+  """Build the SAME metrics dict `parse_coordinator_log_v2` returns, but from a
+  pre-parsed `events` list (the #347 GCS-events source) rather than a log file.
+
+  Reuses compute_derived / compute_throughput / stats verbatim so the produced
+  bench_summary.json (core_sec_per_block, leaf/fold split, fleet_sizing_projection,
+  peak RSS, distributions, ...) is identical in shape + math to the log path.
+  """
+  leaf_provings, leaf_gcs, leaf_totals = [], [], []
+  node_foldings, node_gcs, node_totals = [], [], []
+  saw_new_fields = False
+
+  for ev in events:
+    if ev.get("fold_strategy") is not None or ev.get("prove_ms") is not None:
+      saw_new_fields = True
+    if ev["status"] == "success":
+      role = ev["role"]
+      if role == "leaf":
+        leaf_provings.append(float(ev["prove_time_ms"]))
+        leaf_gcs.append(float(ev["gcs_time_ms"]))
+        leaf_totals.append(float(ev["total_time_ms"]))
+      elif role in ("node", "tree-node", "reduction", "reduction-fold"):
+        node_foldings.append(float(ev["prove_time_ms"]))
+        node_gcs.append(float(ev["gcs_time_ms"]))
+        node_totals.append(float(ev["total_time_ms"]))
+
+  derived = compute_derived(events)
+  # The events payload does not carry the coordinator's stale-lease-redrive
+  # marker, but the #347 dedup DID observe the redrive/dupe extras directly from
+  # the number of GCS objects per logical key — a stronger, source-of-truth count.
+  derived["recovery"]["max_stale_lease_redrive_count"] = 0
+  derived["recovery"]["redrive_extra_attempts_from_gcs_events"] = redrive_extra
+
+  throughput = compute_throughput(events, run_config=run_config,
+                                  target_bps=target_bps)
+
+  def _first_present(key):
+    for e in events:
+      if e.get(key) is not None:
+        return e[key]
+    return None
+
+  descriptors = {
+      "fold_strategy": _first_present("fold_strategy"),
+      "chunk_size_C": _first_present("chunk_size"),
+      "leaf_count_N": _first_present("leaf_count"),
+      # No explicit "root reached" marker travels in the per-pod events; a
+      # reduction run is inferred from the presence of reduction-fold events.
+      "reduction_root_reached": any(
+          e["role"] in ("reduction", "reduction-fold") for e in events
+      ),
+      "hex_root_reached": any(e["role"] in ("node", "tree-node") for e in events),
+      "scheduling_class": None,
+  }
+
+  return {
+      "events_parsed": len(events),
+      "back_compat_old_log": not saw_new_fields and len(events) > 0,
+      "leaf_proving": stats(leaf_provings),
+      "leaf_gcs": stats(leaf_gcs),
+      "leaf_total": stats(leaf_totals),
+      "node_folding": stats(node_foldings),
+      "node_gcs": stats(node_gcs),
+      "node_total": stats(node_totals),
+      # Verification time + total_tx live in the coordinator's ROOT_PROOF_VERIFIED
+      # line, not the per-pod events; honest 0 here (the events source is about
+      # per-task SIZING, which is what feeds core_sec/block + fleet sizing).
+      "verification_time_ms": 0.0,
+      "total_tx": 0,
+      # Wall time needs the seeder-start + root-reached timestamps (coordinator
+      # markers); the per-pod events don't carry emit timestamps, so 0 (honest).
+      "wall_sec": 0.0,
+      "start_time": None,
+      "end_time": None,
+      "derived": derived,
+      "throughput": throughput,
+      "descriptors": descriptors,
+  }
+
+
+def parse_events_gcs(gcs_prefix, run_config=None, target_bps=None):
+  """Read every ProverEvent JSON under the GCS `events/` prefix, dedupe by logical
+  key (counting redrives), and build the metrics dict. None if nothing readable."""
+  print(f"[INFO] EVENTS-GCS mode: listing {gcs_prefix} ...")
+  uris = _list_gcs_events(gcs_prefix)
+  if not uris:
+    print(f"[WARNING] No events/*.json objects found under {gcs_prefix}",
+          file=sys.stderr)
+    return None
+  print(f"[INFO] Found {len(uris)} event object(s); downloading + parsing ...")
+
+  raw_events = []
+  for uri in uris:
+    body = _download_gcs_object(uri)
+    if body is None:
+      continue
+    try:
+      obj = json.loads(body)
+    except Exception as e:  # noqa: BLE001
+      print(f"[WARNING] {uri}: not valid JSON ({e}); skipping", file=sys.stderr)
+      continue
+    ev = prover_event_json_to_event(obj)
+    if ev is None:
+      print(f"[WARNING] {uri}: not a well-formed ProverEvent; skipping",
+            file=sys.stderr)
+      continue
+    raw_events.append(ev)
+
+  if not raw_events:
+    print("[ERROR] No parseable ProverEvent objects in GCS events prefix.",
+          file=sys.stderr)
+    return None
+
+  events, redrive_extra = dedupe_events_by_logical_key(raw_events)
+  print(
+      f"[INFO] Parsed {len(raw_events)} raw event(s) -> {len(events)} unique "
+      f"logical task(s); {redrive_extra} extra redrive/dupe attempt(s)."
+  )
+  return build_metrics_from_events(
+      events, run_config=run_config, target_bps=target_bps,
+      redrive_extra=redrive_extra,
+  )
 
 
 def parse_coordinator_log_v2(log_path, seeder_start_dt=None, run_config=None,
@@ -947,6 +1247,21 @@ def main():
   parser.add_argument("--no-upload", action="store_true", help="Never upload to GCS (implied by --log-file)")
   parser.add_argument("--run-config", default=None, help="Path to run_config.json (blocks, txs_per_chunk=C, leaf_count_per_block) for the throughput metric")
   parser.add_argument("--target-bps", default=None, help="Comma-separated target blocks/sec for the fleet-sizing projection (default: 10,12)")
+  parser.add_argument(
+      "--events-gcs-prefix", default=None,
+      help=(
+          "(#347) DURABLE, PREFERRED source: gs://<bucket>/benchmark-reports/"
+          "<id>/<image>/<arch>/events/ prefix of per-pod ProverEvent JSON. When "
+          "given (or auto-derived in GKE mode from --benchmark-id/--image/--arch "
+          "+ config bucket), telemetry is read directly from GCS — decoupled from "
+          "coordinator stdout, later pipeline steps, and cluster lifetime. Falls "
+          "back to --coordinator-log when the events prefix is empty/unreadable."
+      ),
+  )
+  parser.add_argument(
+      "--no-events-gcs", action="store_true",
+      help="Disable the events-GCS source even in GKE mode (use coordinator-log only).",
+  )
   args = parser.parse_args()
 
   target_bps = None
@@ -962,6 +1277,10 @@ def main():
   seeder_start = None
   gcs_uri = None
   agg_machine = "unknown"
+  # (#347) The events-GCS prefix + which source ultimately produced the metrics.
+  events_gcs_prefix = args.events_gcs_prefix
+  source_kind = "local-log-file" if local_mode else "kubectl-gke"
+  source_ref = os.path.abspath(log_path)
 
   if local_mode:
     print(f"[INFO] LOCAL mode: parsing {log_path} (no kubectl/GCS).")
@@ -979,20 +1298,48 @@ def main():
     gcs_prefix = f"benchmark-reports/{args.benchmark_id}/{args.image}/{args.arch}"
     gcs_uri = f"gs://{gcs_bucket}/{gcs_prefix}"
     print(f"[INFO] Target GCS URI: {gcs_uri}")
-    print("[INFO] Querying GKE Seeder Job for start time...")
-    seeder_start = get_job_start_time("lighter-seeder")
-    if seeder_start:
-      print(f"[INFO] Seeder Start Time: {seeder_start.isoformat()}")
-    else:
-      print("[WARNING] Could not retrieve seeder job start time. Will fallback to first coordinator event.")
+    # (#347) Auto-derive the events prefix from the same run coordinates when the
+    # caller did not pass --events-gcs-prefix. events/ is a SIBLING of stark_proofs/.
+    if events_gcs_prefix is None and not args.no_events_gcs:
+      events_gcs_prefix = f"{gcs_uri}/events/"
+      print(f"[INFO] Auto-derived events-GCS prefix: {events_gcs_prefix}")
 
-  print(f"[INFO] Parsing coordinator log {log_path}...")
-  metrics = parse_coordinator_log_v2(
-      log_path, seeder_start, run_config=run_config, target_bps=target_bps
-  )
-  if not metrics:
-    print("[ERROR] Failed to parse coordinator log.", file=sys.stderr)
-    sys.exit(1)
+  # ---- (#347) Prefer the DURABLE events-GCS source when available. It survives
+  #      coordinator/pipeline/cluster failure, so it is the source of truth; the
+  #      coordinator log is the fallback. --------------------------------------
+  metrics = None
+  if events_gcs_prefix and not args.no_events_gcs:
+    print(f"[INFO] Preferring durable events-GCS source: {events_gcs_prefix}")
+    metrics = parse_events_gcs(
+        events_gcs_prefix, run_config=run_config, target_bps=target_bps
+    )
+    if metrics:
+      source_kind = "events-gcs (#347 durable per-pod)"
+      source_ref = events_gcs_prefix
+      print(f"[INFO] Built metrics from {metrics['events_parsed']} durable GCS event(s).")
+    else:
+      print("[WARNING] events-GCS source empty/unreadable; falling back to coordinator log.",
+            file=sys.stderr)
+
+  if metrics is None:
+    # Seeder start time is only needed for the coordinator-log wall-time; skip
+    # the kubectl call entirely when the events-GCS source already succeeded.
+    if not local_mode:
+      print("[INFO] Querying GKE Seeder Job for start time...")
+      seeder_start = get_job_start_time("lighter-seeder")
+      if seeder_start:
+        print(f"[INFO] Seeder Start Time: {seeder_start.isoformat()}")
+      else:
+        print("[WARNING] Could not retrieve seeder job start time. Will fallback to first coordinator event.")
+
+    print(f"[INFO] Parsing coordinator log {log_path}...")
+    metrics = parse_coordinator_log_v2(
+        log_path, seeder_start, run_config=run_config, target_bps=target_bps
+    )
+    if not metrics:
+      print("[ERROR] Failed to parse coordinator log (and events-GCS source unavailable).",
+            file=sys.stderr)
+      sys.exit(1)
 
   # ---- Legacy human-readable summary (kept for continuity). ----
   print("\n=== BENCHMARK TELEMETRY SUMMARY ===")
@@ -1018,8 +1365,8 @@ def main():
 
   # ---- Provenance: every number traceable. ----
   provenance = {
-      "source_kind": "local-log-file" if local_mode else "kubectl-gke",
-      "source": os.path.abspath(log_path),
+      "source_kind": source_kind,
+      "source": source_ref,
       "generated_at_utc": gen_ts,
       "git_commit": git_commit,
       "extractor": "infra-as-code/scripts/extract_gke_telemetry.py",
@@ -1033,7 +1380,13 @@ def main():
           "queue_wait": "queue_wait_ms>0 over all events (0 == honest sentinel, dispatch not stamped)",
           "wave_width": "NULL — needs pull_ts_ms (absolute), log carries pull_ms (duration)",
           "duplicate_proved": "successful events grouped by output-key-equivalent; count>1 == duplicate",
-          "recovery": "redriven_after_lease_expiry=true count + max stale_lease_redrive_count marker",
+          "recovery": (
+              "redriven_after_lease_expiry=true count + max stale_lease_redrive_count "
+              "marker (coordinator-log source); in events-GCS mode (#347) the "
+              "redrive/dupe count is the number of EXTRA GCS event objects per "
+              "logical key (redrive_extra_attempts_from_gcs_events) — a direct "
+              "source-of-truth count from the durable per-pod objects."
+          ),
           "cpu_and_pods_per_node": "NOT derived — requires node metrics (#328 §B, GCP)",
           "throughput": (
               "leaf/fold/total_cpu_core_sec = sum(prove_ms)/1000 over successful "
