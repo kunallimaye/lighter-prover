@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lighter-coordinator
+  labels:
+    app: zkp-prover
+    role: coordinator
+    silicon-arch: c3d
+spec:
+  template:
+    metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+      labels:
+        role: coordinator
+        silicon-arch: c3d
+    spec:
+      serviceAccountName: prover-sa
+      nodeSelector:
+        silicon-arch: c3d
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "zkp-prover"
+        effect: "NoSchedule"
+      restartPolicy: OnFailure
+      containers:
+      - name: coordinator
+        image: us-east4-docker.pkg.dev/kunal-scratch/lighter-prover-iac/zkp-prover:amd64
+        command: ["bash", "-c", "echo '[INFO] Waiting for root proof /data/reports/stark_proofs/tree_L2_N0.proof...'; while [ ! -f /data/reports/stark_proofs/tree_L2_N0.proof ]; do sleep 5; done; echo '[INFO] Root proof found, starting verification...'; prover-node root-coordinator --block-number 1042 --radix 16 --leaf-count 125 --node-idx 0 --tx-per-proof 4 --fold-strategy hex"]
+        resources:
+          limits:
+            cpu: "2"
+            memory: "4Gi"
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+        volumeMounts:
+        - name: gcs-volume
+          mountPath: /data/reports
+      volumes:
+      - name: gcs-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: "kunal-scratch-tfstate"
+            mountOptions: "only-dir=benchmark-reports/attempt-50/amd64/c3d,implicit-dirs"
