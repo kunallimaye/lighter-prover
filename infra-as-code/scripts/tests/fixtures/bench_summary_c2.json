@@ -1,0 +1,30 @@
+{
+  "_SYNTHETIC": "issue #321 C-sweep test fixture — NOT a real benchmark. Hand-authored so csweep-report has deterministic assertions. NEVER copy into reports/ or treat as measured.",
+  "descriptors": {
+    "fold_strategy": "reduction",
+    "chunk_size_C": 2,
+    "leaf_count_N": 4
+  },
+  "throughput": {
+    "measured": true,
+    "prove_source_field": "prove_ms",
+    "chunk_size_C": 2,
+    "leaf_count": 4,
+    "blocks": 1,
+    "blocks_source": "SYNTHETIC",
+    "leaf_cpu_core_sec": 12.0,
+    "fold_cpu_core_sec": 8.0,
+    "total_cpu_core_sec": 20.0,
+    "core_sec_per_block": 20.0,
+    "cold_fold_cpu_core_sec": 3.0,
+    "warm_fold_cpu_core_sec": 5.0,
+    "is_first_task_field_present": true,
+    "fleet_sizing_projection": {
+      "vcpu_per_node": 60,
+      "by_target_bps": [
+        {"target_bps": 10, "cores_required": 200.0, "c3d_nodes_required": 4},
+        {"target_bps": 12, "cores_required": 240.0, "c3d_nodes_required": 4}
+      ]
+    }
+  }
+}

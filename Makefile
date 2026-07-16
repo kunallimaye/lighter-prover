@@ -1,4 +1,4 @@
-.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster cloud-gke-provision cloud-gke-bench cloud-gke-destroy test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast bench-reduction-local lint-reports
+.PHONY: help container-build container-run cloud-admin-init cloud-admin-undo cloud-bench-run cloud-run-distributed-cluster cloud-gke-provision cloud-gke-bench cloud-gke-bench-csweep csweep-report cloud-gke-destroy test-t2d-hypothesis test-gke-tax test-capstone verify-enhanced-proof-validity cloud-deploy cloud-plan cloud-destroy cloud-vm-start cloud-vm-stop cloud-zkp-build zkp-image local-build local-run local-build-and-run test-distributed-fast bench-reduction-local lint-reports
 
 # Dynamic GKE architecture default (defaults to 'all' unless ARCH is explicitly overridden on command line)
 GKE_ARCH = $(if $(filter command line,$(origin ARCH)),$(ARCH),all)
@@ -48,6 +48,26 @@ cloud-gke-provision: ## Provision GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/a
 
 cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 FOLD_STRATEGY=reduction|hex)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(GKE_CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --benchmark-id=$(BENCHMARK_ID)
+
+# --- C-sweep (#321): sweep chunk size C to find the CPU-optimal (throughput)
+# operating point. The lever is TOTAL CPU per block (core-sec/block): fewer
+# core-sec/block => smaller fleet at a given blocks/sec. This is a THIN LOOP over
+# `cloud-gke-bench` — one submit per C, each with a DISTINCT benchmark-id
+# `${BENCHMARK_ID}-c${C}` (so #337 applies C for real and artifacts don't clash).
+#
+# C must EVENLY DIVIDE txs_per_block=500 (#337). Valid: 1 2 4 5 10 20 25 50 100
+# 125 250 500. The default sweep uses 1 2 4 5.
+#
+# Dry-run the loop + arg construction (no GCP submit):
+#     make -n cloud-gke-bench-csweep C_VALUES="1 4"
+C_VALUES ?= 1 2 4 5
+BENCHMARK_ID ?= csweep
+cloud-gke-bench-csweep: ## Sweep chunk size C over C_VALUES="1 2 4 5"; one cloud-gke-bench per C with benchmark-id ${BENCHMARK_ID}-c${C} (C must divide txs_per_block=500)
+	@bash infra-as-code/scripts/csweep_validate.sh $(C_VALUES)
+	$(foreach C,$(C_VALUES),$(MAKE) cloud-gke-bench GKE_CHUNK=$(C) BENCHMARK_ID=$(BENCHMARK_ID)-c$(C) ARCH=$(ARCH) BLOCKS=$(BLOCKS) IMAGE=$(IMAGE) RADIX=$(RADIX) FOLD_STRATEGY=$(FOLD_STRATEGY);)
+
+csweep-report: ## Compare THROUGHPUT across a C-sweep: make csweep-report SUMMARIES="a/bench_summary.json b/bench_summary.json" (local paths or gs:// URIs)
+	@python3 infra-as-code/scripts/csweep_report.py $(SUMMARIES)
 
 cloud-gke-destroy: ## Tear down GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-destroy --arch=$(GKE_ARCH)

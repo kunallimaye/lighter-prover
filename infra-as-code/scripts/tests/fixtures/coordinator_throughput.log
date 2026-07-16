@@ -1,0 +1,23 @@
+SYNTHETIC FIXTURE (issue #321 C-sweep) — NOT a real benchmark.
+Hand-authored coordinator "Received event:" lines with ROUND prove_ms values
+chosen purely so the THROUGHPUT math (leaf_cpu / fold_cpu / total / core-sec-per-
+block / cold-vs-warm fold CPU / fleet-sizing projection) has clean, checkable
+assertions in test_extract_throughput.py. Every number is invented for test
+determinism and MUST NEVER be copied into reports/ or treated as measured.
+
+Design (blocks defaults to 1, single-block run):
+  leaves prove_ms: 1000 + 2000 + 3000 + 6000 = 12000 ms => 12.0 core-sec
+  folds  prove_ms: 3000 (cold) + 4000 (warm) + 1000 (warm) = 8000 ms => 8.0 core-sec
+  total = 20.0 core-sec ; blocks=1 => core_sec_per_block = 20.0
+  cold fold (is_first_task_on_pod=true): 3000 => 3.0 core-sec
+  warm fold (is_first_task_on_pod=false): 4000 + 1000 = 5000 => 5.0 core-sec
+  fleet @10bps: cores = 20.0*10 = 200 => ceil(200/60) = 4 c3d nodes
+  fleet @12bps: cores = 20.0*12 = 240 => ceil(240/60) = 4 c3d nodes
+2026-07-15T00:00:00.100000000Z INFO coordinator: Received event: role=leaf, idx=0, fold_strategy=Reduction, level=0, status=success, prove_time_ms=1000, gcs_time_ms=10, total_time_ms=1010, peak_rss_bytes=0, prestate_source=corpus, is_first_task_on_pod=true, chunk_size=4, leaf_count=4, pull_ms=1, pre_exec_ms=0, prove_ms=1000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=n/a, merge_interval_span=0, redriven_after_lease_expiry=false
+2026-07-15T00:00:01.100000000Z INFO coordinator: Received event: role=leaf, idx=1, fold_strategy=Reduction, level=0, status=success, prove_time_ms=2000, gcs_time_ms=10, total_time_ms=2010, peak_rss_bytes=0, prestate_source=corpus, is_first_task_on_pod=false, chunk_size=4, leaf_count=4, pull_ms=1, pre_exec_ms=0, prove_ms=2000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=n/a, merge_interval_span=0, redriven_after_lease_expiry=false
+2026-07-15T00:00:02.100000000Z INFO coordinator: Received event: role=leaf, idx=2, fold_strategy=Reduction, level=0, status=success, prove_time_ms=3000, gcs_time_ms=10, total_time_ms=3010, peak_rss_bytes=0, prestate_source=corpus, is_first_task_on_pod=false, chunk_size=4, leaf_count=4, pull_ms=1, pre_exec_ms=0, prove_ms=3000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=n/a, merge_interval_span=0, redriven_after_lease_expiry=false
+2026-07-15T00:00:03.100000000Z INFO coordinator: Received event: role=leaf, idx=3, fold_strategy=Reduction, level=0, status=success, prove_time_ms=6000, gcs_time_ms=10, total_time_ms=6010, peak_rss_bytes=0, prestate_source=corpus, is_first_task_on_pod=false, chunk_size=4, leaf_count=4, pull_ms=1, pre_exec_ms=0, prove_ms=6000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=n/a, merge_interval_span=0, redriven_after_lease_expiry=false
+2026-07-15T00:00:05.100000000Z INFO coordinator: Received event: role=reduction, idx=0, fold_strategy=Reduction, level=1, status=success, prove_time_ms=3000, gcs_time_ms=10, total_time_ms=3010, peak_rss_bytes=0, prestate_source=n/a, is_first_task_on_pod=true, chunk_size=4, leaf_count=4, pull_ms=1, pre_exec_ms=0, prove_ms=3000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=real, merge_interval_span=2, redriven_after_lease_expiry=false
+2026-07-15T00:00:06.100000000Z INFO coordinator: Received event: role=reduction, idx=2, fold_strategy=Reduction, level=1, status=success, prove_time_ms=4000, gcs_time_ms=10, total_time_ms=4010, peak_rss_bytes=0, prestate_source=n/a, is_first_task_on_pod=false, chunk_size=4, leaf_count=4, pull_ms=1, pre_exec_ms=0, prove_ms=4000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=real, merge_interval_span=2, redriven_after_lease_expiry=false
+2026-07-15T00:00:07.100000000Z INFO coordinator: Received event: role=reduction, idx=0, fold_strategy=Reduction, level=2, status=success, prove_time_ms=1000, gcs_time_ms=10, total_time_ms=1010, peak_rss_bytes=0, prestate_source=n/a, is_first_task_on_pod=false, chunk_size=4, leaf_count=4, pull_ms=1, pre_exec_ms=0, prove_ms=1000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=real, merge_interval_span=4, redriven_after_lease_expiry=false
+2026-07-15T00:00:08.200000000Z INFO coordinator: REDUCTION ROOT REACHED [0, 3]
