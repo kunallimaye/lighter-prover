@@ -208,6 +208,16 @@ def test_metrics_full_summary_shape_matches_log_path():
   assert summary["throughput"]["core_sec_per_block"] is not None
 
 
+def test_distinct_same_span_intervals_not_false_duplicates():
+  # Two level-1 reduction folds cover DIFFERENT intervals ([0,1] and [2,3]) but
+  # the SAME span (2). They are distinct logical tasks and must NOT be flagged as
+  # duplicates (the events-GCS output_key keys on the interval endpoints).
+  events = _sample_run_events()
+  d = ext.compute_derived(events)
+  assert d["duplicate_proved"]["duplicate_output_keys"] == 0
+  assert d["duplicate_proved"]["wasted_extra_events"] == 0
+
+
 def _run_self_test():
   tests = [v for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

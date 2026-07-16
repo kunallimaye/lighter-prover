@@ -392,8 +392,17 @@ def compute_derived(events):
       lvl = e.get("level")
       return f"tree_L{lvl}_N{e['idx']}"
     if role in ("reduction", "reduction-fold"):
-      # Interval identity: idx + span uniquely name the merged interval when
-      # present; fall back to (idx, level) if span is absent.
+      # Interval identity. When the exact endpoints are known (events-GCS source,
+      # #347) key on (level, lo, hi) — the TRUE logical identity of a reduction
+      # fold — so two distinct same-span intervals at one level (e.g. [0,1] and
+      # [2,3], both span 2) are NOT collapsed into a false duplicate. When only
+      # the span is known (coordinator-log source, which logs idx + span but not
+      # the endpoints) keep the existing (idx, span) key — unchanged behavior.
+      lo = e.get("lo")
+      hi = e.get("hi")
+      if lo is not None and hi is not None:
+        lvl = e.get("level")
+        return f"reduction_L{lvl}_lo{lo}_hi{hi}"
       span = e.get("merge_interval_span")
       return f"reduction_{e['idx']}_span{span}"
     return f"{role}_{e['idx']}"
@@ -732,6 +741,13 @@ def prover_event_json_to_event(obj):
       "fold_kind": obj.get("fold_kind"),
       "merge_interval_span": merge_span,
       "redriven_after_lease_expiry": obj.get("redriven_after_lease_expiry"),
+      # #347: the reduction interval endpoints. Present ONLY on events-GCS
+      # events (the ProverEvent descriptor carries lo/hi); coordinator-log
+      # events lack them. output_key() uses them, WHEN present, to disambiguate
+      # distinct same-span intervals at the same level (two folds covering
+      # [0,1] and [2,3] both have span 2 but are DIFFERENT logical tasks).
+      "lo": desc.get("lo"),
+      "hi": desc.get("hi"),
       # #347 dedup helper: the LOGICAL key (role+level+idx+interval) shared by all
       # attempts (redrives) of the same task. Not emitted into bench_summary; used
       # only to dedupe + count redrives below.
