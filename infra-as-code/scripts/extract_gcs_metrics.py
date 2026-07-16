@@ -14,6 +14,28 @@ import math
 import subprocess
 import sys
 
+# Documented default target block-arrival rate (blocks/sec) for the VM
+# projection. Overridable via --target-bps. The production window is 10-12 bps.
+DEFAULT_TARGET_BPS = 10.0
+
+
+def vcpu_per_node_from_machine_type(mtype):
+  """Derive vCPU-per-node from a GCP machine-type string, or None if underivable.
+
+  Trailing-int parse (``c4d-highcpu-64`` -> 64). ANTI-FABRICATION (#352):
+  missing/``"unknown"``/unparseable -> None; NEVER a guessed default.
+  """
+  if not mtype or not isinstance(mtype, str):
+    return None
+  m = mtype.strip().lower()
+  if not m or m == "unknown":
+    return None
+  tail = m.rsplit("-", 1)[-1]
+  if not tail.isdigit():
+    return None
+  vcpu = int(tail)
+  return vcpu if vcpu > 0 else None
+
 
 def fetch_summary(gcs_uri):
   out = subprocess.run(
@@ -27,9 +49,13 @@ def fetch_summary(gcs_uri):
       wall = float(cpt.get("total_stark_prove_sec", 0.0))
     if wall == 0.0:
       tps = float(d.get("system_telemetry", {}).get("effective_tps", 0.0))
-      txs = float(d.get("total_transactions", 500))
-      if tps > 0:
-        wall = txs / tps
+      # ANTI-FABRICATION (#352): do NOT assume 500 txs when absent. Without a
+      # real total_transactions we cannot derive wall from TPS; leave wall as-is
+      # (it will fail the 0.0 guard below and be reported as UNMEASURED) rather
+      # than fabricate a tx count.
+      txs = d.get("total_transactions")
+      if tps > 0 and txs is not None:
+        wall = float(txs) / tps
     if wall == 0.0:
       raise ValueError("Computed wall time is 0.0")
     conc = 0
@@ -56,15 +82,29 @@ def parse_args():
       help="GCS parent prefix or wildcard path to scan.",
   )
   p.add_argument(
+      # NOTE (#352, low priority): this Sheet-ID default is a hardcoded org
+      # artifact. It is overridable here; consider sourcing it from config in a
+      # follow-up so the extractor carries no environment-specific default.
       "--sheet-id",
       default="1z8bIeeKaEnXP6UZW52pGLll0XrwjoLS0aBJOvs1qqd0",
-      help="Target Google Spreadsheet ID for importing.",
+      help="Target Google Spreadsheet ID for importing (overridable; see #352).",
+  )
+  p.add_argument(
+      "--target-bps",
+      type=float,
+      default=DEFAULT_TARGET_BPS,
+      help=(
+          "Target block-arrival rate (blocks/sec) for the VM/node projection. "
+          f"Default {DEFAULT_TARGET_BPS} (production window is 10-12 bps). "
+          "Previously hardcoded to 10.0 (#352)."
+      ),
   )
   return p.parse_args()
 
 
 def main():
   args = parse_args()
+  target_bps = args.target_bps
   query_path = args.gcs_prefix
   if not query_path.endswith(".json"):
     query_path = query_path.rstrip("/") + "/**/bench_summary.json"
@@ -113,7 +153,24 @@ def main():
     max_w = max(walls)
     avg_w = round(sum(walls) / len(walls), 8)
     conc_blocks = len(walls)
-    proj_vms = round(10.0 * avg_w / conc_blocks, 2) if conc_blocks > 0 else 0.0
+    # VM projection at the configurable target bps (previously hardcoded 10.0).
+    proj_vms = (
+        round(target_bps * avg_w / conc_blocks, 2) if conc_blocks > 0 else 0.0
+    )
+    # (#352) The machine type is parsed from the GCS path (`mtype`). When it is
+    # derivable, ALSO normalize to a per-vCPU node count so the projection does
+    # not implicitly assume a fixed node shape; when it is not, emit null + a
+    # note rather than fabricate a node count.
+    vcpu = vcpu_per_node_from_machine_type(mtype)
+    if vcpu:
+      proj_nodes = math.ceil(proj_vms / vcpu) if proj_vms > 0 else 0
+      nodes_note = None
+    else:
+      proj_nodes = None
+      nodes_note = (
+          f"vcpu_per_node underivable — machine_type {mtype!r}; cannot size "
+          "nodes (no guessed divisor)"
+      )
     avg_min = round(avg_w / 60.0, 8)
     extracted_records.append({
         "benchmark_id": bench_id,
@@ -123,7 +180,12 @@ def main():
         "min_wall_time_sec": min_w,
         "max_wall_time_sec": max_w,
         "avg_wall_time_sec": avg_w,
-        "projected_vm_count_10_bps": proj_vms,
+        "target_bps": target_bps,
+        # Arch-neutral, bps-parametric key (was projected_vm_count_10_bps).
+        "projected_vm_count_at_target_bps": proj_vms,
+        "vcpu_per_node": vcpu,
+        "projected_node_count_at_target_bps": proj_nodes,
+        "projected_node_count_note": nodes_note,
         "avg_wall_time_min": avg_min,
         "timestamp": ts,
     })
@@ -145,7 +207,10 @@ def main():
       "Minimum Elapsed Wall Time (sec)",
       "Maximum Elapsed Wall Time (sec)",
       "Average Elapsed Wall Time (sec)",
-      "Projected VM Count (10 Blocks/Sec)",
+      "Target Blocks/Sec",
+      "Projected VM Count (at Target Blocks/Sec)",
+      "vCPU per Node",
+      "Projected Node Count (at Target Blocks/Sec)",
       "Avg Time",
       "Execution Timestamp",
   ]
@@ -161,7 +226,11 @@ def main():
           r["min_wall_time_sec"],
           r["max_wall_time_sec"],
           r["avg_wall_time_sec"],
-          r["projected_vm_count_10_bps"],
+          r["target_bps"],
+          r["projected_vm_count_at_target_bps"],
+          r["vcpu_per_node"] if r["vcpu_per_node"] is not None else "",
+          r["projected_node_count_at_target_bps"]
+          if r["projected_node_count_at_target_bps"] is not None else "",
           r["avg_wall_time_min"],
           r["timestamp"],
       ])

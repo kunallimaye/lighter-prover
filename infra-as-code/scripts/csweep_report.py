@@ -7,7 +7,7 @@
 Consumes the per-C ``bench_summary.json`` files produced by
 ``extract_gke_telemetry.py`` (issue #321 C-sweep) and prints a comparison table:
 
-    C | leaf_count | core_sec_per_block | c3d_nodes@10bps | c3d_nodes@12bps | cold_fold_cpu
+    C | leaf_count | core_sec_per_block | nodes@10bps | nodes@12bps | cold_fold_cpu
 
 so the CPU-optimal C (lowest core_sec_per_block => smallest fleet) is readable at
 a glance. The production objective is THROUGHPUT (10-12 blocks/sec); the lever is
@@ -48,11 +48,18 @@ def _read_summary(path):
 
 
 def _nodes_at(tp, bps):
-  """c3d_nodes_required at target `bps` from the extractor's projection, or None."""
+  """nodes_required at target `bps` from the extractor's projection, or None.
+
+  Reads the arch-neutral `nodes_required` key (#352), falling back to the
+  DEPRECATED `c3d_nodes_required` alias so summaries produced by an older
+  extractor still render during the one-release migration window.
+  """
   proj = tp.get("fleet_sizing_projection") or {}
   for row in proj.get("by_target_bps", []):
     if row.get("target_bps") == bps:
-      return row.get("c3d_nodes_required")
+      if "nodes_required" in row:
+        return row.get("nodes_required")
+      return row.get("c3d_nodes_required")  # DEPRECATED alias fallback.
   return None
 
 
@@ -73,8 +80,8 @@ def build_rows(summaries, sources=None):
           "chunk_size_C": (tp or {}).get("chunk_size_C"),
           "leaf_count": (tp or {}).get("leaf_count"),
           "core_sec_per_block": None,
-          "c3d_nodes_10": None,
-          "c3d_nodes_12": None,
+          "nodes_10bps": None,
+          "nodes_12bps": None,
           "cold_fold_cpu_core_sec": None,
       })
       continue
@@ -84,8 +91,8 @@ def build_rows(summaries, sources=None):
         "chunk_size_C": tp.get("chunk_size_C"),
         "leaf_count": tp.get("leaf_count"),
         "core_sec_per_block": tp.get("core_sec_per_block"),
-        "c3d_nodes_10": _nodes_at(tp, 10),
-        "c3d_nodes_12": _nodes_at(tp, 12),
+        "nodes_10bps": _nodes_at(tp, 10),
+        "nodes_12bps": _nodes_at(tp, 12),
         "cold_fold_cpu_core_sec": tp.get("cold_fold_cpu_core_sec"),
     })
   # Sort by C when known so the sweep reads left-to-right; unknown C last.
@@ -120,7 +127,7 @@ def format_table(rows):
     lines.append(
         f"{_fmt(r['chunk_size_C']):>4} | {_fmt(r['leaf_count']):>10} | "
         f"{_fmt(r['core_sec_per_block'], '.3f') if r['core_sec_per_block'] is not None else 'UNMEASURED':>15} | "
-        f"{_fmt(r['c3d_nodes_10']):>11} | {_fmt(r['c3d_nodes_12']):>11} | "
+        f"{_fmt(r['nodes_10bps']):>11} | {_fmt(r['nodes_12bps']):>11} | "
         f"{_fmt(r['cold_fold_cpu_core_sec'], '.3f') if r['cold_fold_cpu_core_sec'] is not None else 'UNMEASURED':>13}"
     )
   best = optimal_row(rows)
@@ -129,7 +136,7 @@ def format_table(rows):
     lines.append(
         f"CPU-optimal C = {best['chunk_size_C']} "
         f"(core_sec_per_block={best['core_sec_per_block']:.3f}, "
-        f"c3d nodes@10bps={best['c3d_nodes_10']}, @12bps={best['c3d_nodes_12']})"
+        f"nodes@10bps={best['nodes_10bps']}, @12bps={best['nodes_12bps']})"
     )
   else:
     lines.append("CPU-optimal C = UNMEASURED (no measured runs)")

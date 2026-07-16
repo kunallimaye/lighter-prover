@@ -789,6 +789,21 @@ struct RunConfig {
     subscription: String,
     bucket: String,
     object_prefix: String,
+    /// The REAL hardware shape the run executed on, so the telemetry is
+    /// self-describing and the extractor's fleet-sizing math does not depend on
+    /// `config.toml` matching what actually ran (issue #352). `None` when the
+    /// seeder cannot learn its machine type without new deployment plumbing —
+    /// the extractor then falls back to the config-resolved machine type, and
+    /// populating this field cleanly is tracked as a deployment follow-up (#353).
+    /// `#[serde(default)]` keeps older `run_config.json` files (written before
+    /// this field existed) deserializable.
+    #[serde(default)]
+    machine_type: Option<String>,
+    /// vCPU-per-node for `machine_type`, when known. Optional convenience mirror
+    /// of the value the extractor derives from `machine_type`; `None` unless the
+    /// deployment supplies it. Never a guessed constant (#352).
+    #[serde(default)]
+    vcpu_per_node: Option<u32>,
 }
 
 #[allow(dead_code)]
@@ -840,6 +855,49 @@ impl RunConfig {
             ));
         }
         Ok(())
+    }
+}
+
+/// Resolve the REAL machine type the seeder is running on, so `run_config.json`
+/// is self-describing and the telemetry extractor need not assume `config.toml`
+/// matches what actually ran (issue #352).
+///
+/// Source: the `PROVER_MACHINE_TYPE` env var (the established env-var pattern —
+/// see the pubsub config env fallbacks in `run_pubsub_seeder`). The deployment
+/// manifest is expected to populate this from the GKE node's machine type (e.g.
+/// via the downward API / node label, or the GCE metadata server which the
+/// upload path already reads in `cloud.sh`). Reading the GCE metadata server
+/// directly from here would require adding an HTTP client dependency to `bench`,
+/// which is deliberately avoided — populating the env var from the manifest is a
+/// deployment-layer change tracked in #353.
+///
+/// Returns `None` (NOT a guessed default) when the env var is unset/blank, so
+/// downstream the extractor falls back to the config-resolved machine type or
+/// emits an honest null — never a fabricated machine shape (anti-fabrication).
+#[allow(dead_code)]
+fn resolve_machine_type() -> Option<String> {
+    match std::env::var("PROVER_MACHINE_TYPE") {
+        Ok(v) if !v.trim().is_empty() => Some(v.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// Derive vCPU-per-node from a GCP machine-type string, or `None` if underivable.
+///
+/// GCP machine types encode the vCPU count as the trailing integer, e.g.
+/// `c4d-highcpu-64` → 64, `c3d-highcpu-60` → 60, `t2d-standard-60` → 60. Mirrors
+/// the Python extractor's `vcpu_per_node_from_machine_type` (issue #352). Never
+/// defaults to a guessed constant: unparseable/`"unknown"`/empty → `None`.
+#[allow(dead_code)]
+fn vcpu_per_node_from_machine_type(mtype: Option<&str>) -> Option<u32> {
+    let m = mtype?.trim().to_ascii_lowercase();
+    if m.is_empty() || m == "unknown" {
+        return None;
+    }
+    let tail = m.rsplit('-').next()?;
+    match tail.parse::<u32>() {
+        Ok(v) if v > 0 => Some(v),
+        _ => None,
     }
 }
 
@@ -3777,6 +3835,12 @@ fn run_pubsub_work(
         // Write the single-source-of-truth run-config so workers cannot drift
         // from what was seeded (radix / leaf_count / tx_per_proof / topic / sub /
         // bucket / object_prefix). Mirrors the plan.env pattern (#297).
+        // Self-describing hardware shape (#352): populated from PROVER_MACHINE_TYPE
+        // when the deployment sets it, else None (extractor falls back to the
+        // config-resolved machine type; clean plumbing tracked in #353). Never
+        // guessed.
+        let machine_type = resolve_machine_type();
+        let vcpu_per_node = vcpu_per_node_from_machine_type(machine_type.as_deref());
         let run_config = RunConfig {
             blocks: plan.blocks,
             txs_per_block: plan.txs_per_block,
@@ -3788,6 +3852,8 @@ fn run_pubsub_work(
             subscription: config_sub_for_echo.clone(),
             bucket: config_bucket_for_echo.clone(),
             object_prefix: base_object_prefix.clone(),
+            machine_type,
+            vcpu_per_node,
         };
         if let Err(e) = run_config.write_local(RUN_CONFIG_PATH) {
             info!("[seed] could not persist run-config to {RUN_CONFIG_PATH} ({e}); continuing");
@@ -4622,6 +4688,8 @@ mod tests {
             subscription: "s".into(),
             bucket: "b".into(),
             object_prefix: "runs/".into(),
+            machine_type: None,
+            vcpu_per_node: None,
         };
         // JSON round-trip (write/read via a temp file).
         let dir = std::env::temp_dir().join(format!("runcfg-{}", std::process::id()));
@@ -4645,6 +4713,67 @@ mod tests {
             .unwrap_err()
             .contains("txs-per-chunk mismatch"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn run_config_machine_type_round_trips_and_defaults() {
+        // (#352) The self-describing machine_type / vcpu_per_node fields survive a
+        // JSON round-trip when populated, and older run_config.json files WITHOUT
+        // these keys still deserialize (serde default => None), so telemetry never
+        // depends on config.toml matching what actually ran.
+        let dir = std::env::temp_dir().join(format!("runcfg-mt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("run_config.json");
+        let path_str = path.to_string_lossy().to_string();
+
+        // Populated round-trip.
+        let cfg = RunConfig {
+            blocks: 1,
+            txs_per_block: 500,
+            txs_per_chunk: 5,
+            radix: 16,
+            leaf_count_per_block: 100,
+            depth: 2,
+            topic: "t".into(),
+            subscription: "s".into(),
+            bucket: "b".into(),
+            object_prefix: "runs/".into(),
+            machine_type: Some("c4d-highcpu-64".into()),
+            vcpu_per_node: Some(64),
+        };
+        cfg.write_local(&path_str).unwrap();
+        let back = RunConfig::read_local(&path_str).expect("must read back");
+        assert_eq!(cfg, back);
+        assert_eq!(back.machine_type.as_deref(), Some("c4d-highcpu-64"));
+        assert_eq!(back.vcpu_per_node, Some(64));
+
+        // Back-compat: an OLD run_config.json (no machine_type/vcpu_per_node keys)
+        // must still deserialize with both fields defaulting to None.
+        let legacy = r#"{
+            "blocks": 1, "txs_per_block": 500, "txs_per_chunk": 5, "radix": 16,
+            "leaf_count_per_block": 100, "depth": 2,
+            "topic": "t", "subscription": "s", "bucket": "b", "object_prefix": "runs/"
+        }"#;
+        std::fs::write(&path_str, legacy).unwrap();
+        let legacy_back = RunConfig::read_local(&path_str).expect("legacy must read back");
+        assert_eq!(legacy_back.machine_type, None);
+        assert_eq!(legacy_back.vcpu_per_node, None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn vcpu_per_node_from_machine_type_derives_or_nulls() {
+        // (#352) Trailing-int parse; NEVER a guessed default.
+        assert_eq!(vcpu_per_node_from_machine_type(Some("c4d-highcpu-64")), Some(64));
+        assert_eq!(vcpu_per_node_from_machine_type(Some("c3d-highcpu-60")), Some(60));
+        assert_eq!(vcpu_per_node_from_machine_type(Some("c3d-highcpu-30")), Some(30));
+        assert_eq!(vcpu_per_node_from_machine_type(Some("t2d-standard-60")), Some(60));
+        // Underivable -> None (no fallback to 60 or anything else).
+        assert_eq!(vcpu_per_node_from_machine_type(Some("unknown")), None);
+        assert_eq!(vcpu_per_node_from_machine_type(Some("")), None);
+        assert_eq!(vcpu_per_node_from_machine_type(Some("c4d-highcpu-abc")), None);
+        assert_eq!(vcpu_per_node_from_machine_type(None), None);
     }
 
     // ── Dynamic tree-geometry helpers (pure, no proving) ──
