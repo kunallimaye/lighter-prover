@@ -401,10 +401,13 @@ pub enum Role {
     /// (pilot-measured). The artifact dir resolves from `--artifact-dir`, env
     /// `LIGHTER_CIRCUIT_ARTIFACTS`, or `/data/circuits`.
     Bake {
-        /// Transactions per leaf (BlockTx circuit shape). Bake the shape(s) the
-        /// runtime will use. Default 1.
-        #[arg(long, default_value_t = 1)]
-        tx_per_proof: usize,
+        /// Transactions per leaf (BlockTx circuit shape) to bake — a
+        /// COMMA-SEPARATED list so the image is warm for whatever chunk size a
+        /// run selects (the image build and the bench run are separate, so a
+        /// single value drifts — attempt-49 baked s1 but ran C=4). Default "4"
+        /// (the GKE bench default, GKE_CHUNK=4). E.g. "1,4" bakes both.
+        #[arg(long, default_value = "4")]
+        tx_per_proof: String,
         /// Directory to write artifacts to. Falls back to env
         /// `LIGHTER_CIRCUIT_ARTIFACTS`, then `/data/circuits`.
         #[arg(long)]
@@ -3176,12 +3179,23 @@ fn main() {
                 baked += 1;
             }
 
-            // block_tx @ tx_per_proof
-            {
-                let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, tx_per_proof, CHAIN_ID);
+            // block_tx @ each requested chunk size (comma-separated list) so the
+            // image is warm for whatever C the run picks — no bake-vs-run drift.
+            let tx_chunks: Vec<usize> = tx_per_proof
+                .split(',')
+                .map(|t| t.trim())
+                .filter(|t| !t.is_empty())
+                .map(|t| t.parse::<usize>().unwrap_or_else(|_| {
+                    eprintln!("bake: invalid --tx-per-proof value '{t}' (want comma-separated ints)");
+                    std::process::exit(2);
+                }))
+                .collect();
+            assert!(!tx_chunks.is_empty(), "bake: --tx-per-proof must list >=1 chunk size");
+            for c in tx_chunks {
+                let circuit = BlockTxCircuit::define(CIRCUIT_CONFIG, c, CHAIN_ID);
                 let data = circuit.builder.build::<C>();
                 let built_vk = data.verifier_only.circuit_digest;
-                let kind = format!("block_tx_s{tx_per_proof}");
+                let kind = format!("block_tx_s{c}");
                 bake_block_circuit(&kind, &data).unwrap_or_else(|e| {
                     eprintln!("bake {kind} failed: {e}");
                     std::process::exit(1);

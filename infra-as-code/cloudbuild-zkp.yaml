@@ -16,6 +16,8 @@ steps:
       - 'RUSTFLAGS=${_RUSTFLAGS}'
       - '--build-arg'
       - 'CARGO_FEATURES=${_CARGO_FEATURES}'
+      - '--build-arg'
+      - 'BAKE_TX_PER_PROOF=${_BAKE_TX_PER_PROOF}'
       - '-f'
       - '${_DOCKERFILE}'
       - '-t'
@@ -32,6 +34,9 @@ substitutions:
   _EXTRA_TAG_URI: 'zkp-prover:latest'
   _RUSTFLAGS: '-C target-cpu=znver3'
   _CARGO_FEATURES: 'pubsub'
+  # Chunk size(s) to bake the BlockTx leaf circuit for (comma-separated). Must
+  # include the chunk size the GKE bench runs (GKE_CHUNK=4) so leaves load warm.
+  _BAKE_TX_PER_PROOF: '1,4'
 
 options:
   logging: CLOUD_LOGGING_ONLY

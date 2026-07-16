@@ -46,7 +46,10 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
 # Best-effort: if bake fails the runtime safely falls back to building (see
 # prover_node.rs `try_load_recursion_circuit` / `try_load_block_circuit`). Bump
 # CIRCUIT_ARTIFACT_VERSION on a plonky2/param change to invalidate stale art.
-ARG BAKE_TX_PER_PROOF=1
+# Comma-separated chunk sizes to bake the BlockTx circuit for, so the image
+# is warm for whatever C a run selects (bake vs run must not drift — attempt-49
+# baked s1 but ran C=4). Default "1,4" covers the C=1 smoke + C=4 GKE default.
+ARG BAKE_TX_PER_PROOF=1,4
 ARG BAKE_NODE_LEVELS=2
 RUN mkdir -p /artifacts && RUST_MIN_STACK=4294967296 \
       /app/target/x86_64-unknown-linux-gnu/release/prover-node bake \
