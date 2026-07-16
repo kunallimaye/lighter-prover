@@ -712,6 +712,16 @@ def main():
            "radix for back-compat with the single-level (N == radix) pipeline.",
   )
   parser.add_argument("--benchmark-id", default="", help="Benchmark ID for GCS path isolation")
+  parser.add_argument(
+      "--chunk",
+      type=int,
+      default=0,
+      help="Transactions per leaf chunk (C). When > 0, OVERRIDES the config.toml "
+           "per-arch chunk_size — this is how the Cloud Build _CHUNK_SIZE / Makefile "
+           "GKE_CHUNK reaches the rendered pods. 0 (default) = fall back to config.toml. "
+           "Fixes the plumbing gap where _CHUNK_SIZE was echoed but never applied "
+           "(attempt-47 requested C=4 but ran C=1).",
+  )
   # ── Fungible-pool path (issue #302): emit the KEDA-autoscaled
   #    `prover-node work --transport=pubsub` Deployment + ScaledObject instead of
   #    the phase-locked per-level Indexed Jobs. This is the FUNGIBLE-AUTOSCALED
@@ -791,7 +801,12 @@ def main():
     arch_cfg = pod_cfg.get(arch, {})
     
     leaf_cfg = arch_cfg.get("leaf_worker", {}) if arch_cfg else {}
-    leaf_chunk = int(leaf_cfg.get("chunk_size", 1 if arch in ("c3d", "c4d") else 4)) if leaf_cfg else (1 if arch in ("c3d", "c4d") else 4)
+    # --chunk (>0) OVERRIDES the config.toml chunk_size so the Cloud Build
+    # _CHUNK_SIZE / Makefile GKE_CHUNK actually reaches the pods. Without this,
+    # _CHUNK_SIZE was only echoed for logging and leaf_chunk silently fell back
+    # to the config.toml default (1 for c3d) — attempt-47 asked for C=4 but ran C=1.
+    config_chunk = int(leaf_cfg.get("chunk_size", 1 if arch in ("c3d", "c4d") else 4)) if leaf_cfg else (1 if arch in ("c3d", "c4d") else 4)
+    leaf_chunk = args.chunk if getattr(args, "chunk", 0) and args.chunk > 0 else config_chunk
     
     # Extract cpu and memory requests from config.toml
     leaf_cpu = str(leaf_cfg.get("cpu_requests", "14")) if leaf_cfg else "14"
