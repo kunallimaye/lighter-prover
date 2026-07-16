@@ -186,3 +186,49 @@ resource "google_pubsub_subscription" "agg_sub" {
   }
 }
 
+# ─── UNIFIED fungible-pool subscription (#321 — unified topology) ──────
+#
+# The UNIFIED pool topology (opt-in, selected via --pool-topology=unified /
+# POOL_TOPOLOGY=unified) runs a SINGLE fungible Deployment where EVERY pod pulls
+# BOTH leaf and fold work from this one subscription and self-balances the
+# leaf-vs-fold mix moment-to-moment. This contrasts with the fixed SPLIT path
+# (leaf_sub + agg_sub above), which statically partitions the fleet into leaf
+# pods and agg pods and idles two-thirds of the fleet during whichever phase is
+# running. Both paths stay valid so we can A/B them; SPLIT remains the default.
+#
+# NO role filter: ALL work (leaf, hex tree-node, reduction-fold) routes to this
+# one subscription so a single pool drains everything. (An equivalent explicit
+# filter would be `attributes.role = "leaf" OR attributes.role = "tree-node" OR
+# attributes.role = "reduction-fold"`, but no-filter is simpler and future-proof
+# to new roles.)
+#
+# ack_deadline_seconds = 180: a unified pod may pull a FOLD job (the bigger,
+# slower work — up to ~180s here, matching agg_sub's fold deadline), so the
+# unified deadline must be the MAX of leaf/fold, i.e. the fold deadline. A
+# too-short deadline would redeliver in-flight folds and duplicate work.
+#
+# OPERATOR CAVEAT — Pub/Sub subscription filters are IMMUTABLE after creation
+# (same caveat as leaf_sub/agg_sub above; see Phase 9 / #336). `unified_sub` is
+# NEW, so its first `terraform apply` only CREATES it (no replace needed for it).
+# But if you ever change THIS filter (e.g. add an explicit role filter) later,
+# Terraform must REPLACE (destroy + recreate) the subscription — verify with
+# `terraform plan` before applying.
+resource "google_pubsub_subscription" "unified_sub" {
+  provider = google-beta.runtime_beta
+  name     = "prover-unified-work-sub"
+  topic    = data.google_pubsub_topic.work_topic.name
+  project  = data.google_pubsub_topic.work_topic.project
+
+  # Max of leaf/fold deadlines: a unified pod may pull a fold (180s).
+  ack_deadline_seconds = 180
+
+  # No filter: route ALL work (leaf + every fold role) to this one subscription.
+
+  retain_acked_messages = true
+  message_retention_duration = "86400s"
+
+  expiration_policy {
+    ttl = "" # Never expire
+  }
+}
+

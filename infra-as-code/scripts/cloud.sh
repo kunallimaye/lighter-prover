@@ -848,11 +848,14 @@ _cloud_gke_bench_arch() {
   local tf_state_bucket="${11}"
   # #321 Phase 8: reduction-tree fold strategy (default 'reduction'; 'hex' opts out).
   local fold_strategy="${12:-reduction}"
+  # #321 fungible worker-pool topology (default 'split'; 'unified' opts in to the
+  # single self-balancing pool). Mirrors the fold_strategy threading pattern.
+  local pool_topology="${13:-split}"
 
-  _log_info "Running benchmark on GKE cluster (arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix}, fold_strategy=${fold_strategy}, image=${image})..."
+  _log_info "Running benchmark on GKE cluster (arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix}, fold_strategy=${fold_strategy}, pool_topology=${pool_topology}, image=${image})..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix},_FOLD_STRATEGY=${fold_strategy},_BENCHMARK_BUCKET=${tf_state_bucket}"
+  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix},_FOLD_STRATEGY=${fold_strategy},_POOL_TOPOLOGY=${pool_topology},_BENCHMARK_BUCKET=${tf_state_bucket}"
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
@@ -888,6 +891,9 @@ cloud_gke_bench() {
   # #321 Phase 8: reduction is the DEFAULT; opt out with FOLD_STRATEGY=hex env or
   # --fold-strategy=hex flag. Empty env falls back to 'reduction'.
   local fold_strategy="${FOLD_STRATEGY:-reduction}"
+  # #321: split is the DEFAULT pool topology; opt in with POOL_TOPOLOGY=unified
+  # env or --pool-topology=unified flag. Empty env falls back to 'split'.
+  local pool_topology="${POOL_TOPOLOGY:-split}"
   for arg in "$@"; do
     case "$arg" in
       --arch=*)   arch="${arg#*=}" ;;
@@ -896,12 +902,14 @@ cloud_gke_bench() {
       --image=*)  image="${arg#*=}" ;;
       --radix=*)  radix="${arg#*=}" ;;
       --fold-strategy=*) fold_strategy="${arg#*=}" ;;
+      --pool-topology=*) pool_topology="${arg#*=}" ;;
       --benchmark-id=*) benchmark_id="${arg#*=}" ;;
       [0-9]*)     blocks="$arg" ;;
     esac
   done
-  # Normalize an empty value back to the reduction default.
+  # Normalize empty values back to their defaults.
   fold_strategy="${fold_strategy:-reduction}"
+  pool_topology="${pool_topology:-split}"
 
   local build_project="$(_resolve_build_project)"
   if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
@@ -931,10 +939,10 @@ cloud_gke_bench() {
       c4d_img="amd64"
       c4a_img="arm64"
     fi
-    _cloud_gke_bench_arch "t2d" "${blocks}" "${chunk}" "${t2d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" &
-    _cloud_gke_bench_arch "c3d" "${blocks}" "${chunk}" "${c3d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" &
-    _cloud_gke_bench_arch "c4a" "${blocks}" "${chunk}" "${c4a_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" &
-    _cloud_gke_bench_arch "c4d" "${blocks}" "${chunk}" "${c4d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" &
+    _cloud_gke_bench_arch "t2d" "${blocks}" "${chunk}" "${t2d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
+    _cloud_gke_bench_arch "c3d" "${blocks}" "${chunk}" "${c3d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
+    _cloud_gke_bench_arch "c4a" "${blocks}" "${chunk}" "${c4a_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
+    _cloud_gke_bench_arch "c4d" "${blocks}" "${chunk}" "${c4d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
     wait
     _log_ok "All GKE benchmarks completed."
   else
@@ -946,7 +954,7 @@ cloud_gke_bench() {
         resolved_image="amd64"
       fi
     fi
-    _cloud_gke_bench_arch "${arch}" "${blocks}" "${chunk}" "${resolved_image}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}"
+    _cloud_gke_bench_arch "${arch}" "${blocks}" "${chunk}" "${resolved_image}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}"
   fi
 }
 

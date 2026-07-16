@@ -36,6 +36,11 @@ RADIX ?= 16
 # `FOLD_STRATEGY=hex make cloud-gke-bench ...`. Empty passes through to the
 # cloud.sh/CLI reduction default, so an unset var keeps the reduction default.
 FOLD_STRATEGY ?= reduction
+# #321: fungible worker-pool topology. 'split' (DEFAULT) keeps the two fixed
+# leaf/agg Deployments (zero behavior change); 'unified' selects the single
+# self-balancing pool where every pod pulls both leaf and fold work. Opt in with
+# `POOL_TOPOLOGY=unified make cloud-gke-bench ...`.
+POOL_TOPOLOGY ?= split
 IMAGE := $(if $(IMAGE),$(IMAGE),default)
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)" "$(IMAGE)" "$(BENCHMARK_ID)"
@@ -46,8 +51,8 @@ cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving ex
 cloud-gke-provision: ## Provision GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-provision --arch=$(GKE_ARCH)
 
-cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 FOLD_STRATEGY=reduction|hex)
-	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(GKE_CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --benchmark-id=$(BENCHMARK_ID)
+cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 FOLD_STRATEGY=reduction|hex POOL_TOPOLOGY=split|unified)
+	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(GKE_CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --pool-topology=$(POOL_TOPOLOGY) --benchmark-id=$(BENCHMARK_ID)
 
 cloud-gke-destroy: ## Tear down GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-destroy --arch=$(GKE_ARCH)
