@@ -64,7 +64,10 @@ use circuit::hexadecimal_tree_chain_constraints::{
     HexadecimalTreeChainCircuit, HexadecimalTreeChainTarget, RADIX as HEX_RADIX,
 };
 use circuit::recursion::batch::{Batch, BatchTarget, BatchTargetWitness};
-use circuit::circuit_serializer::{BlockGateSerializer, BlockGeneratorSerializer};
+use circuit::circuit_serializer::{
+    BlockGateSerializer, BlockGeneratorSerializer, RecursionGateSerializer,
+    RecursionGeneratorSerializer,
+};
 use circuit::ecdsa::curve::secp256k1::Secp256K1;
 use circuit::types::config::{Builder, C, CIRCUIT_CONFIG, D, F};
 use plonky2::iop::witness::{PartialWitness, Witness};
@@ -406,6 +409,13 @@ pub enum Role {
         /// `LIGHTER_CIRCUIT_ARTIFACTS`, then `/data/circuits`.
         #[arg(long)]
         artifact_dir: Option<String>,
+        /// Also bake the reduction-tree NODE circuits (Hex chain) for levels
+        /// `1..=N` (bottom-up), plus the `BatchTarget` leaf they pin. Node
+        /// artifacts are LARGE (~0.5 GiB L1, ~1.1 GiB L2 — ~1.6 GiB for L1+L2).
+        /// Default 2 (radix-16 depth for 125-500 leaves is 2-3). Set to 0 to
+        /// bake only the app circuits (pre-exec + BlockTx), the #322 Phase B set.
+        #[arg(long, default_value_t = 2)]
+        bake_node_levels: usize,
     },
 }
 
@@ -1331,6 +1341,17 @@ struct NodeCircuit {
 ///
 /// `level == 0` is the (non-recursive) leaf circuit itself, used as the base of
 /// the recursion; callers fold at `level >= 1`.
+///
+/// This always BUILDS (never loads). It is retained as the authoritative,
+/// deterministic reference build used by (a) the `bake` subcommand's VK-identity
+/// round-trip check and (b) the load-or-build path's safe fallback when an
+/// artifact is absent/stale. Prefer [`build_or_load_node_circuit_for_level`] on
+/// the hot path.
+// The runtime hot path now goes through `build_or_load_node_circuit_for_level`
+// (load-or-build); this authoritative reference build is retained for the
+// `node_bake_load_reconstruct_*` correctness tests (fresh-vs-loaded VK/Batch
+// identity), so it is only referenced in the test build.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_node_circuit_for_level(level: usize) -> NodeCircuit {
     assert!(level >= 1, "tree node circuits exist at level >= 1");
 
@@ -1352,6 +1373,149 @@ fn build_node_circuit_for_level(level: usize) -> NodeCircuit {
         data,
         child_data,
         child_is_recursive,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Node-circuit BAKING via target reconstruction (issue #322 follow-up)
+//
+// #322 Phase B baked the APP circuits (pre-exec / BlockTx) but DEFERRED the Hex
+// tree NODE circuits, noting: "proving a node needs its in-memory target +
+// child_data, and node.define() needs the built child circuit to pin the child
+// VK." This follow-up resolves that with a TARGET-RECONSTRUCTION design that
+// removes the EXPENSIVE build (`build::<C>()` = FFT tables + VK) while still
+// producing the in-memory `HexadecimalTreeChainTarget` proving needs:
+//
+//   KEY INSIGHT (verified from hexadecimal_tree_chain_constraints.rs):
+//   `HexadecimalTreeChainCircuit::define(config, child)` needs from the child
+//   ONLY its `verifier_only` (VK, via `constant_verifier_data`) and `common`
+//   (via `add_virtual_proof_with_pis`) — NOT the child's expensive
+//   `prover_only`/FFT build. And `define()` itself is CHEAP: it is pure in-memory
+//   gate-graph construction + DETERMINISTIC target-index assignment (children[16]
+//   / is_real_child[16] / aggregated_batch wire handles allocated in a fixed
+//   order). The expensive part is exclusively `.builder.build::<C>()`.
+//
+//   ∴ To obtain a level-L node's (target, data, child_data) WITHOUT the build:
+//     1. LOAD level-L's `CircuitData` from a baked artifact (skips build()).
+//        A deserialised CircuitData carries verifier_only + common + prover_only.
+//     2. LOAD the CHILD's `CircuitData` (level-(L-1) node, or the leaf at L=1) —
+//        needed both to feed `define()` (VK pin + common shape) AND as
+//        `child_data` for prove()'s dummy-padding mint. Loaded recursively down
+//        the chain, each level from its own artifact (leaf from `batch_leaf`).
+//     3. RE-RUN `define(CIRCUIT_CONFIG, &loaded_child_data)` on a THROWAWAY
+//        builder to reconstruct the `target` handles; we KEEP the target and
+//        DISCARD the builder (we never call build()). Because define() is
+//        deterministic and the loaded level-L data was built from the SAME
+//        define(), the reconstructed target's wire indices match the loaded data.
+//     4. Return NodeCircuit { target: reconstructed, data: LOADED, child_data:
+//        LOADED, child_is_recursive }.
+//
+// CORRECTNESS: a node proof produced from a RECONSTRUCTED target + LOADED data
+// must be VALID and VK-identical to one from a freshly-built node. This is the
+// crux and is PROVEN by `node_bake_load_reconstruct_*` tests (real fold, verify,
+// Batch-identical, VK-identical) for L1 and L2 — NOT assumed.
+//
+// SAFE FALLBACK: absent/stale artifact ⇒ BUILD (never hard-fail), exactly like
+// the Phase B app circuits. The version stamp guards against silent stale loads.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Load the `BatchTarget`-shaped leaf `CircuitData` from its baked artifact, or
+/// `None` on any miss. The leaf is the base of the node recursion (level-1's
+/// child); it uses a subset of the `Recursion*` serializer coverage, so it is
+/// (de)serialised with the same pair as the nodes.
+fn try_load_leaf_data() -> Option<CircuitData<F, C, D>> {
+    try_load_recursion_circuit(LEAF_ARTIFACT_KIND)
+}
+
+/// Obtain the child chain's LOADED `CircuitData` for a level-`level` node:
+/// - level 1: the leaf circuit data (loaded from `batch_leaf`, else built).
+/// - level L: the level-(L-1) node's data (loaded from `node_L{L-1}`, else the
+///   whole child chain is built).
+///
+/// Returns `(child_data, child_is_recursive, all_loaded)` where `all_loaded` is
+/// `true` only if the child (and, transitively, everything below it) came from
+/// artifacts. When the child could not be fully loaded it is BUILT — a safe
+/// fallback that still lets the level-L node itself load if its own artifact is
+/// present (define() only needs the child's verifier_only+common, which a built
+/// child also supplies identically to a loaded one, since both are deterministic).
+fn load_or_build_child_for_level(level: usize) -> (CircuitData<F, C, D>, bool, bool) {
+    if level == 1 {
+        match try_load_leaf_data() {
+            Some(leaf) => (leaf, false, true),
+            None => {
+                let (leaf, _t) = build_batch_leaf_data();
+                (leaf, false, false)
+            }
+        }
+    } else {
+        // The child is the level-(L-1) node. Try to load it (and its chain);
+        // fall back to a full build of the child chain if anything is missing.
+        let child = build_or_load_node_circuit_for_level(level - 1);
+        let all_loaded = child.loaded_from_artifact;
+        (child.node.data, true, all_loaded)
+    }
+}
+
+/// A [`NodeCircuit`] plus provenance: whether its own `data` came from a baked
+/// artifact (vs. a build). Used to memoise the load-vs-build decision and to let
+/// the `bake` round-trip check assert the loaded data is VK-identical.
+struct LoadedNodeCircuit {
+    node: NodeCircuit,
+    /// `true` iff this level's `data` was LOADED from an artifact (not built).
+    loaded_from_artifact: bool,
+}
+
+/// Obtain the level-`level` node circuit, LOADING its (and its child chain's)
+/// `CircuitData` from baked artifacts when present, reconstructing the in-memory
+/// `HexadecimalTreeChainTarget` via `define()` against the loaded child. Falls
+/// back to a full BUILD when the level-L artifact is absent/stale (safe, exactly
+/// like the Phase B app circuits).
+///
+/// See the module comment above for the reconstruction design + correctness
+/// crux. `define()` is CHEAP (in-memory gate graph + deterministic target-index
+/// assignment); the expensive `build::<C>()` is what loading skips.
+fn build_or_load_node_circuit_for_level(level: usize) -> LoadedNodeCircuit {
+    assert!(level >= 1, "tree node circuits exist at level >= 1");
+
+    // Resolve the child chain's data (loaded if possible, else built). `define()`
+    // needs the child's verifier_only (VK pin) + common (proof shape); both are
+    // deterministic so a loaded and a built child are interchangeable HERE.
+    let (child_data, child_is_recursive, _child_loaded) = load_or_build_child_for_level(level);
+
+    match try_load_recursion_circuit(&node_artifact_kind(level)) {
+        Some(data) => {
+            // RECONSTRUCT the target against the loaded child (throwaway builder;
+            // we keep only the target handles and never call build()). Because
+            // define() is deterministic and the loaded level-L data was built
+            // from the SAME define(), the reconstructed target's wire indices
+            // match the loaded data. The correctness of this pairing is PROVEN by
+            // the node_bake_load_reconstruct_* tests.
+            let target = HexadecimalTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data).target;
+            LoadedNodeCircuit {
+                node: NodeCircuit {
+                    target,
+                    data,
+                    child_data,
+                    child_is_recursive,
+                },
+                loaded_from_artifact: true,
+            }
+        }
+        None => {
+            // No (matching) artifact — BUILD this level from the resolved child.
+            let circuit = HexadecimalTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
+            let target = circuit.target;
+            let data = circuit.builder.build::<C>();
+            LoadedNodeCircuit {
+                node: NodeCircuit {
+                    target,
+                    data,
+                    child_data,
+                    child_is_recursive,
+                },
+                loaded_from_artifact: false,
+            }
+        }
     }
 }
 
@@ -1641,7 +1805,14 @@ fn cached_node_circuit(level: usize) -> &'static NodeCircuit {
     if let Some(c) = guard.get(&key) {
         return c;
     }
-    let node = build_node_circuit_for_level(level);
+    // Phase B follow-up (#322): LOAD-then-BUILD. Try to deserialise the level-L
+    // node's `CircuitData` (and its child chain) from baked artifacts and
+    // reconstruct the in-memory target via `define()` against the loaded child;
+    // fall back to a full build when the artifact is absent/stale. This is the
+    // highest-value throughput win: cold node builds are ~400 core-sec/block.
+    // The reconstructed-target + loaded-data pairing is PROVEN VK/Batch-identical
+    // to a fresh build by the node_bake_load_reconstruct_* tests.
+    let node = build_or_load_node_circuit_for_level(level).node;
     let leaked: &'static NodeCircuit = Box::leak(Box::new(node));
     guard.insert(key, leaked);
     leaked
@@ -1880,6 +2051,84 @@ fn bake_block_circuit(kind: &str, data: &CircuitData<F, C, D>) -> Result<(), Str
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
     let path = Path::new(&dir).join(artifact_filename(kind));
     let (gs, ggs) = block_serializers();
+    let bytes = data
+        .to_bytes(&gs, &ggs)
+        .map_err(|e| format!("serialise {kind}: {e:?}"))?;
+    fs::write(&path, &bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    info!("[artifact] baked {kind} -> {} ({} bytes)", path.display(), bytes.len());
+    Ok(())
+}
+
+/// The `Recursion*` serializer pair (recursion-bearing circuits: the Hex tree
+/// NODE circuits, and the `BatchTarget`-shaped leaf whose gate/generator set is a
+/// subset). Distinct from [`block_serializers`] because a Hex node's
+/// `CircuitData` contains an in-circuit `verify_proof` whose generators/gates are
+/// only covered by the `Recursion*` pair (pilot-verified: the Hex node
+/// round-trips VK-identical with this pair; see #322 Phase B measurement).
+///
+/// Because the leaf circuit (`BatchTarget::new_public` + range checks) uses only
+/// gates/generators that are a subset of this pair's coverage, node artifacts AND
+/// the leaf they pin can share this serializer — the whole recursive chain
+/// (leaf + level-1..L nodes) is (de)serialised with one pair.
+fn recursion_serializers() -> (RecursionGateSerializer, RecursionGeneratorSerializer<C, D>) {
+    (RecursionGateSerializer, RecursionGeneratorSerializer::<C, D>::default())
+}
+
+/// Artifact `kind` string for a level-`level` reduction-tree NODE circuit.
+fn node_artifact_kind(level: usize) -> String {
+    format!("node_L{level}")
+}
+
+/// Artifact `kind` string for the `BatchTarget`-shaped leaf circuit (the base of
+/// the node recursion — the level-1 node's child).
+const LEAF_ARTIFACT_KIND: &str = "batch_leaf";
+
+/// Try to deserialise a recursion-bearing (`Recursion*`-serialised) `CircuitData`
+/// from `kind`'s artifact. `None` on any miss (no dir, absent file, decode error)
+/// so the caller falls back to BUILD — exactly like [`try_load_block_circuit`]
+/// but with the `Recursion*` serializer pair for the node/leaf chain.
+fn try_load_recursion_circuit(kind: &str) -> Option<CircuitData<F, C, D>> {
+    let path = artifact_path(kind)?;
+    if !path.exists() {
+        info!("[artifact] {kind}: no baked artifact at {} — will BUILD", path.display());
+        return None;
+    }
+    let started = Instant::now();
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            warn_or_info(format!("[artifact] {kind}: read failed ({e}) — will BUILD"));
+            return None;
+        }
+    };
+    let (gs, ggs) = recursion_serializers();
+    match CircuitData::<F, C, D>::from_bytes(&bytes, &gs, &ggs) {
+        Ok(data) => {
+            info!(
+                "[artifact] {kind}: LOADED baked CircuitData ({} bytes) in {:?} — skipped BUILD",
+                bytes.len(),
+                started.elapsed()
+            );
+            Some(data)
+        }
+        Err(e) => {
+            warn_or_info(format!(
+                "[artifact] {kind}: decode failed ({e:?}) — version/param drift? falling back to BUILD"
+            ));
+            None
+        }
+    }
+}
+
+/// Serialise a recursion-bearing circuit (Hex node / leaf) to its artifact path
+/// with the `Recursion*` pair. Used by the `bake` subcommand, NOT the hot path.
+/// Mirrors [`bake_block_circuit`] but with [`recursion_serializers`].
+fn bake_recursion_circuit(kind: &str, data: &CircuitData<F, C, D>) -> Result<(), String> {
+    let dir = circuit_artifact_dir()
+        .ok_or_else(|| "no artifact dir configured (set LIGHTER_CIRCUIT_ARTIFACTS)".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
+    let path = Path::new(&dir).join(artifact_filename(kind));
+    let (gs, ggs) = recursion_serializers();
     let bytes = data
         .to_bytes(&gs, &ggs)
         .map_err(|e| format!("serialise {kind}: {e:?}"))?;
@@ -2886,6 +3135,7 @@ fn main() {
         Role::Bake {
             tx_per_proof,
             artifact_dir,
+            bake_node_levels,
         } => {
             set_circuit_artifact_dir(
                 artifact_dir.or_else(|| std::env::var("LIGHTER_CIRCUIT_ARTIFACTS").ok()),
@@ -2944,6 +3194,78 @@ fn main() {
                 );
                 info!("[bake] {kind}: VK-identity verified");
                 baked += 1;
+            }
+
+            // Reduction-tree NODE circuits (issue #322 follow-up). Bake the leaf
+            // (the level-1 child) then each level 1..=bake_node_levels BOTTOM-UP:
+            // build level 1 from the leaf, bake it; build level 2 from level-1's
+            // data, bake it; etc. After baking each, RELOAD it and assert the
+            // reloaded VK digest equals the freshly-built VK digest — the enforced
+            // correctness invariant (the reconstructed-target + loaded-data
+            // pairing is additionally proven Batch/VK-identical by the
+            // node_bake_load_reconstruct_* tests). Best-effort: node artifacts are
+            // LARGE (~0.5 GiB L1, ~1.1 GiB L2), so a bake failure at any level is
+            // logged and does NOT abort the app-circuit bake (runtime safely falls
+            // back to building missing levels).
+            if bake_node_levels >= 1 {
+                // Bake the leaf first (level-1's child). We build it fresh and
+                // serialise with the Recursion* pair (the node/leaf serializer).
+                let (leaf_data, _leaf_target) = build_batch_leaf_data();
+                let leaf_vk = leaf_data.verifier_only.circuit_digest;
+                match bake_recursion_circuit(LEAF_ARTIFACT_KIND, &leaf_data) {
+                    Ok(()) => {
+                        match try_load_recursion_circuit(LEAF_ARTIFACT_KIND) {
+                            Some(reloaded) => {
+                                assert_eq!(
+                                    leaf_vk, reloaded.verifier_only.circuit_digest,
+                                    "batch_leaf: baked artifact VK digest != freshly-built VK digest"
+                                );
+                                info!("[bake] batch_leaf: VK-identity verified");
+                                baked += 1;
+                            }
+                            None => eprintln!(
+                                "[bake] WARNING: batch_leaf reloaded as None after bake — \
+                                 runtime will build it"
+                            ),
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "[bake] WARNING: bake batch_leaf failed: {e} — runtime will build it"
+                    ),
+                }
+
+                // Bake nodes bottom-up. Each level is BUILT from its child's data
+                // (leaf at L=1, level-(L-1) node data at L>1) so the whole chain
+                // is constructed exactly once here.
+                let mut child_data: CircuitData<F, C, D> = leaf_data;
+                for level in 1..=bake_node_levels {
+                    let circuit = HexadecimalTreeChainCircuit::define(CIRCUIT_CONFIG, &child_data);
+                    let data = circuit.builder.build::<C>();
+                    let built_vk = data.verifier_only.circuit_digest;
+                    let kind = node_artifact_kind(level);
+                    match bake_recursion_circuit(&kind, &data) {
+                        Ok(()) => match try_load_recursion_circuit(&kind) {
+                            Some(reloaded) => {
+                                assert_eq!(
+                                    built_vk, reloaded.verifier_only.circuit_digest,
+                                    "{kind}: baked artifact VK digest != freshly-built VK digest"
+                                );
+                                info!("[bake] {kind}: VK-identity verified");
+                                baked += 1;
+                            }
+                            None => eprintln!(
+                                "[bake] WARNING: {kind} reloaded as None after bake — \
+                                 runtime will build this level"
+                            ),
+                        },
+                        Err(e) => eprintln!(
+                            "[bake] WARNING: bake {kind} failed: {e} — \
+                             runtime will build this level"
+                        ),
+                    }
+                    // The next level's child is this level's built data.
+                    child_data = data;
+                }
             }
 
             info!(
@@ -4723,9 +5045,340 @@ mod tests {
         set_circuit_artifact_dir(None);
     }
 
+    // ── Node-circuit BAKING via target reconstruction (#322 follow-up) ───────
+
+    /// A level-1 leaf batch spanning block `n`: `old_root -> new_root`, one tx.
+    /// Duplicated from the reduction test's `chained_batch` (defined later in the
+    /// module) so the node-baking tests are self-contained; identical semantics.
+    fn node_bake_chained_batch(block_number: u64, old_root: u64, new_root: u64) -> Batch<F> {
+        use plonky2::field::types::Field;
+        use plonky2::hash::hash_types::HashOut;
+        Batch::<F> {
+            end_block_number: block_number,
+            batch_size: 1,
+            first_created_at: 100 + block_number as i64,
+            last_created_at: 100 + block_number as i64,
+            old_state_root: HashOut::from([F::from_canonical_u64(old_root); 4]),
+            new_state_root: HashOut::from([F::from_canonical_u64(new_root); 4]),
+            ..Batch::<F>::default()
+        }
+    }
+
+    /// A private per-test artifact dir so parallel tests never clobber each other.
+    fn node_bake_tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "lighter-node-bake-{tag}-{}-{}",
+            std::process::id(),
+            // A monotonically-increasing nonce so re-runs in one process differ.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|x| x.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// THE CORRECTNESS CRUX (level 1). A node proof produced from a
+    /// RECONSTRUCTED target + LOADED `CircuitData` must be VALID and IDENTICAL to
+    /// one from a freshly-BUILT node. This is what makes node baking sound; it is
+    /// PROVEN here, not assumed.
+    ///
+    /// Steps:
+    ///   1. Build a level-1 node FRESH (`build_node_circuit_for_level(1)`).
+    ///   2. Bake it + the leaf it pins to a private artifact dir.
+    ///   3. LOAD the node data + reconstruct its target via
+    ///      `define(loaded_leaf)` (the runtime `build_or_load_node_circuit_for_level`
+    ///      path — assert it actually LOADED, not built).
+    ///   4. Prove a REAL fold over 2 real leaf children with BOTH the fresh and
+    ///      the loaded (target, data).
+    ///   5. Assert: (a) loaded proves, (b) loaded verifies against loaded data,
+    ///      (c) the produced root Batch public inputs are IDENTICAL, (d) loaded
+    ///      data's `verifier_only.circuit_digest` == fresh's.
+    ///
+    /// Requires a large stack (recursive proving); run with
+    /// `RUST_MIN_STACK=4294967296 ... -- --test-threads=1`.
+    #[test]
+    fn node_bake_load_reconstruct_l1_proves_verifies_and_is_identical() {
+        use circuit::recursion::batch::BATCH_TARGET_INDEX;
+
+        // Two real chained leaf children: 10->20, 20->30.
+        let b0 = node_bake_chained_batch(1, 10, 20);
+        let b1 = node_bake_chained_batch(2, 20, 30);
+        let p0 = prove_batch_leaf(&b0);
+        let p1 = prove_batch_leaf(&b1);
+
+        // (1) Fresh level-1 node (authoritative reference build).
+        let fresh = build_node_circuit_for_level(1);
+        let fresh_vk = fresh.data.verifier_only.circuit_digest;
+
+        // (2) Bake the node + the leaf it pins.
+        let dir = node_bake_tmp_dir("l1");
+        set_circuit_artifact_dir(Some(dir.to_string_lossy().to_string()));
+        let (leaf_data, _t) = build_batch_leaf_data();
+        bake_recursion_circuit(LEAF_ARTIFACT_KIND, &leaf_data).expect("bake leaf");
+        bake_recursion_circuit(&node_artifact_kind(1), &fresh.data).expect("bake node L1");
+
+        // (3) LOAD + reconstruct target via define(loaded_leaf). Use the runtime
+        // path and assert it LOADED (skipped the expensive build).
+        let loaded = build_or_load_node_circuit_for_level(1);
+        assert!(
+            loaded.loaded_from_artifact,
+            "level-1 node data must be LOADED from the baked artifact, not built"
+        );
+
+        // (d) VK identity: loaded data's digest == fresh's.
+        assert_eq!(
+            fresh_vk,
+            loaded.node.data.verifier_only.circuit_digest,
+            "loaded node VK digest must equal the freshly-built node VK digest"
+        );
+
+        // (4) Prove the SAME real fold two ways.
+        let fresh_proof = HexadecimalTreeChainCircuit::prove(
+            &fresh.target,
+            &fresh.data,
+            &[p0.clone(), p1.clone()],
+            &fresh.child_data,
+            None,
+        )
+        .expect("fresh level-1 fold must prove");
+
+        // (a) loaded proves — with the RECONSTRUCTED target + LOADED data.
+        let loaded_proof = HexadecimalTreeChainCircuit::prove(
+            &loaded.node.target,
+            &loaded.node.data,
+            &[p0, p1],
+            &loaded.node.child_data,
+            None,
+        )
+        .expect("reconstructed-target + loaded-data level-1 fold must prove");
+
+        // (b) loaded verifies against the LOADED data.
+        loaded
+            .node
+            .data
+            .verify(loaded_proof.clone())
+            .expect("loaded level-1 proof must verify against loaded data");
+
+        // (c) Batch-identical root public inputs.
+        let fresh_batch =
+            Batch::<F>::from_public_inputs(&fresh_proof.public_inputs[..BATCH_TARGET_INDEX]);
+        let loaded_batch =
+            Batch::<F>::from_public_inputs(&loaded_proof.public_inputs[..BATCH_TARGET_INDEX]);
+        assert_eq!(
+            fresh_batch.old_state_root, loaded_batch.old_state_root,
+            "L1 reconstructed fold old_state_root must match fresh"
+        );
+        assert_eq!(
+            fresh_batch.new_state_root, loaded_batch.new_state_root,
+            "L1 reconstructed fold new_state_root must match fresh"
+        );
+        assert_eq!(
+            fresh_batch.batch_size, loaded_batch.batch_size,
+            "L1 reconstructed fold batch_size must match fresh"
+        );
+        // The full public-input vectors must be byte-identical.
+        assert_eq!(
+            fresh_proof.public_inputs, loaded_proof.public_inputs,
+            "L1 reconstructed fold public inputs must be IDENTICAL to fresh"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        set_circuit_artifact_dir(None);
+    }
+
+    /// THE CORRECTNESS CRUX (level 2 — the RECURSIVE child case). Same as the L1
+    /// test but for a level-2 node folding two REAL level-1 node children (which
+    /// each fold real leaves). This covers the recursive-padding path (a level-2
+    /// pad must be a real level-1 base proof) with the LOADED level-2 data +
+    /// reconstructed target, and confirms the loaded child chain (leaf -> L1 ->
+    /// L2) reconstructs a valid, VK/Batch-identical node.
+    ///
+    /// Requires a large stack; run with `RUST_MIN_STACK=4294967296 ...`.
+    #[test]
+    fn node_bake_load_reconstruct_l2_proves_verifies_and_is_identical() {
+        use circuit::recursion::batch::BATCH_TARGET_INDEX;
+
+        // (1) Fresh level-2 node chain (builds leaf -> L1 -> L2).
+        let fresh = build_node_circuit_for_level(2);
+        let fresh_vk = fresh.data.verifier_only.circuit_digest;
+        // The level-1 node (fresh's child chain) — rebuild it for producing the
+        // real level-1 children the level-2 fold aggregates.
+        let fresh_l1 = build_node_circuit_for_level(1);
+
+        // Two real level-1 children with chaining spans:
+        //   node A folds leaves 10->20, 20->30 => span 10->30
+        //   node B folds leaves 30->40, 40->50 => span 30->50
+        // A.new (30) == B.old (30) so the level-2 fold chains 10->50, size 4.
+        let child_a = HexadecimalTreeChainCircuit::prove(
+            &fresh_l1.target,
+            &fresh_l1.data,
+            &[
+                prove_batch_leaf(&node_bake_chained_batch(1, 10, 20)),
+                prove_batch_leaf(&node_bake_chained_batch(2, 20, 30)),
+            ],
+            &fresh_l1.child_data,
+            None,
+        )
+        .expect("level-1 child A must prove");
+        let child_b = HexadecimalTreeChainCircuit::prove(
+            &fresh_l1.target,
+            &fresh_l1.data,
+            &[
+                prove_batch_leaf(&node_bake_chained_batch(3, 30, 40)),
+                prove_batch_leaf(&node_bake_chained_batch(4, 40, 50)),
+            ],
+            &fresh_l1.child_data,
+            None,
+        )
+        .expect("level-1 child B must prove");
+
+        // A real level-1 base proof used to pad the level-2 node's empty slots
+        // (dummy_proof would fail on the recursive child). Minted the same way as
+        // the circuit-crate `mint_level1_base`.
+        let pad = HexadecimalTreeChainCircuit::prove(
+            &fresh_l1.target,
+            &fresh_l1.data,
+            &[prove_batch_leaf(&node_bake_chained_batch(1, 1, 2))],
+            &fresh_l1.child_data,
+            None,
+        )
+        .expect("level-1 base pad must prove");
+
+        // (2) Bake the whole chain: leaf, node L1, node L2.
+        let dir = node_bake_tmp_dir("l2");
+        set_circuit_artifact_dir(Some(dir.to_string_lossy().to_string()));
+        let (leaf_data, _t) = build_batch_leaf_data();
+        bake_recursion_circuit(LEAF_ARTIFACT_KIND, &leaf_data).expect("bake leaf");
+        bake_recursion_circuit(&node_artifact_kind(1), &fresh_l1.data).expect("bake node L1");
+        bake_recursion_circuit(&node_artifact_kind(2), &fresh.data).expect("bake node L2");
+
+        // (3) LOAD level-2 + reconstruct target via define(loaded_L1). The child
+        // chain (leaf -> L1) is loaded too. Assert it LOADED (skipped build).
+        let loaded = build_or_load_node_circuit_for_level(2);
+        assert!(
+            loaded.loaded_from_artifact,
+            "level-2 node data must be LOADED from the baked artifact, not built"
+        );
+        assert!(
+            loaded.node.child_is_recursive,
+            "level-2's child must be recognised as a recursive node"
+        );
+
+        // (d) VK identity for level 2.
+        assert_eq!(
+            fresh_vk,
+            loaded.node.data.verifier_only.circuit_digest,
+            "loaded level-2 node VK digest must equal the freshly-built node VK digest"
+        );
+        // The loaded child_data must pin the SAME VK as the fresh level-1 node
+        // (the level-2 circuit pins its child VK; a mismatch would break proving).
+        assert_eq!(
+            loaded.node.child_data.verifier_only.circuit_digest,
+            fresh_l1.data.verifier_only.circuit_digest,
+            "loaded level-2 child_data VK must equal the level-1 node VK (pinning)"
+        );
+
+        // (4) Prove the SAME real level-2 fold two ways (fresh vs loaded), each
+        // padding with a real level-1 base proof.
+        let fresh_proof = HexadecimalTreeChainCircuit::prove(
+            &fresh.target,
+            &fresh.data,
+            &[child_a.clone(), child_b.clone()],
+            &fresh.child_data,
+            Some(&pad),
+        )
+        .expect("fresh level-2 fold must prove");
+
+        // (a) loaded proves — reconstructed target + loaded data, recursive child.
+        let loaded_proof = HexadecimalTreeChainCircuit::prove(
+            &loaded.node.target,
+            &loaded.node.data,
+            &[child_a, child_b],
+            &loaded.node.child_data,
+            Some(&pad),
+        )
+        .expect("reconstructed-target + loaded-data level-2 fold must prove");
+
+        // (b) loaded verifies against loaded data.
+        loaded
+            .node
+            .data
+            .verify(loaded_proof.clone())
+            .expect("loaded level-2 proof must verify against loaded data");
+
+        // (c) Batch-identical root public inputs.
+        let fresh_batch =
+            Batch::<F>::from_public_inputs(&fresh_proof.public_inputs[..BATCH_TARGET_INDEX]);
+        let loaded_batch =
+            Batch::<F>::from_public_inputs(&loaded_proof.public_inputs[..BATCH_TARGET_INDEX]);
+        assert_eq!(
+            fresh_batch.old_state_root, loaded_batch.old_state_root,
+            "L2 reconstructed fold old_state_root must match fresh"
+        );
+        assert_eq!(
+            fresh_batch.new_state_root, loaded_batch.new_state_root,
+            "L2 reconstructed fold new_state_root must match fresh"
+        );
+        assert_eq!(
+            fresh_batch.batch_size, loaded_batch.batch_size,
+            "L2 reconstructed fold batch_size must match fresh"
+        );
+        assert_eq!(
+            fresh_proof.public_inputs, loaded_proof.public_inputs,
+            "L2 reconstructed fold public inputs must be IDENTICAL to fresh"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        set_circuit_artifact_dir(None);
+    }
+
+    /// Absent artifact => the load-or-build path FALLS BACK to a build (no hard
+    /// fail), returning a valid node whose `loaded_from_artifact` is `false`.
+    #[test]
+    fn node_load_absent_falls_back_to_build() {
+        let dir = node_bake_tmp_dir("absent");
+        set_circuit_artifact_dir(Some(dir.to_string_lossy().to_string()));
+        // Nothing baked in `dir`: level-1 must fall back to BUILD.
+        let node = build_or_load_node_circuit_for_level(1);
+        assert!(
+            !node.loaded_from_artifact,
+            "with no artifact present, the node must be BUILT (safe fallback)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        set_circuit_artifact_dir(None);
+    }
+
+    /// A version-stamp mismatch (an artifact written under a DIFFERENT version)
+    /// is treated as "not found" — the version-stamped filename means the current
+    /// version's `try_load_recursion_circuit` simply does not see it, so the
+    /// load-or-build path rebuilds. Guards the "stale => rebuild" invariant.
+    #[test]
+    fn node_load_version_mismatch_rebuilds() {
+        let dir = node_bake_tmp_dir("stalever");
+        set_circuit_artifact_dir(Some(dir.to_string_lossy().to_string()));
+        // Write a file under a bogus (non-matching) version stamp for node_L1.
+        let stale_name = format!("{}.v0-STALE.circuit", node_artifact_kind(1));
+        std::fs::write(dir.join(stale_name), b"garbage").unwrap();
+        // The current version's loader must NOT see it (version-stamped filename).
+        assert!(
+            try_load_recursion_circuit(&node_artifact_kind(1)).is_none(),
+            "a differently-versioned artifact must be invisible (=> rebuild)"
+        );
+        let node = build_or_load_node_circuit_for_level(1);
+        assert!(
+            !node.loaded_from_artifact,
+            "a version-mismatched artifact must fall back to BUILD"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        set_circuit_artifact_dir(None);
+    }
+
     // ── Same-height binary reduction (#321 Phase 2) ──────────────────────────
 
-    /// The reduction node registry retains circuits by level and reuses them by
+    /// The reduction node registry retains circuits by level and reused them by
     /// pointer, and distinct levels are distinct artifacts — the radix-2 analogue
     /// of `registry_reuses_node_circuit_by_pointer` for the hex path.
     #[test]

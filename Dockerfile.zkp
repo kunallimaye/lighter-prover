@@ -25,17 +25,34 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
       touch /app/target/x86_64-unknown-linux-gnu/release/lighter-coordinator; \
     fi
 
-# Bake circuit artifacts into the image (issue #322 Phase B). Runs the just-
-# built prover-node `bake` subcommand to serialise the app circuits
-# (pre-exec + BlockTx@S=1) to /artifacts, VK-identity-verified. The runtime
-# pod then LOADS these from /data/circuits instead of rebuilding (~6.8x
-# faster cold start). Best-effort: if bake fails the runtime safely falls
-# back to building (see prover_node.rs `try_load_block_circuit`). Bump
+# Bake circuit artifacts into the image (issue #322 Phase B + node follow-up).
+# Runs the just-built prover-node `bake` subcommand to serialise:
+#   * the app circuits (pre-exec + BlockTx@S=1) — the #322 Phase B set, and
+#   * the reduction-tree NODE circuits (Hex chain) for levels 1..=BAKE_NODE_LEVELS
+#     plus the BatchTarget leaf they pin (the #322 node-baking follow-up).
+# All artifacts land in /artifacts, VK-identity-verified per artifact. The
+# runtime pod then LOADS these from /data/circuits instead of rebuilding: app
+# circuits ~6.8x faster cold start, and node circuits skip the ~400 core-sec/
+# block cold build (a node's expensive build::<C>() is replaced by a deserialise
+# + a CHEAP define() target reconstruction; see prover_node.rs
+# `build_or_load_node_circuit_for_level`).
+#
+# IMAGE-SIZE NOTE: node artifacts are LARGE — ~0.5 GiB (L1) + ~1.1 GiB (L2) =
+# ~1.6 GiB for BAKE_NODE_LEVELS=2 (the default; radix-16 depth for 125-500
+# leaves is 2-3). This materially grows the runtime image. To trade image size
+# for cold-start cost, set --build-arg BAKE_NODE_LEVELS=0 (bakes only the app
+# circuits; nodes build on demand, exactly the #322 Phase B behaviour).
+#
+# Best-effort: if bake fails the runtime safely falls back to building (see
+# prover_node.rs `try_load_recursion_circuit` / `try_load_block_circuit`). Bump
 # CIRCUIT_ARTIFACT_VERSION on a plonky2/param change to invalidate stale art.
 ARG BAKE_TX_PER_PROOF=1
+ARG BAKE_NODE_LEVELS=2
 RUN mkdir -p /artifacts && RUST_MIN_STACK=4294967296 \
       /app/target/x86_64-unknown-linux-gnu/release/prover-node bake \
-      --tx-per-proof "${BAKE_TX_PER_PROOF}" --artifact-dir /artifacts \
+      --tx-per-proof "${BAKE_TX_PER_PROOF}" \
+      --bake-node-levels "${BAKE_NODE_LEVELS}" \
+      --artifact-dir /artifacts \
     || echo '[bake] WARNING: circuit bake failed; runtime will build on demand';
 
 # ─── Stage 2: Minimal High-Throughput Compute Runtime ────────────────
