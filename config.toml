@@ -1,0 +1,269 @@
+# Project Configuration & Infrastructure Toolkit
+#
+# Copy this file to config.toml and customize your settings.
+# config.toml is gitignored — never commit it.
+#
+# This file defines the Google Cloud infrastructure and target Service Accounts
+# (including required IAM role allocations) for the Lighter prover platform.
+
+[project]
+name = "lighter-prover"
+
+[gcp.defaults]
+project = "kunal-scratch"
+region  = "us-east4"
+enable_fungible_pool = true
+
+[gcp.state]
+# Google Cloud Storage bucket used as remote backend for Terraform state files.
+# Automatically verified and created by `make cloud-admin-init`.
+bucket = "kunal-scratch-tfstate"
+prefix = "lighter-prover-perf"
+
+[gcp.registry]
+# Google Cloud Artifact Registry repository name for managed container workloads.
+# Automatically provisioned by Terraform during `make cloud-deploy`.
+repository = "lighter-prover-iac"
+# Repository location. Supports regions (e.g. us-central1) or multi-regions (us, europe, asia).
+# Note: Google Cloud Artifact Registry does not support location "global".
+region     = "us-east4"
+
+[gcp.bench]
+# GCS destination bucket for remote benchmark telemetry uploads (defaults to state bucket if omitted).
+bucket = "kunal-scratch-tfstate"
+# GCS path template. Supports variables: {machine_type}, {instance_id}, {timestamp}, {build_id}.
+path_template = "benchmark-reports/{machine_type}/{instance_id}/{timestamp}"
+
+[gcp.pubsub]
+# Google Cloud Pub/Sub real-time gRPC backplane topic and subscription names.
+# Automatically provisioned by Terraform during `make cloud-deploy`.
+topic        = "stark-proofs-topic"
+subscription = "tree-aggregators-sub"
+
+# ─── Target Service Accounts & Role Allocations ────────────────────────
+# Identities and IAM permissions required by Cloud Build and runtime workloads.
+# Note: You may add ANY arbitrary Service Account entries below (e.g. [gcp.target.monitor_sa]).
+# Run `make cloud-admin-init` to automatically create all defined Service Accounts
+# and bind the enumerated IAM roles on your Google Cloud project.
+# Run `make cloud-admin-undo` to symmetrically revoke these roles and delete the SAs.
+
+[gcp.target]
+# Cloud Build execution machine type (e.g. UNSPECIFIED, E2_HIGHCPU_8, E2_HIGHCPU_32)
+build_machine_type = "E2_HIGHCPU_32"
+
+[gcp.target.build_sa]
+email = "lighter-builder@kunal-scratch.iam.gserviceaccount.com"
+# Roles expected by Cloud Build to execute Terraform pipelines and push images.
+roles = [
+  "roles/cloudbuild.builds.builder",
+  "roles/storage.admin",
+  "roles/storage.objectAdmin",
+  "roles/artifactregistry.admin",
+  "roles/compute.admin",
+  "roles/container.admin",
+  "roles/iam.serviceAccountUser",
+  "roles/iam.serviceAccountAdmin",
+  "roles/pubsub.editor"
+]
+
+[gcp.target.runtime_sa]
+email = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
+# Least-privilege roles expected by GCE instances / Cloud Run workloads at runtime.
+roles = [
+  "roles/artifactregistry.reader",
+  "roles/logging.logWriter",
+  "roles/monitoring.metricWriter",
+  "roles/storage.admin",
+  "roles/storage.objectAdmin",
+  "roles/pubsub.editor"
+]
+
+# ─── Virtual Machines List & Default Inheritance ───────────────────────
+# Define GCE instances provisioned when running `make cloud-deploy`.
+# All individual VMs inherit properties from `[vms.default]` unless explicitly overridden.
+
+[vms.default]
+machine_type    = "c4a-highcpu-16"
+zone            = "us-east4-b"
+disk_size_gb    = 200
+disk_type       = "hyperdisk-balanced"
+image           = "debian-cloud/debian-12-arm64"
+turbo_mode      = ""
+service_account = "lighter-runtime@kunal-scratch.iam.gserviceaccount.com"
+
+[vms.prover-c4a-16]
+machine_type = "c4a-highcpu-16"
+
+[vms.prover-c4a-32]
+machine_type = "c4a-highcpu-32"
+
+[vms.prover-c4a-48]
+machine_type = "c4a-highcpu-48"
+
+[vms.prover-c4a-64]
+machine_type = "c4a-highcpu-64"
+zone         = "us-east4-b"
+
+[vms.prover-c4a-72]
+machine_type = "c4a-highcpu-72"
+zone         = "us-east4-b"
+
+[vms.prover-c4d-16]
+machine_type = "c4d-highcpu-16"
+image        = "debian-cloud/debian-12"
+
+[vms.prover-c4d-32]
+machine_type = "c4d-highcpu-32"
+image        = "debian-cloud/debian-12"
+
+[vms.prover-c4d-48]
+machine_type = "c4d-highcpu-48"
+image        = "debian-cloud/debian-12"
+
+[vms.prover-c4d-64]
+machine_type = "c4d-highcpu-64"
+image        = "debian-cloud/debian-12"
+zone         = "us-central1-a"
+
+[vms.prover-c4d-96]
+machine_type = "c4d-highcpu-96"
+image        = "debian-cloud/debian-12"
+zone         = "us-central1-a"
+
+[vms.prover-c3d-16]
+machine_type = "c3d-highcpu-16"
+image        = "debian-cloud/debian-12"
+
+[vms.prover-c3d-30]
+machine_type = "c3d-highcpu-30"
+image        = "debian-cloud/debian-12"
+
+[vms.prover-c3d-60]
+machine_type = "c3d-highcpu-60"
+image        = "debian-cloud/debian-12"
+
+[vms.prover-c3d-90]
+machine_type = "c3d-highcpu-90"
+image        = "debian-cloud/debian-12"
+zone         = "us-central1-a"
+
+[vms.prover-c3d-180]
+machine_type = "c3d-highcpu-180"
+image        = "debian-cloud/debian-12"
+zone         = "us-east4-b"
+
+[vms.prover-t2d-16]
+machine_type = "t2d-standard-16"
+image        = "debian-cloud/debian-12"
+disk_type    = "pd-balanced"
+
+[vms.prover-t2d-32]
+machine_type = "t2d-standard-32"
+image        = "debian-cloud/debian-12"
+disk_type    = "pd-balanced"
+
+[vms.prover-t2d-48]
+machine_type = "t2d-standard-48"
+image        = "debian-cloud/debian-12"
+disk_type    = "pd-balanced"
+zone         = "us-central1-a"
+
+[vms.prover-t2d-60]
+machine_type = "t2d-standard-60"
+image        = "debian-cloud/debian-12"
+disk_type    = "pd-balanced"
+zone         = "us-east1-b"
+
+# ─── Indivisible Proving Pod Taxonomy & Execution Profiles ─────────────
+# Defines collaborative Proving Pod specs (Leaf Workers + Tree Aggregators).
+# Symmetrically reused across GKE Standard node pools and bare GCE MIGs.
+
+[proving_pod.defaults]
+arch   = "c3d" # AMD Genoa Zen 4 AVX-512 Sharding Frontier
+engine = "mig"
+
+[proving_pod.c4a]
+machine_family = "c4a"
+image          = "debian-cloud/debian-12-arm64"
+
+[proving_pod.c4a.leaf_worker]
+machine_type    = "c4a-highcpu-16"
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+chunk_size      = 32
+cpu_requests    = "14"
+memory_requests = "24Gi"
+
+[proving_pod.c4a.aggregator]
+machine_type    = "c4a-highcpu-16"
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 50
+cpu_requests    = "14"
+memory_requests = "24Gi"
+
+[proving_pod.c3d]
+machine_family = "c3d"
+image          = "debian-cloud/debian-12"
+
+[proving_pod.c3d.leaf_worker]
+machine_type    = "c3d-highcpu-60"
+node_count      = 11
+pods_per_node   = 8
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+chunk_size      = 1
+cpu_requests    = "7"
+memory_requests = "4Gi"
+
+[proving_pod.c3d.aggregator]
+machine_type    = "c3d-highcpu-60"
+node_count      = 0
+pods_per_node   = 0
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+cpu_requests    = "7"
+memory_requests = "4Gi"
+
+
+[proving_pod.t2d]
+machine_family = "t2d"
+image          = "debian-cloud/debian-12"
+
+[proving_pod.t2d.leaf_worker]
+machine_type    = "t2d-standard-16"
+disk_type       = "pd-balanced"
+disk_size_gb    = 100
+chunk_size      = 32
+cpu_requests    = "14"
+memory_requests = "24Gi"
+
+[proving_pod.t2d.aggregator]
+machine_type    = "t2d-standard-16"
+disk_type       = "pd-balanced"
+disk_size_gb    = 50
+cpu_requests    = "14"
+memory_requests = "24Gi"
+
+[proving_pod.c4d]
+machine_family = "c4d"
+image          = "debian-cloud/debian-12"
+
+[proving_pod.c4d.leaf_worker]
+machine_type    = "c4d-highcpu-64"
+node_count      = 11
+pods_per_node   = 8
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+chunk_size      = 1
+cpu_requests    = "7"
+memory_requests = "4Gi"
+
+[proving_pod.c4d.aggregator]
+machine_type    = "c4d-highcpu-64"
+node_count      = 0
+pods_per_node   = 0
+disk_type       = "hyperdisk-balanced"
+disk_size_gb    = 100
+cpu_requests    = "7"
+memory_requests = "4Gi"
+

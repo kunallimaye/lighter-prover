@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prover-sa
+  namespace: default
+  annotations:
+    iam.gke.io/gcp-service-account: lighter-runtime@kunal-scratch.iam.gserviceaccount.com
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lighter-leaf-worker
+  labels:
+    app: zkp-prover
+    role: leaf-worker
+    silicon-arch: t2d
+spec:
+  parallelism: 2
+  completions: 15
+  completionMode: Indexed
+  template:
+    metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+      labels:
+        role: leaf-worker
+        silicon-arch: t2d
+    spec:
+      serviceAccountName: prover-sa
+      nodeSelector:
+        silicon-arch: t2d
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "zkp-prover"
+        effect: "NoSchedule"
+      restartPolicy: OnFailure
+      containers:
+      - name: prover
+        image: us-east4-docker.pkg.dev/kunal-scratch/lighter-prover-iac/zkp-prover:0.0.3-distributed-proving
+        command: ["sh", "-c", "prover-node leaf-worker --chunk-idx $JOB_COMPLETION_INDEX --tx-per-proof 32"]
+        resources:
+          limits:
+            cpu: "14"
+            memory: "24Gi"
+          requests:
+            cpu: "14"
+            memory: "24Gi"
+        volumeMounts:
+        - name: gcs-volume
+          mountPath: /data/reports
+      volumes:
+      - name: gcs-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: "kunal-scratch-tfstate"
+            mountOptions: "implicit-dirs"

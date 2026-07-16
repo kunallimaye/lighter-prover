@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lighter-tree-aggregator
+  labels:
+    app: zkp-prover
+    role: tree-node
+    silicon-arch: t2d
+spec:
+  template:
+    metadata:
+      annotations:
+        gke-gcsfuse/volumes: "true"
+      labels:
+        role: tree-node
+        silicon-arch: t2d
+    spec:
+      serviceAccountName: prover-sa
+      nodeSelector:
+        silicon-arch: t2d
+      tolerations:
+      - key: "dedicated"
+        operator: "Equal"
+        value: "zkp-prover"
+        effect: "NoSchedule"
+      restartPolicy: OnFailure
+      containers:
+      - name: aggregator
+        image: us-east4-docker.pkg.dev/kunal-scratch/lighter-prover-iac/zkp-prover:0.0.3-distributed-proving
+        command: ["prover-node", "tree-node", "--level", "1", "--node-idx", "0", "--radix", "2", "--tx-per-proof", "32", "--total-leaves", "15"]
+        resources:
+          limits:
+            cpu: "14"
+            memory: "24Gi"
+          requests:
+            cpu: "14"
+            memory: "24Gi"
+        volumeMounts:
+        - name: gcs-volume
+          mountPath: /data/reports
+      volumes:
+      - name: gcs-volume
+        csi:
+          driver: gcsfuse.csi.storage.gke.io
+          volumeAttributes:
+            bucketName: "kunal-scratch-tfstate"
+            mountOptions: "implicit-dirs"

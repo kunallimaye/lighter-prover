@@ -44,4 +44,4 @@ spec:
           driver: gcsfuse.csi.storage.gke.io
           volumeAttributes:
             bucketName: "kunal-scratch-tfstate"
-            mountOptions: "only-dir=benchmark-reports/attempt-50/amd64/c3d,implicit-dirs"
+            mountOptions: "only-dir=benchmark-reports/attempt-51/amd64/c3d,implicit-dirs"
