@@ -33,7 +33,7 @@ RUN if [ -n "${CARGO_FEATURES}" ]; then \
 # back to building (see prover_node.rs `try_load_block_circuit`). Bump
 # CIRCUIT_ARTIFACT_VERSION on a plonky2/param change to invalidate stale art.
 ARG BAKE_TX_PER_PROOF=1
-RUN RUST_MIN_STACK=4294967296 \
+RUN mkdir -p /artifacts && RUST_MIN_STACK=4294967296 \
       /app/target/x86_64-unknown-linux-gnu/release/prover-node bake \
       --tx-per-proof "${BAKE_TX_PER_PROOF}" --artifact-dir /artifacts \
     || echo '[bake] WARNING: circuit bake failed; runtime will build on demand';

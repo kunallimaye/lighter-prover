@@ -364,12 +364,21 @@ cloud_zkp_build() {
   local image_tag="arm64"
   local platform="linux/arm64"
   local rustflags="-C target-cpu=neoverse-v2"
-  if [[ "${arch}" == "amd64" ]]; then
-    dockerfile="Dockerfile.zkp"
-    image_tag="amd64"
-    platform="linux/amd64"
-    rustflags="-C target-cpu=x86-64-v4"
-  fi
+  case "${arch}" in
+    c3d|c4d)
+      dockerfile="Dockerfile.zkp"
+      image_tag="amd64"
+      platform="linux/amd64"
+      rustflags="-C target-cpu=znver4"
+      ;;
+    amd64|x86_64)
+      dockerfile="Dockerfile.zkp"
+      image_tag="amd64"
+      platform="linux/amd64"
+      rustflags="-C target-cpu=x86-64-v4"
+      ;;
+  esac
+
 
   local git_tag="${TAG:-$(git describe --tags --exact-match 2>/dev/null || git describe --tags --always 2>/dev/null || echo "latest")}"
   local image_uri="${ar_region}-docker.pkg.dev/${build_project}/${ar_repo}/zkp-prover:${image_tag}"

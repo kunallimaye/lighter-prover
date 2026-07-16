@@ -83,20 +83,13 @@ def root_proof_name(fold_strategy, depth, leaf_count):
   return f"tree_L{depth}_N0.proof"
 
 
-def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem, agg_cpu, agg_mem, gcs_relative_path):
-  """Render the split fungible-pool Deployments + KEDA ScaledObjects.
-
-  Generates two deployments:
-  1. lighter-fungible-leaf (16 pods, 14vCPU on c3d-highcpu-30)
-  2. lighter-fungible-agg (2 pods, 58vCPU on c3d-highcpu-60)
-  """
+def render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem, agg_cpu, agg_mem, gcs_relative_path, leaf_nodes=9, leaf_pods_per_node=14, agg_nodes=2, agg_pods_per_node=4):
+  """Render the split fungible-pool Deployments + KEDA ScaledObjects."""
   arch = args.arch if args.arch else "c3d"
   
-  # Static GKE shape configuration (from user request)
-  # Leaf: 8 nodes * 2 pods/node = 16 pods
-  # Agg: 2 nodes * 1 pod/node = 2 pods
-  leaf_replicas = 16
-  agg_replicas = 2
+  leaf_replicas = leaf_nodes * leaf_pods_per_node
+  agg_replicas = agg_nodes * agg_pods_per_node
+
   
   ack_deadline = int(args.ack_deadline)
   grace = max(ack_deadline * 2, 120)
@@ -120,6 +113,8 @@ metadata:
     role: leaf-worker
     silicon-arch: {arch}
 spec:
+  strategy:
+    type: Recreate
   replicas: {leaf_replicas}
   selector:
     matchLabels:
@@ -222,6 +217,8 @@ metadata:
     role: aggregator
     silicon-arch: {arch}
 spec:
+  strategy:
+    type: Recreate
   replicas: {agg_replicas}
   selector:
     matchLabels:
@@ -626,6 +623,7 @@ spec:
         args:
         - "--transport=pubsub"
         - "--seed"
+        - "--blocks=$(BLOCKS)"
         - "--radix=$(RADIX)"
         - "--tx-per-proof=$(TX_PER_PROOF)"
         - "--fold-strategy=$(FOLD_STRATEGY)"
@@ -643,6 +641,8 @@ spec:
           value: "{gcs_bucket}"
         - name: PROVER_PUBSUB_OBJECT_PREFIX
           value: "{object_prefix}"
+        - name: BLOCKS
+          value: "{args.blocks}"
         - name: ACK_DEADLINE
           value: "{args.ack_deadline}"
         - name: RADIX
@@ -809,8 +809,13 @@ def main():
     benchmark_id = args.benchmark_id if args.benchmark_id else "none"
     gcs_relative_path = f"benchmark-reports/{benchmark_id}/{image_tag}/{arch}"
 
+    leaf_nodes = int(leaf_cfg.get("node_count", 9)) if leaf_cfg else 9
+    leaf_pods_per_node = int(leaf_cfg.get("pods_per_node", 14)) if leaf_cfg else 14
+    agg_nodes = int(agg_cfg.get("node_count", 2)) if agg_cfg else 2
+    agg_pods_per_node = int(agg_cfg.get("pods_per_node", 4)) if agg_cfg else 4
+
     render_redis(args)
-    render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem, agg_cpu, agg_mem, gcs_relative_path)
+    render_fungible(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, leaf_cpu, leaf_mem, agg_cpu, agg_mem, gcs_relative_path, leaf_nodes, leaf_pods_per_node, agg_nodes, agg_pods_per_node)
     render_active_coordinator(args, project_id, image_uri)
     render_coordinator(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path, leaf_count, depth)
     render_seeder(args, project_id, gsa_email, gcs_bucket, image_uri, leaf_chunk, gcs_relative_path)
