@@ -118,11 +118,55 @@ def test_new_format_queue_wait():
 
 
 def test_new_format_wave_width_is_null():
+  # BACKWARD COMPAT: this pre-#349 fixture carries pull_ms (a DURATION) but NOT
+  # pull_ts_ms (absolute pull timestamp), so wave width is NOT derivable. The
+  # parser must yield an honest null + a note mentioning pull_ts_ms rather than
+  # misusing pull_ms as if it were a timestamp.
   m = _parse("coordinator_new_format.log")
   ww = m["derived"]["wave_width"]
-  # Not derivable from pull_ms (duration); honest null + note.
   assert ww["wave_width_ms"] is None
   assert "pull_ts_ms" in ww["note"]
+  # scheduling_class absent in this fixture -> honest None, never fabricated.
+  assert m["descriptors"]["scheduling_class"] is None
+
+
+# ---------------------------------------------------------------------------
+# #349 leaf/fold OVERLAP: the post-#349 fixture carries pull_ts_ms +
+# scheduling_class, so wave width + overlap are now MEASURED (not null). This
+# exercises the "aggregators engage while leaves are still being produced"
+# happy path (a fold pulled before the last leaf's completion timestamp).
+# ---------------------------------------------------------------------------
+def test_new_format_wave_width_measured():
+  m = _parse("coordinator_wave_width.log")
+  ww = m["derived"]["wave_width"]
+  # Leaf pull_ts_ms span: [1784073600000 .. 1784073601500] -> width 1500.
+  assert isinstance(ww["wave_width_ms"], int)
+  assert ww["wave_width_ms"] == 1500
+  assert ww["wave_width_ms"] > 0
+  assert ww["note"] is None
+  span = ww["leaf_pull_span"]
+  assert span["min_pull_ts_ms"] == 1784073600000
+  assert span["max_pull_ts_ms"] == 1784073601500
+  assert span["count"] == 4
+
+
+def test_new_format_fold_overlap_started_before_last_leaf():
+  m = _parse("coordinator_wave_width.log")
+  ov = m["derived"]["wave_width"]["fold_overlap"]
+  # Last leaf completes (log ts) at 00:00:03.100Z = 1784073603100 ms.
+  # First fold pulls at pull_ts_ms=1784073602000 < 1784073603100 -> overlap.
+  assert ov["last_leaf_completed_ts"] == 1784073603100
+  assert ov["first_fold_pulled_ts"] == 1784073602000
+  assert ov["fold_started_before_last_leaf"] is True
+  assert ov["overlap_ms"] == 1100
+  assert ov["overlap_ms"] > 0
+  assert ov["note"] is None
+
+
+def test_new_format_scheduling_class_parsed():
+  m = _parse("coordinator_wave_width.log")
+  # scheduling_class is now emitted on the line and echoed into descriptors.
+  assert m["descriptors"]["scheduling_class"] == "critical-path-first"
 
 
 def test_new_format_recovery():

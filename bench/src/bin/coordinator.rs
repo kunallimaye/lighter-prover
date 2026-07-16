@@ -121,7 +121,8 @@ fn main() {
              prove_time_ms={}, gcs_time_ms={}, total_time_ms={}, peak_rss_bytes={}, \
              prestate_source={}, is_first_task_on_pod={}, chunk_size={}, leaf_count={}, \
              pull_ms={}, pre_exec_ms={}, prove_ms={}, gcs_write_ms={}, queue_wait_ms={}, \
-             fold_kind={}, merge_interval_span={}, redriven_after_lease_expiry={}",
+             fold_kind={}, merge_interval_span={}, redriven_after_lease_expiry={}, \
+             pull_ts_ms={}, scheduling_class={}",
             desc.role.as_str(),
             desc.chunk_idx,
             desc.fold_strategy,
@@ -143,6 +144,13 @@ fn main() {
             event.fold_kind,
             event.merge_interval_span,
             event.redriven_after_lease_expiry,
+            // #349: emit the absolute pull timestamp + seed-order class that are
+            // already on the wire but were dropped here. `pull_ts_ms` (paired
+            // across events) lets the extractor derive the LEAF WAVE WIDTH and
+            // leaf/fold overlap; `scheduling_class` lets a run self-describe its
+            // seed order. Appended at the END so existing parsers stay compatible.
+            event.pull_ts_ms,
+            event.scheduling_class,
         );
 
         // #321 Phase 5: count re-driven tasks so a recovery re-drive is
