@@ -908,6 +908,7 @@ mod tests {
             project_id: Some("proj".into()),
             topic: "work-topic".into(),
             subscription: "work-sub".into(),
+            event_topic: "events-topic".into(),
             bucket: "proof-bucket".into(),
             ack_deadline_secs: PubSubGcsConfig::default_ack_deadline_secs(),
             object_prefix: String::new(),
