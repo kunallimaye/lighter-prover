@@ -19,6 +19,7 @@ steps:
         echo "BENCHMARK_ID=${_BENCHMARK_ID}"
         echo "BENCHMARK_BUCKET=${_BENCHMARK_BUCKET}"
         echo "CHUNK_SIZE=${_CHUNK_SIZE}"
+        echo "POOL_TOPOLOGY=${_POOL_TOPOLOGY}"
 
   # 1. Dynamic Deployment Spec Rendering
   - id: k8s-render
@@ -37,6 +38,7 @@ steps:
             --chunk="${_CHUNK_SIZE}" \
             --benchmark-id="${_BENCHMARK_ID}" \
             --fold-strategy="${_FOLD_STRATEGY}" \
+            --pool-topology="${_POOL_TOPOLOGY}" \
             --emit-fungible \
             --baseload=10 \
             --burst=0 \
@@ -57,8 +59,20 @@ steps:
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
           gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
           
-          echo "[INFO] Cleaning old GKE resources..."
-          kubectl delete deployment/lighter-fungible-prover deployment/lighter-active-coordinator deployment/lighter-redis service/redis-service job/lighter-seeder job/lighter-coordinator --ignore-not-found=true
+          echo "[INFO] Cleaning old GKE resources (both topologies: unified + split)..."
+          # Delete BOTH possible worker sets so switching topology between runs is
+          # clean: unified emits `lighter-fungible-prover`; split emits
+          # `lighter-fungible-leaf` + `lighter-fungible-agg`. --ignore-not-found
+          # makes deleting the absent set a no-op.
+          kubectl delete \
+            deployment/lighter-fungible-prover \
+            deployment/lighter-fungible-leaf \
+            deployment/lighter-fungible-agg \
+            scaledobject.keda.sh/lighter-fungible-prover \
+            scaledobject.keda.sh/lighter-fungible-leaf \
+            scaledobject.keda.sh/lighter-fungible-agg \
+            deployment/lighter-active-coordinator deployment/lighter-redis service/redis-service job/lighter-seeder job/lighter-coordinator \
+            --ignore-not-found=true
         fi
 
   # 2. Clean GCS bucket before run to avoid stale proofs
@@ -84,8 +98,12 @@ steps:
           echo "[INFO] Purging Pub/Sub subscriptions..."
           # Seek to 10 seconds in the past to discard all old unacked messages safely without purging new ones
           PURGE_TIME=$(date -u -d "-10 seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-10s +%Y-%m-%dT%H:%M:%SZ)
-          gcloud pubsub subscriptions seek "prover-leaf-work-sub" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
-          gcloud pubsub subscriptions seek "prover-agg-work-sub" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
+          # Purge all three work subs (split: leaf+agg; unified: unified) + events.
+          # A sub that doesn't exist yet (e.g. unified_sub not yet applied) is
+          # tolerated via `|| true` so the step never blocks the run.
+          gcloud pubsub subscriptions seek "prover-leaf-work-sub" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}" || true
+          gcloud pubsub subscriptions seek "prover-agg-work-sub" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}" || true
+          gcloud pubsub subscriptions seek "prover-unified-work-sub" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}" || true
           gcloud pubsub subscriptions seek "${_EVENT_SUBSCRIPTION}" --time="$${PURGE_TIME}" --project="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
         fi
 
@@ -106,11 +124,29 @@ steps:
           echo "[INFO] Deploying Active Coordinator..."
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-active-coordinator.rendered.yaml
           
-          echo "[INFO] Deploying Fungible Workers..."
+          echo "[INFO] Deploying Fungible Workers (topology=${_POOL_TOPOLOGY})..."
+          # The renderer always writes the worker Deployment(s) to
+          # prover_pod_unit-fungible.rendered.yaml regardless of topology, so this
+          # apply is topology-agnostic. If a KEDA file was rendered separately
+          # (unified path), apply it too (ignored if absent).
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-fungible.rendered.yaml
-          
+          if [ -f infra-as-code/kubernetes/prover_pod_unit-fungible-keda.rendered.yaml ]; then
+            kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-fungible-keda.rendered.yaml || true
+          fi
+
           echo "[INFO] Waiting for all provers to be ready and prewarmed..."
-          kubectl rollout status deployment/lighter-fungible-prover --timeout=400s
+          # Wait on whichever Deployment(s) the chosen topology rendered: unified
+          # -> lighter-fungible-prover; split -> lighter-fungible-leaf + -agg.
+          # `kubectl get` gates each rollout so the absent set is skipped cleanly.
+          if kubectl get deployment/lighter-fungible-prover >/dev/null 2>&1; then
+            kubectl rollout status deployment/lighter-fungible-prover --timeout=400s
+          fi
+          if kubectl get deployment/lighter-fungible-leaf >/dev/null 2>&1; then
+            kubectl rollout status deployment/lighter-fungible-leaf --timeout=400s
+          fi
+          if kubectl get deployment/lighter-fungible-agg >/dev/null 2>&1; then
+            kubectl rollout status deployment/lighter-fungible-agg --timeout=400s
+          fi
           
           echo "[INFO] Deploying Seeder (Bootstrapping Queue)..."
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-seeder.rendered.yaml
@@ -156,6 +192,11 @@ substitutions:
   _RADIX: '16'
   # #321 Phase 8: reduction is the DEFAULT fold strategy on GKE; 'hex' opts out.
   _FOLD_STRATEGY: 'reduction'
+  # #321 fungible worker-pool topology: 'split' (default; two fixed leaf/agg
+  # Deployments — zero behavior change) or 'unified' (one self-balancing
+  # `lighter-fungible-prover` Deployment on prover-unified-work-sub). Opt in via
+  # POOL_TOPOLOGY=unified make cloud-gke-bench ...
+  _POOL_TOPOLOGY: 'split'
   _CHUNK_SIZE: '1'
   _BLOCK_CONCURRENCY: '10'
   _REGION: 'us-east4'
