@@ -141,6 +141,11 @@ _QUEUE_WAIT_MS_RE = re.compile(r"queue_wait_ms=(?P<v>\d+)")
 _FOLD_KIND_RE = re.compile(r"fold_kind=(?P<v>[\w/-]+)")
 _MERGE_SPAN_RE = re.compile(r"merge_interval_span=(?P<v>\d+)")
 _REDRIVEN_RE = re.compile(r"redriven_after_lease_expiry=(?P<v>true|false)")
+# #349: absolute epoch-ms pull TIMESTAMP (not the pull DURATION `pull_ms`), plus
+# the seed-order class. Both are already on the wire and, since #349, emitted on
+# the coordinator line. Absent in pre-#349 logs -> None (honest "not present").
+_PULL_TS_MS_RE = re.compile(r"pull_ts_ms=(?P<v>\d+)")
+_SCHEDULING_CLASS_RE = re.compile(r"scheduling_class=(?P<v>[\w-]+)")
 
 # Ancillary markers.
 _ROOT_HEX_RE = re.compile(r"^([^\s]+)\s+.*ROOT REACHED!")
@@ -205,6 +210,9 @@ def parse_event_line(line):
       "fold_kind": _opt_str(_FOLD_KIND_RE, line),
       "merge_interval_span": _opt_int(_MERGE_SPAN_RE, line),
       "redriven_after_lease_expiry": _opt_bool(_REDRIVEN_RE, line),
+      # ---- #349 leaf/fold overlap fields (None if absent in pre-#349 logs) ----
+      "pull_ts_ms": _opt_int(_PULL_TS_MS_RE, line),
+      "scheduling_class": _opt_str(_SCHEDULING_CLASS_RE, line),
   }
 
 
@@ -355,18 +363,95 @@ def compute_derived(events):
       "REGRESSION_replay_fallback_present": replay > 0,
   }
 
-  # ---- Wave width: the coordinator line carries pull_ms (a DURATION), not
-  # pull_ts_ms (a timestamp), so wave width across leaf pull TIMESTAMPS is NOT
-  # derivable from this log. Report null with an explicit note rather than
-  # misusing pull_ms as if it were a timestamp. ----
-  wave_width = {
-      "wave_width_ms": None,
-      "note": (
-          "not derivable: coordinator log carries pull_ms (per-task pull "
-          "DURATION), not pull_ts_ms (absolute pull timestamp). Wave width "
-          "needs the absolute pull timestamps; emit pull_ts_ms to derive it."
-      ),
-  }
+  # ---- Wave width + leaf/fold overlap (#349). Since #349 the coordinator line
+  # carries pull_ts_ms (absolute epoch-ms pull TIMESTAMP), so we can now measure
+  # how spread-out the leaf pulls were and whether fold workers engaged while
+  # leaves were still being produced. Every number here is null (never 0, never
+  # fabricated) when the required timestamp is absent, with an explicit note. ----
+
+  def _pull_ts(e):
+    """Absolute pull timestamp in epoch-ms, or None if unstamped (0/None)."""
+    v = e.get("pull_ts_ms")
+    return v if (v is not None and v > 0) else None
+
+  def _event_ts_ms(e):
+    """Coordinator log/completion timestamp (ev['ts']) in epoch-ms, or None."""
+    try:
+      dt = parse_k8s_timestamp(e["ts"])
+    except Exception:
+      return None
+    return int(dt.timestamp() * 1000)
+
+  leaf_pull_ts = [_pull_ts(e) for e in leaves]
+  leaf_pull_ts_present = [t for t in leaf_pull_ts if t is not None]
+  all_leaves_stamped = bool(leaves) and all(t is not None for t in leaf_pull_ts)
+
+  if all_leaves_stamped:
+    wave_min, wave_max = min(leaf_pull_ts_present), max(leaf_pull_ts_present)
+    wave_width = {
+        "wave_width_ms": wave_max - wave_min,
+        "leaf_pull_span": {
+            "min_pull_ts_ms": wave_min,
+            "max_pull_ts_ms": wave_max,
+            "count": len(leaf_pull_ts_present),
+        },
+        "note": None,
+    }
+  else:
+    # Partial or fully-absent pull_ts_ms -> do NOT fabricate from partial data.
+    wave_width = {
+        "wave_width_ms": None,
+        "leaf_pull_span": {
+            "min_pull_ts_ms": min(leaf_pull_ts_present) if leaf_pull_ts_present else None,
+            "max_pull_ts_ms": max(leaf_pull_ts_present) if leaf_pull_ts_present else None,
+            "count": len(leaf_pull_ts_present),
+        },
+        "note": (
+            "not derivable: one or more leaf events lack pull_ts_ms (absolute "
+            "pull timestamp; 0/None honest sentinel). Wave width needs every "
+            "leaf's pull_ts_ms; refusing to fabricate from partial data."
+        ),
+    }
+
+  # ---- fold_overlap: does the fold phase begin before the last leaf completes?
+  # last_leaf_completed_ts = max leaf event (completion/log) TIMESTAMP.
+  # first_fold_pulled_ts   = min pull_ts_ms over FOLD events (role != leaf AND
+  #                          role != root-coordinator) — robust to hex tree-node
+  #                          and reduction fold role strings alike.
+  leaf_completed_ts = [t for t in (_event_ts_ms(e) for e in leaves) if t is not None]
+  fold_events = [
+      e for e in events
+      if e["status"] == "success"
+      and e["role"] != "leaf"
+      and e["role"] != "root-coordinator"
+  ]
+  fold_pull_ts = [t for t in (_pull_ts(e) for e in fold_events) if t is not None]
+
+  last_leaf_completed_ts = max(leaf_completed_ts) if leaf_completed_ts else None
+  first_fold_pulled_ts = min(fold_pull_ts) if fold_pull_ts else None
+
+  if last_leaf_completed_ts is not None and first_fold_pulled_ts is not None:
+    fold_overlap = {
+        "last_leaf_completed_ts": last_leaf_completed_ts,
+        "first_fold_pulled_ts": first_fold_pulled_ts,
+        "fold_started_before_last_leaf": first_fold_pulled_ts < last_leaf_completed_ts,
+        "overlap_ms": max(0, last_leaf_completed_ts - first_fold_pulled_ts),
+        "note": None,
+    }
+  else:
+    missing = []
+    if last_leaf_completed_ts is None:
+      missing.append("no parseable leaf completion timestamp (ev['ts'])")
+    if first_fold_pulled_ts is None:
+      missing.append("no fold event carried pull_ts_ms")
+    fold_overlap = {
+        "last_leaf_completed_ts": last_leaf_completed_ts,
+        "first_fold_pulled_ts": first_fold_pulled_ts,
+        "fold_started_before_last_leaf": None,
+        "overlap_ms": None,
+        "note": "not derivable: " + "; ".join(missing) + ".",
+    }
+  wave_width["fold_overlap"] = fold_overlap
 
   # ---- queue_wait: mean/max over queue_wait_ms > 0 (else not measured). The
   # honest sentinel from the coordinator is 0 => dispatch time not stamped. ----
@@ -1057,9 +1142,10 @@ def parse_coordinator_log_v2(log_path, seeder_start_dt=None, run_config=None,
       "leaf_count_N": _first_present("leaf_count"),
       "reduction_root_reached": reduction_root_reached,
       "hex_root_reached": hex_root_reached,
-      # scheduling_class is not in the current coordinator line; report unknown
-      # rather than fabricate it.
-      "scheduling_class": None,
+      # #349: scheduling_class is now emitted on the coordinator line; echo the
+      # first present value so the run self-describes its seed order. Stays None
+      # only when genuinely absent (pre-#349 logs) — never fabricated.
+      "scheduling_class": _first_present("scheduling_class"),
   }
 
   return {
