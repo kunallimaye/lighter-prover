@@ -20,10 +20,11 @@
     "warm_fold_cpu_core_sec": 5.0,
     "is_first_task_field_present": true,
     "fleet_sizing_projection": {
+      "node_type": "c3d-highcpu-60",
       "vcpu_per_node": 60,
       "by_target_bps": [
-        {"target_bps": 10, "cores_required": 200.0, "c3d_nodes_required": 4},
-        {"target_bps": 12, "cores_required": 240.0, "c3d_nodes_required": 4}
+        {"target_bps": 10, "cores_required": 200.0, "nodes_required": 4, "c3d_nodes_required": 4},
+        {"target_bps": 12, "cores_required": 240.0, "nodes_required": 4, "c3d_nodes_required": 4}
       ]
     }
   }

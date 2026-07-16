@@ -55,14 +55,14 @@ def test_build_rows_orders_by_c_and_echoes_fields():
   assert abs(by_c[1]["core_sec_per_block"] - 12.0) < 1e-9
   assert by_c[1]["leaf_count"] == 2
   assert abs(by_c[1]["cold_fold_cpu_core_sec"] - 2.0) < 1e-9
-  assert by_c[1]["c3d_nodes_10"] == 2
-  assert by_c[1]["c3d_nodes_12"] == 3
+  assert by_c[1]["nodes_10bps"] == 2
+  assert by_c[1]["nodes_12bps"] == 3
   # C=2 fixture: core_sec_per_block=20.0, nodes @10=4, @12=4.
   assert abs(by_c[2]["core_sec_per_block"] - 20.0) < 1e-9
-  assert by_c[2]["c3d_nodes_10"] == 4
+  assert by_c[2]["nodes_10bps"] == 4
   # C=4 fixture: core_sec_per_block=4.0, nodes @10=1, cold_fold=0.0.
   assert abs(by_c[4]["core_sec_per_block"] - 4.0) < 1e-9
-  assert by_c[4]["c3d_nodes_10"] == 1
+  assert by_c[4]["nodes_10bps"] == 1
   assert abs(by_c[4]["cold_fold_cpu_core_sec"] - 0.0) < 1e-9
 
 
@@ -81,14 +81,33 @@ def test_optimal_row_flips_when_c1_is_cheapest():
       "throughput": {
           "measured": True, "chunk_size_C": 1, "leaf_count": 2,
           "core_sec_per_block": 1.0, "cold_fold_cpu_core_sec": 0.0,
-          "fleet_sizing_projection": {"vcpu_per_node": 60, "by_target_bps": [
-              {"target_bps": 10, "c3d_nodes_required": 1},
-              {"target_bps": 12, "c3d_nodes_required": 1}]},
+          "fleet_sizing_projection": {"vcpu_per_node": 64, "by_target_bps": [
+              {"target_bps": 10, "nodes_required": 1},
+              {"target_bps": 12, "nodes_required": 1}]},
       }
   }
   rows = csr.build_rows([cheap_c1, _C4])
   best = csr.optimal_row(rows)
   assert best["chunk_size_C"] == 1
+
+
+def test_deprecated_c3d_nodes_required_alias_still_read():
+  # (#352) A summary produced by an OLDER extractor (only the deprecated
+  # `c3d_nodes_required` key, no `nodes_required`) must still render during the
+  # one-release migration window via the alias fallback in _nodes_at.
+  legacy = {
+      "throughput": {
+          "measured": True, "chunk_size_C": 3, "leaf_count": 9,
+          "core_sec_per_block": 2.0, "cold_fold_cpu_core_sec": 0.0,
+          "fleet_sizing_projection": {"vcpu_per_node": 60, "by_target_bps": [
+              {"target_bps": 10, "c3d_nodes_required": 7},
+              {"target_bps": 12, "c3d_nodes_required": 9}]},
+      }
+  }
+  rows = csr.build_rows([legacy])
+  by_c = {r["chunk_size_C"]: r for r in rows}
+  assert by_c[3]["nodes_10bps"] == 7
+  assert by_c[3]["nodes_12bps"] == 9
 
 
 def test_unmeasured_summary_is_surfaced_not_fabricated():
@@ -99,7 +118,7 @@ def test_unmeasured_summary_is_surfaced_not_fabricated():
   by_c = {r["chunk_size_C"]: r for r in rows}
   assert by_c[10]["measured"] is False
   assert by_c[10]["core_sec_per_block"] is None
-  assert by_c[10]["c3d_nodes_10"] is None
+  assert by_c[10]["nodes_10bps"] is None
   # optimal ignores the unmeasured row.
   assert csr.optimal_row(rows)["chunk_size_C"] == 4
   # The table renders it as UNMEASURED (not a fabricated 0).

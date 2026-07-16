@@ -536,27 +536,62 @@ def compute_derived(events):
 # assumptions (perfect packing, steady state, no scheduling overhead).
 # ---------------------------------------------------------------------------
 
-# c3d-highcpu-60 has 60 vCPU. Sizing policy constant (like MEMORY_SAFETY_MARGIN),
-# stated here so the projection is self-describing — NOT a benchmark number.
-C3D_VCPU_PER_NODE = 60
+# DOCUMENTATION-ONLY reference (NOT an authoritative divisor). The measurement
+# layer must NEVER divide by a hardcoded machine-specific constant: vcpu_per_node
+# is DERIVED from the REAL resolved machine type (run_config -> config -> null)
+# via `vcpu_per_node_from_machine_type`. This value exists only to document that
+# c3d-highcpu-60 happens to have 60 vCPU; it is deliberately unused as a fallback.
+# See issue #352 (de-hardcode the measurement layer).
+_DOC_C3D_HIGHCPU_60_VCPU = 60
 
 # Default target block arrival rates (blocks/sec) for the fleet projection. The
 # production window is 10-12 bps; override via --target-bps.
 DEFAULT_TARGET_BPS = [10, 12]
 
 
-def compute_throughput(events, run_config=None, target_bps=None):
+def vcpu_per_node_from_machine_type(mtype):
+  """Derive vCPU-per-node from a GCP machine-type string, or None if underivable.
+
+  GCP machine types encode the vCPU count as the trailing integer, e.g.
+  ``c4d-highcpu-64`` -> 64, ``c3d-highcpu-60`` -> 60, ``c3d-highcpu-30`` -> 30,
+  ``t2d-standard-60`` -> 60.
+
+  ANTI-FABRICATION (issue #352): returns ``None`` when the string is missing,
+  ``"unknown"``, or unparseable. It NEVER defaults to 60 (or any other guess) —
+  an unknown machine type must surface as null + a note, never a wrong constant.
+  """
+  if not mtype or not isinstance(mtype, str):
+    return None
+  m = mtype.strip().lower()
+  if not m or m == "unknown":
+    return None
+  tail = m.rsplit("-", 1)[-1]
+  if not tail.isdigit():
+    return None
+  vcpu = int(tail)
+  return vcpu if vcpu > 0 else None
+
+
+def compute_throughput(events, run_config=None, target_bps=None,
+                       machine_type=None):
   """Compute the core-sec/block throughput metric + fleet-sizing PROJECTIONS.
 
   Args:
     events: parsed coordinator events (from parse_event_line).
     run_config: optional dict from run_config.json (blocks, txs_per_chunk=C,
-      leaf_count_per_block, ...). Authoritative for `blocks` and C/N when present.
+      leaf_count_per_block, machine_type, ...). Authoritative for `blocks`, C/N,
+      and the machine_type when present.
     target_bps: list of target block arrival rates for the fleet projection.
+    machine_type: the REAL resolved machine type (run_config -> config-resolved
+      aggregator -> None). vcpu_per_node is DERIVED from it; NEVER hardcoded. If
+      run_config carries a non-null machine_type it takes precedence over the
+      caller-supplied value (self-describing telemetry wins).
 
   Returns a dict suitable for embedding into bench_summary.json. Missing prove_ms
   (old logs with no split field) falls back to prove_time_ms; if NEITHER exists
-  the run is marked measured=False / UNMEASURED — never fabricated.
+  the run is marked measured=False / UNMEASURED — never fabricated. An unknown /
+  underivable machine type surfaces as vcpu_per_node=null and nodes_required=null
+  with an explanatory note — never a guessed divisor (anti-fabrication, #352).
   """
   if target_bps is None:
     target_bps = list(DEFAULT_TARGET_BPS)
@@ -640,6 +675,23 @@ def compute_throughput(events, run_config=None, target_bps=None):
   cold_fold_cpu_core_sec = cold_fold_ms / 1000.0
   warm_fold_cpu_core_sec = warm_fold_ms / 1000.0
 
+  # ---- Resolve the REAL machine type + DERIVE vcpu_per_node from it. ----
+  # Precedence: run_config's self-describing machine_type (survives config drift)
+  # -> caller-supplied (config-resolved aggregator) machine_type -> None. NEVER a
+  # hardcoded machine-specific constant (anti-fabrication, #352).
+  resolved_machine_type = None
+  if run_config and run_config.get("machine_type"):
+    resolved_machine_type = run_config.get("machine_type")
+  elif machine_type:
+    resolved_machine_type = machine_type
+  # run_config may also carry a pre-derived vcpu_per_node (self-describing);
+  # prefer it when present, else derive from the machine-type string.
+  vcpu_per_node = None
+  if run_config and run_config.get("vcpu_per_node"):
+    vcpu_per_node = int(run_config["vcpu_per_node"])
+  if vcpu_per_node is None:
+    vcpu_per_node = vcpu_per_node_from_machine_type(resolved_machine_type)
+
   # ---- Fleet-sizing PROJECTIONS (measured-derived, clearly labelled). ----
   fleet_projection = []
   for bps in target_bps:
@@ -647,17 +699,48 @@ def compute_throughput(events, run_config=None, target_bps=None):
       fleet_projection.append({
           "target_bps": bps,
           "cores_required": None,
+          "nodes_required": None,
+          # DEPRECATED alias (drop after one release); kept so existing consumers
+          # (csweep_report.py + external) don't read a missing key mid-migration.
           "c3d_nodes_required": None,
           "note": "UNMEASURED — no prove_ms/prove_time_ms in log",
       })
       continue
     cores_required = core_sec_per_block * bps
-    c3d_nodes_required = math.ceil(cores_required / C3D_VCPU_PER_NODE)
+    if vcpu_per_node is None:
+      # Machine type unknown/underivable: we can compute cores_required (real,
+      # measured-derived) but CANNOT size the fleet without a guess. Emit null +
+      # an honest note rather than divide by a fabricated constant (#352).
+      fleet_projection.append({
+          "target_bps": bps,
+          "cores_required": cores_required,
+          "nodes_required": None,
+          "c3d_nodes_required": None,  # DEPRECATED alias.
+          "note": (
+              "vcpu_per_node underivable — machine_type "
+              f"{resolved_machine_type!r}; cannot size fleet without guessing"
+          ),
+      })
+      continue
+    nodes_required = math.ceil(cores_required / vcpu_per_node)
     fleet_projection.append({
         "target_bps": bps,
         "cores_required": cores_required,
-        "c3d_nodes_required": c3d_nodes_required,
+        "nodes_required": nodes_required,
+        # DEPRECATED alias (drop after one release). Arch-neutral name is
+        # `nodes_required`; this mirror keeps old consumers working one release.
+        "c3d_nodes_required": nodes_required,
     })
+
+  # Node-math + node-type strings reflect the REAL resolved machine type (or an
+  # honest null + note when underivable) — never the literal "c3d-highcpu-60".
+  if vcpu_per_node is not None:
+    node_math = f"nodes_required = ceil(cores_required / {vcpu_per_node})"
+  else:
+    node_math = (
+        "nodes_required = null (vcpu_per_node underivable; machine_type "
+        f"{resolved_machine_type!r})"
+    )
 
   return {
       "measured": measured,
@@ -676,9 +759,13 @@ def compute_throughput(events, run_config=None, target_bps=None):
       "fleet_sizing_projection": {
           "kind": "PROJECTION (measured-derived, not fabricated)",
           "basis": "cores_required = core_sec_per_block * target_bps",
-          "node_math": f"c3d_nodes_required = ceil(cores_required / {C3D_VCPU_PER_NODE})",
-          "vcpu_per_node": C3D_VCPU_PER_NODE,
-          "node_type": "c3d-highcpu-60",
+          "node_math": node_math,
+          "vcpu_per_node": vcpu_per_node,
+          "node_type": resolved_machine_type,
+          "vcpu_per_node_source": (
+              "derived from machine_type (run_config -> config -> null); "
+              "NOT a hardcoded constant (#352)"
+          ),
           "assumptions": [
               "steady state (arrival rate == service rate)",
               "perfect bin-packing of prove work onto vCPUs",
@@ -712,14 +799,24 @@ def print_throughput(tp):
       f"warm(cached)={tp['warm_fold_cpu_core_sec']:.3f} core-sec "
       f"(field_present={tp['is_first_task_field_present']})"
   )
+  proj = tp["fleet_sizing_projection"]
+  node_type = proj.get("node_type") or "unknown-machine-type"
+  vcpu = proj.get("vcpu_per_node")
   print("\n  -- fleet-sizing PROJECTION (measured-derived; see assumptions) --")
-  for row in tp["fleet_sizing_projection"]["by_target_bps"]:
+  print(f"  node_type={node_type} vcpu_per_node={vcpu} ({proj.get('node_math')})")
+  for row in proj["by_target_bps"]:
     if row.get("cores_required") is None:
       print(f"    @{row['target_bps']}bps: {row.get('note')}")
+    elif row.get("nodes_required") is None:
+      # cores are real/measured-derived but the fleet is unsizable (unknown mtype).
+      print(
+          f"    @{row['target_bps']}bps: cores={row['cores_required']:.1f} "
+          f"=> nodes=null ({row.get('note')})"
+      )
     else:
       print(
           f"    @{row['target_bps']}bps: cores={row['cores_required']:.1f} "
-          f"=> c3d-highcpu-60 nodes={row['c3d_nodes_required']}"
+          f"=> {node_type} nodes={row['nodes_required']}"
       )
   print("==============================================================\n")
 
@@ -903,13 +1000,16 @@ def dedupe_events_by_logical_key(events):
 
 
 def build_metrics_from_events(events, run_config=None, target_bps=None,
-                              redrive_extra=0):
+                              redrive_extra=0, machine_type=None):
   """Build the SAME metrics dict `parse_coordinator_log_v2` returns, but from a
   pre-parsed `events` list (the #347 GCS-events source) rather than a log file.
 
   Reuses compute_derived / compute_throughput / stats verbatim so the produced
   bench_summary.json (core_sec_per_block, leaf/fold split, fleet_sizing_projection,
   peak RSS, distributions, ...) is identical in shape + math to the log path.
+
+  `machine_type` (the REAL resolved machine type) is threaded into
+  compute_throughput so vcpu_per_node is DERIVED, not hardcoded (#352).
   """
   leaf_provings, leaf_gcs, leaf_totals = [], [], []
   node_foldings, node_gcs, node_totals = [], [], []
@@ -937,7 +1037,8 @@ def build_metrics_from_events(events, run_config=None, target_bps=None,
   derived["recovery"]["redrive_extra_attempts_from_gcs_events"] = redrive_extra
 
   throughput = compute_throughput(events, run_config=run_config,
-                                  target_bps=target_bps)
+                                  target_bps=target_bps,
+                                  machine_type=machine_type)
 
   def _first_present(key):
     for e in events:
@@ -983,7 +1084,8 @@ def build_metrics_from_events(events, run_config=None, target_bps=None,
   }
 
 
-def parse_events_gcs(gcs_prefix, run_config=None, target_bps=None):
+def parse_events_gcs(gcs_prefix, run_config=None, target_bps=None,
+                     machine_type=None):
   """Read every ProverEvent JSON under the GCS `events/` prefix, dedupe by logical
   key (counting redrives), and build the metrics dict. None if nothing readable."""
   print(f"[INFO] EVENTS-GCS mode: listing {gcs_prefix} ...")
@@ -1023,12 +1125,12 @@ def parse_events_gcs(gcs_prefix, run_config=None, target_bps=None):
   )
   return build_metrics_from_events(
       events, run_config=run_config, target_bps=target_bps,
-      redrive_extra=redrive_extra,
+      redrive_extra=redrive_extra, machine_type=machine_type,
   )
 
 
 def parse_coordinator_log_v2(log_path, seeder_start_dt=None, run_config=None,
-                             target_bps=None):
+                             target_bps=None, machine_type=None):
   if not os.path.exists(log_path):
     print(f"[ERROR] Coordinator log {log_path} not found.", file=sys.stderr)
     return None
@@ -1127,7 +1229,10 @@ def parse_coordinator_log_v2(log_path, seeder_start_dt=None, run_config=None,
   derived["recovery"]["max_stale_lease_redrive_count"] = max_stale_redrive
 
   # THROUGHPUT metric (#321 C-sweep). Additive; consumes run_config if given.
-  throughput = compute_throughput(events, run_config=run_config, target_bps=target_bps)
+  # machine_type is threaded so vcpu_per_node is DERIVED, not hardcoded (#352).
+  throughput = compute_throughput(events, run_config=run_config,
+                                  target_bps=target_bps,
+                                  machine_type=machine_type)
 
   # Self-describing run descriptors (echoed from the events; None if not logged).
   def _first_present(key):
@@ -1363,6 +1468,7 @@ def main():
   seeder_start = None
   gcs_uri = None
   agg_machine = "unknown"
+  leaf_machine = None  # REAL leaf machine type resolved from config (#352).
   # (#347) The events-GCS prefix + which source ultimately produced the metrics.
   events_gcs_prefix = args.events_gcs_prefix
   source_kind = "local-log-file" if local_mode else "kubectl-gke"
@@ -1378,7 +1484,12 @@ def main():
         with open(args.config, "rb") as f:
           cfg_data = tomllib.load(f)
         gcs_bucket = cfg_data.get("gcp", {}).get("bench", {}).get("bucket", "kunal-scratch-tfstate")
-        agg_machine = cfg_data.get("proving_pod", {}).get(args.arch, {}).get("aggregator", {}).get("machine_type", "unknown")
+        _pod = cfg_data.get("proving_pod", {}).get(args.arch, {})
+        agg_machine = _pod.get("aggregator", {}).get("machine_type", "unknown")
+        # Resolve the REAL leaf machine type too (mirrors agg_machine). None when
+        # unresolvable — the metadata block then honestly records the arch + a note
+        # rather than mislabeling the arch as a machine type (#352).
+        leaf_machine = _pod.get("leaf_worker", {}).get("machine_type")
       except Exception as e:
         print(f"[WARNING] Failed to parse config.toml: {e}", file=sys.stderr)
     gcs_prefix = f"benchmark-reports/{args.benchmark_id}/{args.image}/{args.arch}"
@@ -1390,6 +1501,24 @@ def main():
       events_gcs_prefix = f"{gcs_uri}/events/"
       print(f"[INFO] Auto-derived events-GCS prefix: {events_gcs_prefix}")
 
+  # ---- Resolve the REAL machine type to thread into the fleet-sizing math so
+  #      vcpu_per_node is DERIVED, never hardcoded (#352). Precedence:
+  #      run_config.machine_type (self-describing telemetry, survives config
+  #      drift) -> config-resolved aggregator machine_type -> None. compute_
+  #      throughput itself re-applies the run_config precedence, so passing the
+  #      config-resolved agg_machine here is the correct fallback. ------------
+  effective_machine_type = None
+  if run_config and run_config.get("machine_type"):
+    effective_machine_type = run_config.get("machine_type")
+  elif agg_machine and agg_machine != "unknown":
+    effective_machine_type = agg_machine
+  if effective_machine_type:
+    print(f"[INFO] Fleet-sizing machine_type: {effective_machine_type} "
+          f"(vcpu_per_node derived, not hardcoded)")
+  else:
+    print("[INFO] Fleet-sizing machine_type: UNKNOWN — nodes_required will be "
+          "null + note (no guessed divisor).")
+
   # ---- (#347) Prefer the DURABLE events-GCS source when available. It survives
   #      coordinator/pipeline/cluster failure, so it is the source of truth; the
   #      coordinator log is the fallback. --------------------------------------
@@ -1397,7 +1526,8 @@ def main():
   if events_gcs_prefix and not args.no_events_gcs:
     print(f"[INFO] Preferring durable events-GCS source: {events_gcs_prefix}")
     metrics = parse_events_gcs(
-        events_gcs_prefix, run_config=run_config, target_bps=target_bps
+        events_gcs_prefix, run_config=run_config, target_bps=target_bps,
+        machine_type=effective_machine_type,
     )
     if metrics:
       source_kind = "events-gcs (#347 durable per-pod)"
@@ -1420,7 +1550,8 @@ def main():
 
     print(f"[INFO] Parsing coordinator log {log_path}...")
     metrics = parse_coordinator_log_v2(
-        log_path, seeder_start, run_config=run_config, target_bps=target_bps
+        log_path, seeder_start, run_config=run_config, target_bps=target_bps,
+        machine_type=effective_machine_type,
     )
     if not metrics:
       print("[ERROR] Failed to parse coordinator log (and events-GCS source unavailable).",
@@ -1480,8 +1611,11 @@ def main():
               "total / blocks (blocks from run_config.json or default 1). "
               "fleet_sizing_projection is a PROJECTION derived from the measured "
               "core_sec_per_block (cores = core_sec_per_block * target_bps; "
-              "nodes = ceil(cores/60)) — measured-derived, not fabricated; "
-              "assumptions stated inline."
+              "nodes = ceil(cores / vcpu_per_node), where vcpu_per_node is DERIVED "
+              "from the REAL machine_type (run_config -> config -> null) — NEVER a "
+              "hardcoded machine-specific constant (#352). Unknown machine_type -> "
+              "nodes_required null + note, never a guessed divisor) — "
+              "measured-derived, not fabricated; assumptions stated inline."
           ),
       },
       "notes": [
@@ -1489,11 +1623,26 @@ def main():
       ],
   }
 
+  # Leaf machine type: prefer the REAL config-resolved value; if unresolvable,
+  # record the arch honestly labelled as an arch (NOT a machine type) rather than
+  # mislabeling the arch under a machine-type key (#352). Never fabricate.
+  if leaf_machine:
+    leaf_machine_type = leaf_machine
+    leaf_machine_type_note = "resolved from config.toml proving_pod.<arch>.leaf_worker.machine_type"
+  else:
+    leaf_machine_type = None
+    leaf_machine_type_note = (
+        f"UNRESOLVED — config did not yield a leaf_worker machine_type for "
+        f"arch={args.arch!r}; this is the ARCH, not a machine type (#352)"
+    )
+
   metadata = {
       "engine": "local" if local_mode else "gke",
       "benchmark_id": args.benchmark_id,
       "code_release": args.image,
-      "leaf_machine_type": args.arch,
+      "arch": args.arch,
+      "leaf_machine_type": leaf_machine_type,
+      "leaf_machine_type_note": leaf_machine_type_note,
       "aggregator_machine_type": agg_machine,
       "run_start": metrics["start_time"].isoformat() if metrics["start_time"] else None,
       "run_end": metrics["end_time"].isoformat() if metrics["end_time"] else None,
