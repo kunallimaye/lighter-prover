@@ -34,6 +34,7 @@ steps:
             --blocks="${_BLOCK_CONCURRENCY}" \
             --image="${_IMAGE}" \
             --radix="${_RADIX}" \
+            --chunk="${_CHUNK_SIZE}" \
             --benchmark-id="${_BENCHMARK_ID}" \
             --fold-strategy="${_FOLD_STRATEGY}" \
             --emit-fungible \
