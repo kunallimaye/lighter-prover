@@ -429,7 +429,221 @@ def compute_derived(events):
   }
 
 
-def parse_coordinator_log_v2(log_path, seeder_start_dt=None):
+# ---------------------------------------------------------------------------
+# THROUGHPUT metric (#321 C-sweep). The production objective is THROUGHPUT
+# (target 10-12 blocks/sec). The controlling lever is TOTAL CPU per block
+# (core-seconds/block): fewer core-sec/block => a smaller fleet at a given bps.
+#
+# Everything in this block is computed from the REAL parsed prove_ms values (or
+# prove_time_ms fallback on old logs). The fleet-sizing figures are PROJECTIONS
+# derived from the measured core_sec_per_block via a steady-state / utilization
+# (Little's-Law-style) argument: cores = core_sec_per_block * arrival_rate. They
+# are measured-DERIVED, not fabricated, and are explicitly labelled + carry their
+# assumptions (perfect packing, steady state, no scheduling overhead).
+# ---------------------------------------------------------------------------
+
+# c3d-highcpu-60 has 60 vCPU. Sizing policy constant (like MEMORY_SAFETY_MARGIN),
+# stated here so the projection is self-describing — NOT a benchmark number.
+C3D_VCPU_PER_NODE = 60
+
+# Default target block arrival rates (blocks/sec) for the fleet projection. The
+# production window is 10-12 bps; override via --target-bps.
+DEFAULT_TARGET_BPS = [10, 12]
+
+
+def compute_throughput(events, run_config=None, target_bps=None):
+  """Compute the core-sec/block throughput metric + fleet-sizing PROJECTIONS.
+
+  Args:
+    events: parsed coordinator events (from parse_event_line).
+    run_config: optional dict from run_config.json (blocks, txs_per_chunk=C,
+      leaf_count_per_block, ...). Authoritative for `blocks` and C/N when present.
+    target_bps: list of target block arrival rates for the fleet projection.
+
+  Returns a dict suitable for embedding into bench_summary.json. Missing prove_ms
+  (old logs with no split field) falls back to prove_time_ms; if NEITHER exists
+  the run is marked measured=False / UNMEASURED — never fabricated.
+  """
+  if target_bps is None:
+    target_bps = list(DEFAULT_TARGET_BPS)
+
+  leaves = [e for e in events if e["role"] == "leaf" and e["status"] == "success"]
+  folds = [
+      e for e in events
+      if e["role"] in ("node", "tree-node", "reduction", "reduction-fold")
+      and e["status"] == "success"
+  ]
+
+  # prove_ms is the pure prove cost; fall back to prove_time_ms for OLD logs
+  # (honest, provenance-noted) and never invent a value.
+  def _prove(e):
+    return e["prove_ms"] if e.get("prove_ms") is not None else e["prove_time_ms"]
+
+  prove_ms_field_present = any(
+      e.get("prove_ms") is not None for e in (leaves + folds)
+  )
+  prove_source = "prove_ms" if prove_ms_field_present else (
+      "prove_time_ms (fallback: split prove_ms absent in log)"
+  )
+
+  leaf_prove_ms_sum = sum(_prove(e) for e in leaves)
+  fold_prove_ms_sum = sum(_prove(e) for e in folds)
+
+  leaf_cpu_core_sec = leaf_prove_ms_sum / 1000.0
+  fold_cpu_core_sec = fold_prove_ms_sum / 1000.0
+  total_cpu_core_sec = leaf_cpu_core_sec + fold_cpu_core_sec
+
+  measured = (len(leaves) + len(folds)) > 0
+
+  # ---- blocks: run_config is authoritative; else infer from distinct block
+  # namespaces if the coordinator stamped them; else default 1 (single block). --
+  blocks = None
+  blocks_source = None
+  if run_config and run_config.get("blocks"):
+    blocks = int(run_config["blocks"])
+    blocks_source = "run_config.json"
+  if blocks is None:
+    # Try to infer from distinct block numbers on events, if ever stamped.
+    distinct_blocks = {
+        e["block_number"] for e in events if e.get("block_number") is not None
+    }
+    if distinct_blocks:
+      blocks = len(distinct_blocks)
+      blocks_source = "inferred from distinct block_number on events"
+  if blocks is None:
+    blocks = 1
+    blocks_source = "default 1 (no run_config.json, no block_number in log)"
+
+  core_sec_per_block = (total_cpu_core_sec / blocks) if blocks > 0 else None
+
+  # ---- Self-describing knobs. run_config authoritative, else echo from events. -
+  def _first_present(key):
+    for e in events:
+      if e.get(key) is not None:
+        return e[key]
+    return None
+
+  chunk_size = None
+  leaf_count = None
+  if run_config:
+    chunk_size = run_config.get("txs_per_chunk")
+    leaf_count = run_config.get("leaf_count_per_block")
+  if chunk_size is None:
+    chunk_size = _first_present("chunk_size")
+  if leaf_count is None:
+    leaf_count = _first_present("leaf_count")
+
+  # ---- Cold vs warm FOLD CPU split (by is_first_task_on_pod). The cold portion
+  # is the recoverable CPU that node-baking (#338: cold builds eliminated)
+  # reclaims — measuring it across runs shows the baking win. ----
+  first_task_known = any(e.get("is_first_task_on_pod") is not None for e in folds)
+  cold_fold_ms = sum(
+      _prove(e) for e in folds if e.get("is_first_task_on_pod") is True
+  )
+  warm_fold_ms = sum(
+      _prove(e) for e in folds if e.get("is_first_task_on_pod") is False
+  )
+  cold_fold_cpu_core_sec = cold_fold_ms / 1000.0
+  warm_fold_cpu_core_sec = warm_fold_ms / 1000.0
+
+  # ---- Fleet-sizing PROJECTIONS (measured-derived, clearly labelled). ----
+  fleet_projection = []
+  for bps in target_bps:
+    if core_sec_per_block is None or not measured:
+      fleet_projection.append({
+          "target_bps": bps,
+          "cores_required": None,
+          "c3d_nodes_required": None,
+          "note": "UNMEASURED — no prove_ms/prove_time_ms in log",
+      })
+      continue
+    cores_required = core_sec_per_block * bps
+    c3d_nodes_required = math.ceil(cores_required / C3D_VCPU_PER_NODE)
+    fleet_projection.append({
+        "target_bps": bps,
+        "cores_required": cores_required,
+        "c3d_nodes_required": c3d_nodes_required,
+    })
+
+  return {
+      "measured": measured,
+      "prove_source_field": prove_source,
+      "chunk_size_C": chunk_size,
+      "leaf_count": leaf_count,
+      "blocks": blocks,
+      "blocks_source": blocks_source,
+      "leaf_cpu_core_sec": leaf_cpu_core_sec,
+      "fold_cpu_core_sec": fold_cpu_core_sec,
+      "total_cpu_core_sec": total_cpu_core_sec,
+      "core_sec_per_block": core_sec_per_block,
+      "cold_fold_cpu_core_sec": cold_fold_cpu_core_sec,
+      "warm_fold_cpu_core_sec": warm_fold_cpu_core_sec,
+      "is_first_task_field_present": first_task_known,
+      "fleet_sizing_projection": {
+          "kind": "PROJECTION (measured-derived, not fabricated)",
+          "basis": "cores_required = core_sec_per_block * target_bps",
+          "node_math": f"c3d_nodes_required = ceil(cores_required / {C3D_VCPU_PER_NODE})",
+          "vcpu_per_node": C3D_VCPU_PER_NODE,
+          "node_type": "c3d-highcpu-60",
+          "assumptions": [
+              "steady state (arrival rate == service rate)",
+              "perfect bin-packing of prove work onto vCPUs",
+              "no scheduler/queueing/GCS overhead in the core-sec accounting",
+              "core_sec_per_block itself is REAL (summed measured prove_ms)",
+          ],
+          "by_target_bps": fleet_projection,
+      },
+  }
+
+
+def print_throughput(tp):
+  print("\n================= THROUGHPUT (#321 C-sweep) ==================")
+  if not tp["measured"]:
+    print("  UNMEASURED — no leaf/fold prove_ms (or prove_time_ms) in log.")
+    print("==============================================================\n")
+    return
+  print(
+      f"C(chunk_size)={tp['chunk_size_C']} leaf_count={tp['leaf_count']} "
+      f"blocks={tp['blocks']} ({tp['blocks_source']})"
+  )
+  print(f"prove source: {tp['prove_source_field']}")
+  print(
+      f"  leaf_cpu={tp['leaf_cpu_core_sec']:.3f} core-sec  "
+      f"fold_cpu={tp['fold_cpu_core_sec']:.3f} core-sec  "
+      f"total_cpu={tp['total_cpu_core_sec']:.3f} core-sec"
+  )
+  print(f"  >>> core_sec_per_block = {tp['core_sec_per_block']:.3f} <<<")
+  print(
+      f"  fold CPU cold(first-task-on-pod)={tp['cold_fold_cpu_core_sec']:.3f} "
+      f"warm(cached)={tp['warm_fold_cpu_core_sec']:.3f} core-sec "
+      f"(field_present={tp['is_first_task_field_present']})"
+  )
+  print("\n  -- fleet-sizing PROJECTION (measured-derived; see assumptions) --")
+  for row in tp["fleet_sizing_projection"]["by_target_bps"]:
+    if row.get("cores_required") is None:
+      print(f"    @{row['target_bps']}bps: {row.get('note')}")
+    else:
+      print(
+          f"    @{row['target_bps']}bps: cores={row['cores_required']:.1f} "
+          f"=> c3d-highcpu-60 nodes={row['c3d_nodes_required']}"
+      )
+  print("==============================================================\n")
+
+
+def load_run_config(path):
+  """Read a run_config.json (blocks, txs_per_chunk=C, ...). None if absent."""
+  if not path or not os.path.exists(path):
+    return None
+  try:
+    with open(path, "r", encoding="utf-8") as f:
+      return json.load(f)
+  except Exception as e:  # noqa: BLE001
+    print(f"[WARNING] Failed to read run_config {path}: {e}", file=sys.stderr)
+    return None
+
+
+def parse_coordinator_log_v2(log_path, seeder_start_dt=None, run_config=None,
+                             target_bps=None):
   if not os.path.exists(log_path):
     print(f"[ERROR] Coordinator log {log_path} not found.", file=sys.stderr)
     return None
@@ -527,6 +741,9 @@ def parse_coordinator_log_v2(log_path, seeder_start_dt=None):
   derived = compute_derived(events)
   derived["recovery"]["max_stale_lease_redrive_count"] = max_stale_redrive
 
+  # THROUGHPUT metric (#321 C-sweep). Additive; consumes run_config if given.
+  throughput = compute_throughput(events, run_config=run_config, target_bps=target_bps)
+
   # Self-describing run descriptors (echoed from the events; None if not logged).
   def _first_present(key):
     for e in events:
@@ -560,6 +777,7 @@ def parse_coordinator_log_v2(log_path, seeder_start_dt=None):
       "start_time": start_dt,
       "end_time": root_reached_time,
       "derived": derived,
+      "throughput": throughput,
       "descriptors": descriptors,
   }
 
@@ -710,6 +928,7 @@ def build_summary(metrics, metadata, provenance, sizing):
       "total_transactions": metrics["total_tx"],
       "descriptors": metrics["descriptors"],
       "derived_sizing_metrics": metrics["derived"],
+      "throughput": metrics["throughput"],
       "sizing_derivation": sizing,
       "provenance": provenance,
       "metadata": metadata,
@@ -726,7 +945,14 @@ def main():
   parser.add_argument("--image", default="local", help="Image tag (code release)")
   parser.add_argument("--out", default=None, help="Output path for bench_summary.json (default: CWD/bench_summary.json in local mode)")
   parser.add_argument("--no-upload", action="store_true", help="Never upload to GCS (implied by --log-file)")
+  parser.add_argument("--run-config", default=None, help="Path to run_config.json (blocks, txs_per_chunk=C, leaf_count_per_block) for the throughput metric")
+  parser.add_argument("--target-bps", default=None, help="Comma-separated target blocks/sec for the fleet-sizing projection (default: 10,12)")
   args = parser.parse_args()
+
+  target_bps = None
+  if args.target_bps:
+    target_bps = [int(x) for x in args.target_bps.split(",") if x.strip()]
+  run_config = load_run_config(args.run_config)
 
   local_mode = args.log_file is not None
   log_path = args.log_file if local_mode else args.coordinator_log
@@ -761,7 +987,9 @@ def main():
       print("[WARNING] Could not retrieve seeder job start time. Will fallback to first coordinator event.")
 
   print(f"[INFO] Parsing coordinator log {log_path}...")
-  metrics = parse_coordinator_log_v2(log_path, seeder_start)
+  metrics = parse_coordinator_log_v2(
+      log_path, seeder_start, run_config=run_config, target_bps=target_bps
+  )
   if not metrics:
     print("[ERROR] Failed to parse coordinator log.", file=sys.stderr)
     sys.exit(1)
@@ -785,6 +1013,9 @@ def main():
   sizing = build_sizing_derivation(metrics)
   print_sizing_derivation(sizing)
 
+  # ---- THROUGHPUT (#321 C-sweep). ----
+  print_throughput(metrics["throughput"])
+
   # ---- Provenance: every number traceable. ----
   provenance = {
       "source_kind": "local-log-file" if local_mode else "kubectl-gke",
@@ -804,6 +1035,15 @@ def main():
           "duplicate_proved": "successful events grouped by output-key-equivalent; count>1 == duplicate",
           "recovery": "redriven_after_lease_expiry=true count + max stale_lease_redrive_count marker",
           "cpu_and_pods_per_node": "NOT derived — requires node metrics (#328 §B, GCP)",
+          "throughput": (
+              "leaf/fold/total_cpu_core_sec = sum(prove_ms)/1000 over successful "
+              "leaf / fold events (prove_time_ms fallback); core_sec_per_block = "
+              "total / blocks (blocks from run_config.json or default 1). "
+              "fleet_sizing_projection is a PROJECTION derived from the measured "
+              "core_sec_per_block (cores = core_sec_per_block * target_bps; "
+              "nodes = ceil(cores/60)) — measured-derived, not fabricated; "
+              "assumptions stated inline."
+          ),
       },
       "notes": [
           "No benchmark number is fabricated. Missing telemetry -> null/0/UNMEASURED.",

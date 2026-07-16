@@ -154,11 +154,21 @@ bench_reduction_local() {
   _log_ok "Local pipeline produced a real aggregated proof. Log at ${log_file}"
 
   _log_info "Extracting telemetry (extract_gke_telemetry.py --log-file)..."
+  # #321 C-sweep: pass reports/run_config.json (blocks, txs_per_chunk=C, ...) if
+  # the pipeline wrote one, so the THROUGHPUT metric echoes C/N and computes
+  # core_sec_per_block against the REAL block count. Absent => extractor defaults
+  # blocks=1 and echoes C/N from the events (never fabricated).
+  local run_config_arg=()
+  if [[ -f "${ROOT_DIR}/reports/run_config.json" ]]; then
+    run_config_arg=(--run-config "${ROOT_DIR}/reports/run_config.json")
+    _log_info "Using reports/run_config.json for throughput blocks/C/N."
+  fi
   python3 "${SCRIPT_DIR}/extract_gke_telemetry.py" \
     --log-file "${log_file}" \
     --arch local \
     --benchmark-id "bench-reduction-local-$(date -u +%Y%m%dT%H%M%SZ)" \
     --image "local-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+    "${run_config_arg[@]}" \
     --out "${summary}"
 
   _log_ok "Wrote ${summary}"
