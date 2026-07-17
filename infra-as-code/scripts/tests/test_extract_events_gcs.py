@@ -310,9 +310,43 @@ def test_distinct_same_span_intervals_not_false_duplicates():
   # Two level-1 reduction folds cover DIFFERENT intervals ([0,1] and [2,3]) but
   # the SAME span (2). They are distinct logical tasks and must NOT be flagged as
   # duplicates (the events-GCS output_key keys on the interval endpoints).
+  # Single-block (no block_ns) => output_key back-compat unchanged.
   events = _sample_run_events()
   d = ext.compute_derived(events)
   assert d["duplicate_proved"]["duplicate_output_keys"] == 0
+  assert d["duplicate_proved"]["wasted_extra_events"] == 0
+
+
+def test_multi_block_no_false_duplicate_output_keys():
+  # #360 (follow-up to #357): a genuine 2-block run proves the SAME geometry in
+  # EACH block (block_0's leaf_0 and block_1's leaf_0 are DISTINCT tasks). Before
+  # the output_key() block_ns fix these collided into one key and were reported as
+  # false duplicates (N-1 phantom "wasted_extra_events" per geometry). With
+  # block_ns in output_key(), a correct multi-block run has ZERO duplicates.
+  def _block(ns):
+    leaves = [
+        ext.prover_event_json_to_event(
+            _prover_event("leaf", chunk_idx=i, prove_ms=1000, block_ns=ns))
+        for i in range(4)
+    ]
+    folds = [
+        ext.prover_event_json_to_event(
+            _prover_event("reduction-fold", level=1, lo=0, hi=1, prove_ms=500,
+                          fold_kind="real", block_ns=ns)),
+        ext.prover_event_json_to_event(
+            _prover_event("reduction-fold", level=1, lo=2, hi=3, prove_ms=500,
+                          fold_kind="real", block_ns=ns)),
+        ext.prover_event_json_to_event(
+            _prover_event("reduction-fold", level=2, lo=0, hi=3, prove_ms=500,
+                          fold_kind="real", block_ns=ns)),
+    ]
+    return leaves + folds
+
+  events = _block("block_0") + _block("block_1")
+  d = ext.compute_derived(events)
+  # 14 distinct tasks (7 geometries x 2 blocks); NONE are duplicates.
+  assert d["duplicate_proved"]["duplicate_output_keys"] == 0, (
+      "cross-block same-geometry tasks must NOT be false duplicates")
   assert d["duplicate_proved"]["wasted_extra_events"] == 0
 
 

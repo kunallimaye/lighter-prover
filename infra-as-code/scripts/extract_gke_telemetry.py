@@ -481,12 +481,21 @@ def compute_derived(events):
   # ---- Duplicate-proved count: group successful events by output-key-equivalent
   # and count keys proved by >1 event (effective vs wasted compute). ----
   def output_key(e):
+    # #360 (follow-up to #357): the per-replay block namespace is PREPENDED to the
+    # output identity so cross-block same-geometry tasks are NOT counted as false
+    # duplicates. In a genuine N-block run every block proves the SAME geometry
+    # (block_0's leaf_0 and block_1's leaf_0 are DISTINCT tasks, not duplicates);
+    # without block_ns here `output_key()` collapses them and reports N-1 phantom
+    # "wasted_extra_events" per geometry. A None/empty block_ns (single-block runs)
+    # yields a leading `|`, which is byte-for-byte the SAME grouping as before —
+    # single-block duplicate detection is unchanged.
+    ns = e.get("block_ns") or ""
     role = e["role"]
     if role == "leaf":
-      return f"leaf_{e['idx']}"
+      return f"{ns}|leaf_{e['idx']}"
     if role in ("node", "tree-node"):
       lvl = e.get("level")
-      return f"tree_L{lvl}_N{e['idx']}"
+      return f"{ns}|tree_L{lvl}_N{e['idx']}"
     if role in ("reduction", "reduction-fold"):
       # Interval identity. When the exact endpoints are known (events-GCS source,
       # #347) key on (level, lo, hi) — the TRUE logical identity of a reduction
@@ -498,10 +507,10 @@ def compute_derived(events):
       hi = e.get("hi")
       if lo is not None and hi is not None:
         lvl = e.get("level")
-        return f"reduction_L{lvl}_lo{lo}_hi{hi}"
+        return f"{ns}|reduction_L{lvl}_lo{lo}_hi{hi}"
       span = e.get("merge_interval_span")
-      return f"reduction_{e['idx']}_span{span}"
-    return f"{role}_{e['idx']}"
+      return f"{ns}|reduction_{e['idx']}_span{span}"
+    return f"{ns}|{role}_{e['idx']}"
 
   key_counts = {}
   for e in [x for x in events if x["status"] == "success"]:
