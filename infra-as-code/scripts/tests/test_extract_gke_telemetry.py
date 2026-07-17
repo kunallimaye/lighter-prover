@@ -201,8 +201,10 @@ def test_duplicate_detection():
   dup = m["derived"]["duplicate_proved"]
   assert dup["duplicate_output_keys"] == 1
   assert dup["wasted_extra_events"] == 1
-  assert "leaf_0" in dup["detail"]
-  assert dup["detail"]["leaf_0"] == 2
+  # #360: output_key() now PREPENDS the (empty, for this single-block fixture)
+  # block_ns, so the canonical key is "|leaf_0" — same grouping, one duplicate.
+  assert "|leaf_0" in dup["detail"]
+  assert dup["detail"]["|leaf_0"] == 2
 
 
 # ---------------------------------------------------------------------------
