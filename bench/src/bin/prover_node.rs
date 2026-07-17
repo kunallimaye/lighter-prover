@@ -2543,6 +2543,14 @@ fn run_dispatch_loop<T: WorkTransport>(
     transport: &T,
     radix: usize,
     leaf_count: usize,
+    // (#355) The number of REPLAY blocks this loop must drive to completion. For
+    // the local path this is always `1` (its OUTER loop calls `run_dispatch_loop`
+    // once per replay with a per-replay transport + proof store). For the pubsub
+    // path a SINGLE worker loop drains the SHARED work topic carrying ALL N
+    // blocks' descriptors, so it must consider the run complete only when ALL N
+    // per-block roots (`block_0/{root}` … `block_{N-1}/{root}`) exist — never
+    // after just one. `blocks <= 1` is the exact pre-#355 single-root behaviour.
+    blocks: usize,
     tx_per_proof: usize,
     // (#321 Phase 9) Which fold strategy this run drives. The loop is otherwise a
     // pure consumer of whatever the seeder queued, but it MUST wait for + harvest
@@ -2582,6 +2590,27 @@ fn run_dispatch_loop<T: WorkTransport>(
     // directly. Kept in the signature for a uniform call site across backends.
     let _ = tx_per_proof;
 
+    // (#355) The per-block namespaces whose roots this loop must all see before
+    // the run is complete. For `blocks <= 1` this is a SINGLE empty namespace
+    // (`""`) → exactly the pre-#355 single-root behaviour under the base prefix.
+    // For `blocks > 1` it is `block_0` … `block_{N-1}`, so the loop terminates
+    // only when ALL N per-block roots exist. Derived from the seeder-shared
+    // `blocks` count (never hardcoded).
+    let blocks = blocks.max(1);
+    let block_namespaces: Vec<String> = if blocks <= 1 {
+        vec![String::new()]
+    } else {
+        (0..blocks).map(|b| format!("block_{b}")).collect()
+    };
+    // Are ALL N per-block roots committed? (`root_key` is the same per-block key;
+    // each block commits it under its OWN namespace prefix.) This is the multi-
+    // block generalisation of the old single `output_exists(&root_key)` check.
+    let all_roots_committed = |transport: &T| -> bool {
+        block_namespaces
+            .iter()
+            .all(|ns| transport.output_exists_in_block(ns, &root_key))
+    };
+
     let mut processed = 0usize;
     // Loop until the root output exists (the dynamic-depth top node is committed)
     // and the queue has drained.
@@ -2611,7 +2640,7 @@ fn run_dispatch_loop<T: WorkTransport>(
         // once per iteration (flow-control = 1) and reuse the lease below.
         let iter_start = Instant::now();
         let pull_start = Instant::now();
-        if transport.output_exists(&root_key) && transport.pull_one().is_none() {
+        if all_roots_committed(transport) && transport.pull_one().is_none() {
             break;
         }
         let lease = transport.pull_one();
@@ -2622,20 +2651,32 @@ fn run_dispatch_loop<T: WorkTransport>(
         // width = max(pull_ts) − min(pull_ts). `0` only if the clock is pre-epoch.
         let pull_ts_ms = bench::transport::now_epoch_ms();
         let Some(lease) = lease else {
-            // Nothing pullable but root not yet committed: the gating either
+            // Nothing pullable but not all roots yet committed: the gating either
             // hasn't published the next level or work is still in flight. With a
             // single in-process loop this means we're done seeding but a commit
-            // race left no visible work — re-check the root then bail.
-            if transport.output_exists(&root_key) {
+            // race left no visible work — re-check the roots then bail. (#355) For
+            // a multi-block run this requires ALL N per-block roots, not just one.
+            if all_roots_committed(transport) {
                 break;
             }
             panic!(
-                "dispatch loop stalled: no work pullable but root {root_key} not committed \
-                 (processed {processed} descriptors)"
+                "dispatch loop stalled: no work pullable but not all {blocks} block root(s) \
+                 committed (root_key={root_key}, processed {processed} descriptors)"
             );
         };
 
         let d = lease.descriptor().clone();
+        // (#355) Isolate this task's LOCAL proof store to its block namespace so a
+        // worker that processes tasks from multiple blocks reads/writes children
+        // under the right `block_N/` subdir (the local analogue of the per-block
+        // GCS object-prefix the transport commits under). Empty `block_ns` ⇒ the
+        // base `PROOF_DIR` (BLOCKS=1 byte-for-byte unchanged). Mirrors the local
+        // replay loop's `set_proof_dir("{PROOF_DIR}/block_{replay}")`.
+        if d.block_ns.is_empty() {
+            set_proof_dir(None);
+        } else {
+            set_proof_dir(Some(format!("{PROOF_DIR}/{}", d.block_ns)));
+        }
         // Heartbeat the lease while we do the (potentially long) proving work.
         lease.extend();
 
@@ -2848,39 +2889,64 @@ fn run_dispatch_loop<T: WorkTransport>(
         );
     }
 
-    // If we broke out for graceful shutdown before the root was committed, return
-    // `None`: the worker drained cleanly, leaving remaining work on the queue for
-    // another worker — it must NOT pretend a root exists or fabricate one.
-    if !transport.output_exists(&root_key) {
+    // If we broke out for graceful shutdown before ALL roots were committed,
+    // return `None`: the worker drained cleanly, leaving remaining work on the
+    // queue for another worker — it must NOT pretend a root exists or fabricate
+    // one. (#355) For a multi-block run this requires ALL N per-block roots.
+    if !all_roots_committed(transport) {
+        let done = block_namespaces
+            .iter()
+            .filter(|ns| transport.output_exists_in_block(ns, &root_key))
+            .count();
         info!(
-            "[dispatch] loop exited before root committed ({processed} descriptor(s) done); \
-             graceful drain leaves remaining work on the queue. No root harvested here."
+            "[dispatch] loop exited before all {blocks} block root(s) committed \
+             ({done}/{blocks} roots present, {processed} descriptor(s) done); graceful drain \
+             leaves remaining work on the queue. No root harvested here."
         );
         return None;
     }
 
-    info!("[dispatch] tree complete: {processed} descriptors processed; harvesting root");
-    let root_bytes = transport
-        .read_output(&root_key)
-        .expect("root output must exist after dispatch loop completes");
-    let root_proof: ProofWithPublicInputs<F, C, D> =
-        bincode::deserialize(&root_bytes).expect("deserialize root proof");
-    // (#321 Phase 9) Verify against the correct circuit VK for the strategy. The
-    // reduction root proof is a level-`root_level` reduction-node proof, where
-    // `root_level = log2(padded_leaf_count(N))` (the reduction root interval
-    // [0, padded-1] has span `padded = 2^root_level`; `aggregate_pair` asserts
-    // `span == 1 << level`). Hex is UNCHANGED: level-`depth` hex node circuit.
-    if fold_strategy.is_reduction() {
-        let padded = bench::transport::padded_leaf_count(leaf_count);
-        let root_level = padded.trailing_zeros() as usize;
-        cached_reduction_node(root_level)
-            .data
-            .verify(root_proof.clone())
-            .expect("Reduction root proof failed cryptographic verification");
-    } else {
-        verify_root_proof(&root_proof, depth, radix);
+    info!(
+        "[dispatch] all {blocks} block tree(s) complete: {processed} descriptors processed; \
+         verifying + harvesting {blocks} root(s)"
+    );
+
+    // (#355) Verify EVERY per-block root cryptographically (a multi-block run is
+    // only complete when all N independent trees reach their own verified root),
+    // and return the FIRST block's root proof as the representative harvested root
+    // for the caller's report. For `blocks <= 1` this is exactly the single root.
+    let mut first_root: Option<ProofWithPublicInputs<F, C, D>> = None;
+    for ns in &block_namespaces {
+        let root_bytes = transport
+            .read_output_in_block(ns, &root_key)
+            .unwrap_or_else(|| {
+                panic!(
+                    "root output for block namespace {:?} must exist after dispatch loop completes",
+                    ns
+                )
+            });
+        let root_proof: ProofWithPublicInputs<F, C, D> =
+            bincode::deserialize(&root_bytes).expect("deserialize root proof");
+        // (#321 Phase 9) Verify against the correct circuit VK for the strategy.
+        // The reduction root proof is a level-`root_level` reduction-node proof,
+        // where `root_level = log2(padded_leaf_count(N))` (the reduction root
+        // interval [0, padded-1] has span `padded = 2^root_level`; `aggregate_pair`
+        // asserts `span == 1 << level`). Hex is UNCHANGED: level-`depth` hex node.
+        if fold_strategy.is_reduction() {
+            let padded = bench::transport::padded_leaf_count(leaf_count);
+            let root_level = padded.trailing_zeros() as usize;
+            cached_reduction_node(root_level)
+                .data
+                .verify(root_proof.clone())
+                .expect("Reduction root proof failed cryptographic verification");
+        } else {
+            verify_root_proof(&root_proof, depth, radix);
+        }
+        if first_root.is_none() {
+            first_root = Some(root_proof);
+        }
     }
-    Some(root_proof)
+    first_root
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -3486,6 +3552,10 @@ fn run_local_work(
             &transport,
             radix,
             leaf_count,
+            // (#355) Local path drives ONE block per `run_dispatch_loop` call (the
+            // OUTER replay loop iterates blocks with a per-replay transport +
+            // proof store), so the loop itself waits for a single root.
+            1,
             tx_per_proof,
             fold_strategy,
             seed_order.to_scheduling_class(),
@@ -3866,8 +3936,20 @@ fn run_pubsub_work(
         // across replays land under DISTINCT GCS keys and cannot dedup/collapse.
         let mut total_seeded = 0usize;
         for replay in 0..plan.blocks {
+            // (#355) The per-replay BLOCK NAMESPACE stamped onto every leaf so it
+            // commits + gates under `block_<replay>/` — isolating identical-content
+            // replays so they don't dedup via the GCS `ifGenerationMatch=0` CAS.
+            // For BLOCKS=1 this is EMPTY (`""`) so the committed keys + gate markers
+            // are byte-for-byte the pre-#355 base-prefix keys (back-compat). The
+            // full object-prefix is still logged for operator observability.
+            let block_ns = if plan.blocks <= 1 {
+                String::new()
+            } else {
+                format!("block_{replay}")
+            };
             let prefix = replay_object_prefix(&base_object_prefix, replay, plan.blocks);
             transport.seed_leaves_with_prefix(
+                &block_ns,
                 &prefix,
                 radix,
                 leaf_count,
@@ -3878,9 +3960,10 @@ fn run_pubsub_work(
             total_seeded += leaf_count;
             info!(
                 "[seed] replay {}/{}: published {leaf_count} leaf descriptor(s) under \
-                 object-prefix '{prefix}'",
+                 block-namespace '{}' (object-prefix '{prefix}')",
                 replay + 1,
-                plan.blocks
+                plan.blocks,
+                if block_ns.is_empty() { "<base>" } else { &block_ns },
             );
         }
 
@@ -3960,10 +4043,28 @@ fn run_pubsub_work(
         start_readiness_listener(port);
     }
 
+    // (#355) The SHARED run-config's `blocks` field is the SINGLE SOURCE OF TRUTH
+    // for how many replay blocks the worker must drive to completion — the seeder
+    // wrote it (drift guard, above), so workers know exactly how many per-block
+    // roots (`block_0/{root}` … `block_{N-1}/{root}`) to wait for. Never
+    // hardcoded. Falls back to this worker's own derived `plan.blocks` when no
+    // run-config is present (single-node / pre-seed startup); both agree in a
+    // correctly-configured run.
+    let expected_blocks = RunConfig::read_local(RUN_CONFIG_PATH)
+        .map(|c| c.blocks)
+        .unwrap_or(plan.blocks)
+        .max(1);
+    info!(
+        "[worker] driving {expected_blocks} replay block(s) to completion (source: \
+         run_config.json blocks, else derived plan.blocks); waiting for {expected_blocks} \
+         per-block root(s)."
+    );
+
     let Some(root_proof) = run_dispatch_loop(
         &transport,
         radix,
         leaf_count,
+        expected_blocks,
         tx_per_proof,
         fold_strategy,
         seed_order.to_scheduling_class(),
@@ -4296,6 +4397,7 @@ mod tests {
                 &local,
                 2,
                 4,
+                1, // (#355) blocks
                 1,
                 FoldStrategy::Reduction,
                 bench::telemetry::SchedulingClass::Sequential,
@@ -4306,6 +4408,7 @@ mod tests {
                 &inmem,
                 2,
                 4,
+                1, // (#355) blocks
                 1,
                 FoldStrategy::Reduction,
                 bench::telemetry::SchedulingClass::Sequential,

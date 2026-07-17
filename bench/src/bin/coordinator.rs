@@ -37,9 +37,21 @@ fn main() {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(86400); // 24 hours
+    // (#355) How many REPLAY blocks this run is proving. The seeder writes the
+    // authoritative `blocks` count into the shared run-config; the coordinator's
+    // pod spec surfaces it as PROVER_BLOCKS (render_pod_spec plumbs run_config →
+    // env). The coordinator terminates only when ALL N per-block roots are
+    // reached — never after just one, which would let a multi-block run report
+    // one tree's cost as the whole run (the collapse this fix closes). Defaults
+    // to 1 (single-block, exact pre-#355 behaviour) when unset. Never hardcoded.
+    let expected_blocks = std::env::var("PROVER_BLOCKS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
 
-    info!("Config: project={:?}, event_sub={}, work_topic={}, redis={}, ttl={}s",
-        project_id, event_sub_name, work_topic_name, redis_url, ttl_secs);
+    info!("Config: project={:?}, event_sub={}, work_topic={}, redis={}, ttl={}s, blocks={}",
+        project_id, event_sub_name, work_topic_name, redis_url, ttl_secs, expected_blocks);
 
     // 2. Initialize Tokio Runtime for Pub/Sub clients
     let rt = Arc::new(
@@ -73,7 +85,6 @@ fn main() {
     });
 
     let publisher = PubSubPublisher::new(rt.clone(), work_topic);
-    let gating_engine = GatingEngine::new(&redis_store, &publisher);
 
     info!("Coordinator initialized. Entering event loop...");
 
@@ -81,6 +92,13 @@ fn main() {
     // re-driven by a crash-recovery re-drive (`GatingEngine::redrive_stale_merges`).
     // Surfaced in logs so a stuck-seam recovery is observable operationally.
     let mut stale_lease_redrive_count: u64 = 0;
+
+    // (#355) Track which per-block namespaces have REACHED THEIR ROOT so the
+    // coordinator terminates the run only when ALL N blocks are done. Keyed by the
+    // event descriptor's `block_ns` (`""` for a single-block run). The run is
+    // complete when `completed_block_roots.len() == expected_blocks`.
+    let mut completed_block_roots: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // 5. Run the synchronous event loop
     loop {
@@ -122,7 +140,7 @@ fn main() {
              prestate_source={}, is_first_task_on_pod={}, chunk_size={}, leaf_count={}, \
              pull_ms={}, pre_exec_ms={}, prove_ms={}, gcs_write_ms={}, queue_wait_ms={}, \
              fold_kind={}, merge_interval_span={}, redriven_after_lease_expiry={}, \
-             pull_ts_ms={}, scheduling_class={}",
+             pull_ts_ms={}, scheduling_class={}, block_ns={}",
             desc.role.as_str(),
             desc.chunk_idx,
             desc.fold_strategy,
@@ -151,6 +169,14 @@ fn main() {
             // seed order. Appended at the END so existing parsers stay compatible.
             event.pull_ts_ms,
             event.scheduling_class,
+            // #355: the per-replay BLOCK NAMESPACE this event's descriptor belongs
+            // to (`block_3`, or `<base>` for a single-block run). Lets the
+            // extractor COUNT distinct blocks actually observed and cross-check
+            // that against the run_config `blocks` divisor (anti-fabrication guard
+            // #354 principle) + split warm steady-state from cold replay-0. Empty
+            // block_ns is emitted as the literal "<base>" so the field is always
+            // present + parseable.
+            if desc.block_ns.is_empty() { "<base>" } else { &desc.block_ns },
         );
 
         // #321 Phase 5: count re-driven tasks so a recovery re-drive is
@@ -191,6 +217,15 @@ fn main() {
         // level 0 (the `reduction_leaf` ctor sets lo=hi=chunk_idx, level 0), so
         // routing on `desc.lo`/`desc.hi`/`desc.level` is correct for both leaves
         // and folds.
+        // (#355) Gate this event WITHIN its block namespace. All marker keys are
+        // prefixed by `desc.block_ns` so two replays of the same block gate
+        // independently (their position-keyed markers would otherwise collide and
+        // the coordinator would publish one fold per position → one tree). The
+        // published fold inherits the same `block_ns`, so a whole tree stays in
+        // its namespace. An empty `block_ns` is the un-namespaced single-block
+        // path, byte-for-byte identical to pre-#355.
+        let gating_engine =
+            GatingEngine::new_for_block(&redis_store, &publisher, &desc.block_ns);
         let gating_result = match desc.fold_strategy {
             FoldStrategy::Reduction => gating_engine.on_interval_committed(
                 desc.lo,
@@ -225,6 +260,20 @@ fn main() {
                         info!("Gate OPENED for parent {}, but it was already published by another instance.", desc.output_key());
                     }
                     GatingOutcome::RootReached => {
+                        // (#355) A per-BLOCK root has been reached. Record THIS
+                        // block's namespace and terminate the whole run only when
+                        // ALL N blocks are done — never after the first, which is
+                        // exactly the collapse (1 tree counted as N) this fix
+                        // closes. For a single-block run (`block_ns == ""`,
+                        // expected_blocks == 1) this reduces to the old single-root
+                        // completion, byte-for-byte.
+                        let block_label = if desc.block_ns.is_empty() {
+                            "<base>".to_string()
+                        } else {
+                            desc.block_ns.clone()
+                        };
+                        completed_block_roots.insert(desc.block_ns.clone());
+                        let done = completed_block_roots.len();
                         match desc.fold_strategy {
                             FoldStrategy::Reduction => {
                                 // #321 Phase 5: interval termination. The padded
@@ -236,21 +285,60 @@ fn main() {
                                 // other runs/replays.
                                 let padded = GatingEngine::<RedisCasStore, PubSubPublisher>::padded_leaf_count(desc.leaf_count);
                                 info!(
-                                    "REDUCTION ROOT REACHED [0, {}] — reduction complete for leaf_count={} (padded={}).",
+                                    "REDUCTION ROOT REACHED [0, {}] for block '{}' — reduction \
+                                     complete for leaf_count={} (padded={}). Blocks done: {}/{}.",
                                     padded.saturating_sub(1),
+                                    block_label,
                                     desc.leaf_count,
                                     padded,
+                                    done,
+                                    expected_blocks,
                                 );
                                 // Best-effort completion marker; a failure to write
                                 // it is logged but does not crash the daemon.
-                                let complete_key = format!("rgate/complete/{}", desc.leaf_count);
+                                // (#355) Block-namespaced so each block's root gets
+                                // its OWN marker (they'd otherwise collide on
+                                // leaf_count, which is identical across replays).
+                                let complete_key =
+                                    format!("{}rgate/complete/{}", desc.store_key_prefix(), desc.leaf_count);
                                 match redis_store.cas_create(&complete_key, b"1") {
-                                    Ok(_) => info!("Marked run complete: {complete_key}"),
+                                    Ok(_) => info!("Marked block complete: {complete_key}"),
                                     Err(e) => warn!("Failed to write completion marker {complete_key}: {e}"),
                                 }
                             }
                             FoldStrategy::Hex => {
-                                info!("ROOT REACHED! Tree reduction complete for {}", desc.output_key());
+                                info!(
+                                    "ROOT REACHED! Tree reduction complete for {} (block '{}'). \
+                                     Blocks done: {}/{}.",
+                                    desc.output_key(),
+                                    block_label,
+                                    done,
+                                    expected_blocks,
+                                );
+                            }
+                        }
+                        if done >= expected_blocks {
+                            info!(
+                                "ALL {expected_blocks} BLOCK ROOT(S) REACHED — multi-block \
+                                 replay run COMPLETE (leaf_count={}). Namespaces: {:?}.",
+                                desc.leaf_count,
+                                {
+                                    let mut v: Vec<&String> =
+                                        completed_block_roots.iter().collect();
+                                    v.sort();
+                                    v
+                                },
+                            );
+                            // Best-effort run-level completion marker (aggregate of
+                            // all N blocks), so a poller can detect whole-run
+                            // completion without enumerating per-block markers.
+                            let run_complete_key =
+                                format!("rgate/run_complete/{}/{}", expected_blocks, desc.leaf_count);
+                            match redis_store.cas_create(&run_complete_key, b"1") {
+                                Ok(_) => info!("Marked whole run complete: {run_complete_key}"),
+                                Err(e) => warn!(
+                                    "Failed to write run-complete marker {run_complete_key}: {e}"
+                                ),
                             }
                         }
                     }

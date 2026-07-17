@@ -189,6 +189,33 @@ pub struct WorkDescriptor {
     /// plausible-looking timestamp; `0` is the truthful "unknown".
     #[serde(default)]
     pub dispatch_ts_ms: u64,
+    /// (#355) The per-replay BLOCK NAMESPACE this descriptor belongs to, e.g.
+    /// `block_3`. EMPTY (`""`) for a single-block run (BLOCKS=1) — the honest
+    /// "no namespace" sentinel that preserves byte-for-byte back-compat: an empty
+    /// `block_ns` means the descriptor commits + gates under the base
+    /// object-prefix exactly as before this field existed.
+    ///
+    /// Multi-block REPLAY (`BLOCKS=N>1`) isolates each replay of the SAME block
+    /// under a DISTINCT namespace so their identical-content proofs don't dedup
+    /// via the GCS `ifGenerationMatch=0` CAS (`AlreadyExists`) and collapse into
+    /// one tree. This namespace threads through BOTH:
+    ///   * the object-store COMMIT PREFIX — a leaf commits under
+    ///     `<base>/<block_ns>/leaf_i.proof`, and
+    ///   * the READINESS-GATING marker keys — so the coordinator gates each
+    ///     block independently (the markers are keyed by tree position, which is
+    ///     IDENTICAL across replays, so without this namespace two replays'
+    ///     `gate/L1/N0/child_0` markers would collide and the coordinator would
+    ///     publish one fold per position → one tree).
+    ///
+    /// It travels ON the descriptor (not just via a store's fixed prefix) because
+    /// the pubsub work topic is SHARED across all blocks: a worker pulls a
+    /// descriptor and must learn which block's namespace to commit + gate under
+    /// from the descriptor itself. Fold descriptors the gate publishes inherit
+    /// the committing child's `block_ns`, so a whole tree (leaves → L1 → … →
+    /// root) stays inside one block's namespace. `#[serde(default)]` (= `""`) for
+    /// wire back-compat — a pre-#355 payload deserializes with no namespace.
+    #[serde(default)]
+    pub block_ns: String,
 }
 
 impl WorkDescriptor {
@@ -209,6 +236,7 @@ impl WorkDescriptor {
             // Pure constructor: unstamped (0). The seeder/publisher boundary
             // stamps the real dispatch time; 0 is the honest "not stamped".
             dispatch_ts_ms: 0,
+            block_ns: String::new(),
         }
     }
 
@@ -240,6 +268,7 @@ impl WorkDescriptor {
             fold_strategy: FoldStrategy::Reduction,
             redriven: false,
             dispatch_ts_ms: 0,
+            block_ns: String::new(),
         }
     }
 
@@ -264,6 +293,7 @@ impl WorkDescriptor {
             fold_strategy: FoldStrategy::Hex,
             redriven: false,
             dispatch_ts_ms: 0,
+            block_ns: String::new(),
         }
     }
 
@@ -291,6 +321,7 @@ impl WorkDescriptor {
             fold_strategy: FoldStrategy::Reduction,
             redriven: false,
             dispatch_ts_ms: 0,
+            block_ns: String::new(),
         }
     }
 
@@ -309,6 +340,7 @@ impl WorkDescriptor {
             fold_strategy: FoldStrategy::Hex,
             redriven: false,
             dispatch_ts_ms: 0,
+            block_ns: String::new(),
         }
     }
 
@@ -342,6 +374,36 @@ impl WorkDescriptor {
     pub fn stamped_now(mut self) -> Self {
         self.dispatch_ts_ms = now_epoch_ms();
         self
+    }
+
+    /// (#355) Set this descriptor's [`block_ns`](Self::block_ns) per-replay block
+    /// namespace and return `self`, so the seeder can stamp each replay's leaves
+    /// (`WorkDescriptor::leaf(..).with_block_ns("block_3")`) and the gating engine
+    /// can propagate it onto a published fold. An EMPTY `ns` leaves the descriptor
+    /// in the back-compat "no namespace" state (BLOCKS=1). The namespace is
+    /// stored raw (no trailing slash); [`store_key_prefix`](Self::store_key_prefix)
+    /// derives the slash-terminated commit/gate prefix.
+    #[must_use]
+    pub fn with_block_ns(mut self, ns: impl Into<String>) -> Self {
+        self.block_ns = ns.into();
+        self
+    }
+
+    /// (#355) The slash-terminated object-store / gating-marker key prefix for
+    /// this descriptor's block namespace: `""` when unnamespaced (BLOCKS=1, exact
+    /// back-compat), else `"<block_ns>/"` (e.g. `"block_3/"`). Combined with the
+    /// transport's fixed base object-prefix, a leaf commits under
+    /// `<base><block_ns>/leaf_i.proof` and the gate markers live under
+    /// `<block_ns>/gate/...`, so each replay isolates completely. Trailing
+    /// slashes in a raw `block_ns` are tolerated (never doubled).
+    pub fn store_key_prefix(&self) -> String {
+        if self.block_ns.is_empty() {
+            String::new()
+        } else if self.block_ns.ends_with('/') {
+            self.block_ns.clone()
+        } else {
+            format!("{}/", self.block_ns)
+        }
     }
 
     /// (#321 Phase 6) Compute the HONEST queue-wait for this descriptor given the
@@ -574,6 +636,24 @@ pub trait WorkTransport: Send + Sync {
     /// Read previously committed bytes for `key`, if present.
     fn read_output(&self, key: &str) -> Option<Vec<u8>>;
 
+    /// (#355) Whether `key` has been committed WITHIN a specific block namespace
+    /// (`block_3`, or `""` for the base namespace). The dispatch loop uses this
+    /// to check each of the N per-block roots (`block_0/{root}` …
+    /// `block_{N-1}/{root}`) in a multi-block REPLAY run. The default forwards to
+    /// the un-namespaced [`output_exists`](Self::output_exists) so single-block
+    /// backends need no change; the per-block backends (GCS, Local) override it to
+    /// look under the block's object/store prefix.
+    fn output_exists_in_block(&self, _block_ns: &str, key: &str) -> bool {
+        self.output_exists(key)
+    }
+
+    /// (#355) Read previously committed bytes for `key` WITHIN a specific block
+    /// namespace. Default forwards to [`read_output`](Self::read_output); per-block
+    /// backends override it. Used to harvest each block's root proof.
+    fn read_output_in_block(&self, _block_ns: &str, key: &str) -> Option<Vec<u8>> {
+        self.read_output(key)
+    }
+
     /// Commit a child's output **and** advance readiness gating in one call:
     /// commits `bytes` under `descriptor.output_key()` via the atomic
     /// [`commit_output`](Self::commit_output) CAS, then (only if this caller won
@@ -704,13 +784,43 @@ impl LocalTransport {
         self.store_dir.join(key)
     }
 
+    /// (#355) The block-namespaced output path for a descriptor: the base
+    /// `store_dir`, then the descriptor's block-namespace subdir (`block_3/`, or
+    /// nothing for an unnamespaced BLOCKS=1 descriptor), then the output key.
+    /// A single `LocalTransport` can therefore host multiple replays of the same
+    /// block under distinct `block_N/` subdirs with NO CAS collision — the local
+    /// analogue of the pubsub per-replay GCS object-prefix. Empty `block_ns`
+    /// resolves to exactly `output_path(key)`, so BLOCKS=1 paths are unchanged.
+    fn namespaced_output_path(&self, descriptor: &WorkDescriptor) -> PathBuf {
+        self.namespaced_path(&descriptor.block_ns, &descriptor.output_key())
+    }
+
+    /// (#355) Resolve the block-namespaced filesystem path for a raw `block_ns` +
+    /// output key. Empty `block_ns` ⇒ exactly `output_path(key)` (BLOCKS=1 back-
+    /// compat); else `store_dir/<block_ns>/<key>`.
+    fn namespaced_path(&self, block_ns: &str, key: &str) -> PathBuf {
+        if block_ns.is_empty() {
+            self.output_path(key)
+        } else {
+            self.store_dir.join(block_ns).join(key)
+        }
+    }
+
     /// Path of the per-parent completion-count directory for the parent of a
     /// just-committed child. Each committed child drops a uniquely-named marker
     /// file in it; the directory entry count is the completion count, which is
     /// inherently idempotent (a re-commit of the same child writes the same
     /// marker name via `O_EXCL`, so it cannot double-count).
-    fn gate_dir(&self, level: usize, node_idx: usize) -> PathBuf {
+    ///
+    /// (#355) `block_prefix` is the just-committed child's slash-terminated block
+    /// namespace (`block_3/`, or `""` for BLOCKS=1): the gate lives UNDER the same
+    /// block subdir as the proofs, so two replays of the same block gate
+    /// independently and each tree reaches its own root. Empty prefix ⇒ exactly
+    /// the pre-#355 gate location, so single-block gating is byte-for-byte
+    /// unchanged.
+    fn gate_dir(&self, block_prefix: &str, level: usize, node_idx: usize) -> PathBuf {
         self.store_dir
+            .join(block_prefix)
             .join(format!(".gate_L{level}_N{node_idx}"))
     }
 
@@ -750,8 +860,12 @@ impl LocalTransport {
         let parent_idx = child_idx / radix;
         let needed = real_children_for_node(leaf_count, radix, parent_level, parent_idx);
 
+        // (#355) All gate/publish markers live UNDER the child's block namespace
+        // so replays of the same block gate independently. Empty ⇒ pre-#355 path.
+        let block_prefix = child.store_key_prefix();
+
         // Record this child's completion (idempotent via O_EXCL marker name).
-        let gate = self.gate_dir(parent_level, parent_idx);
+        let gate = self.gate_dir(&block_prefix, parent_level, parent_idx);
         fs::create_dir_all(&gate).expect("Failed to create gate dir");
         let marker = gate.join(format!("child_{child_idx}"));
         let _ = OpenOptions::new()
@@ -766,23 +880,34 @@ impl LocalTransport {
 
         if have >= needed {
             // Publish the parent fold exactly once, guarded by a published
-            // marker so concurrent last-children don't double-publish.
+            // marker so concurrent last-children don't double-publish. The marker
+            // is block-namespaced so each replay publishes its own parent.
             let pub_marker = self
                 .store_dir
+                .join(&block_prefix)
                 .join(format!(".published_L{parent_level}_N{parent_idx}"));
+            if let Some(parent) = pub_marker.parent() {
+                fs::create_dir_all(parent).expect("Failed to create publish-marker dir");
+            }
             let won = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&pub_marker)
                 .is_ok();
             if won {
-                self.publish(WorkDescriptor::tree_node(
-                    parent_level,
-                    parent_idx,
-                    radix,
-                    leaf_count,
-                    child.tx_per_proof,
-                ));
+                // (#355) Propagate the child's block namespace onto the parent
+                // fold so the whole tree (leaves → L1 → … → root) stays inside
+                // one block's namespace.
+                self.publish(
+                    WorkDescriptor::tree_node(
+                        parent_level,
+                        parent_idx,
+                        radix,
+                        leaf_count,
+                        child.tx_per_proof,
+                    )
+                    .with_block_ns(child.block_ns.clone()),
+                );
             }
         }
     }
@@ -880,11 +1005,19 @@ impl WorkTransport for LocalTransport {
         let descriptor = descriptor.stamped_now();
         let mut q = self.queue.lock().expect("queue mutex poisoned");
         // De-dupe duplicates already pending (idempotent publish). Identity is the
-        // OUTPUT KEY (the work unit), NOT full-struct equality: the Phase-6
-        // `dispatch_ts_ms` stamp differs between a re-publish and the original, so
-        // comparing full structs would wrongly treat a redelivery as new work.
+        // (BLOCK NAMESPACE, OUTPUT KEY) pair (the work unit), NOT full-struct
+        // equality: the Phase-6 `dispatch_ts_ms` stamp differs between a re-publish
+        // and the original, so comparing full structs would wrongly treat a
+        // redelivery as new work. (#355) The `block_ns` is part of the identity so
+        // that two replays of the same block (`block_0/leaf_0` vs `block_1/leaf_0`,
+        // identical `output_key`) are DISTINCT work units and neither is dropped.
         let key = descriptor.output_key();
-        if q.messages.iter().any(|m| m.descriptor.output_key() == key) {
+        let ns = descriptor.block_ns.clone();
+        if q
+            .messages
+            .iter()
+            .any(|m| m.descriptor.output_key() == key && m.descriptor.block_ns == ns)
+        {
             return;
         }
         q.messages.push(QueuedMessage {
@@ -894,24 +1027,10 @@ impl WorkTransport for LocalTransport {
     }
 
     fn commit_output(&self, key: &str, bytes: &[u8]) -> CommitOutcome {
-        let path = self.output_path(key);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("Failed to create output parent dir");
-        }
         // Atomic CAS create-if-absent via O_EXCL. NOTE: atomic only on a single
         // local filesystem — production backends must use native object-store
         // CAS (GCS ifGenerationMatch=0); see the trait contract.
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                f.write_all(bytes).expect("Failed to write committed output");
-                f.sync_all().ok();
-                CommitOutcome::Committed
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                CommitOutcome::AlreadyExists
-            }
-            Err(e) => panic!("Failed to commit output {key}: {e:?}"),
-        }
+        commit_path_o_excl(&self.output_path(key), bytes)
     }
 
     fn output_exists(&self, key: &str) -> bool {
@@ -920,6 +1039,14 @@ impl WorkTransport for LocalTransport {
 
     fn read_output(&self, key: &str) -> Option<Vec<u8>> {
         fs::read(self.output_path(key)).ok()
+    }
+
+    fn output_exists_in_block(&self, block_ns: &str, key: &str) -> bool {
+        self.namespaced_path(block_ns, key).exists()
+    }
+
+    fn read_output_in_block(&self, block_ns: &str, key: &str) -> Option<Vec<u8>> {
+        fs::read(self.namespaced_path(block_ns, key)).ok()
     }
 
     /// Commit a child's output **and** advance readiness gating in one call:
@@ -946,9 +1073,33 @@ impl WorkTransport for LocalTransport {
             telemetry.prestate_source.as_str(),
             telemetry.is_first_task_on_pod,
         );
-        let outcome = self.commit_output(&descriptor.output_key(), bytes);
+        // (#355) Commit under the descriptor's block namespace so replays of the
+        // same block don't collide. Empty `block_ns` ⇒ the base path (BLOCKS=1
+        // byte-for-byte unchanged).
+        let path = self.namespaced_output_path(descriptor);
+        let outcome = commit_path_o_excl(&path, bytes);
         self.maybe_publish_parent(descriptor, outcome == CommitOutcome::Committed);
         outcome
+    }
+}
+
+/// (#355) Atomic O_EXCL create-if-absent commit at an EXPLICIT path (creating any
+/// missing parent dirs), factored out of [`LocalTransport::commit_output`] so the
+/// block-namespaced [`commit_and_gate`](LocalTransport::commit_and_gate) can
+/// commit under `store_dir/<block_ns>/<key>` without going through the flat
+/// `output_path`. Atomic only on a single local filesystem (dev/test contract).
+fn commit_path_o_excl(path: &Path, bytes: &[u8]) -> CommitOutcome {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("Failed to create output parent dir");
+    }
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut f) => {
+            f.write_all(bytes).expect("Failed to write committed output");
+            f.sync_all().ok();
+            CommitOutcome::Committed
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => CommitOutcome::AlreadyExists,
+        Err(e) => panic!("Failed to commit output at {}: {e:?}", path.display()),
     }
 }
 
@@ -1821,6 +1972,158 @@ mod tests {
             t.pull_one().is_none(),
             "redelivered child must not falsely satisfy the parent quota"
         );
+    }
+
+    // ── #355 multi-block REPLAY namespacing ──
+
+    /// (#355) BACK-COMPAT: an un-namespaced descriptor (`block_ns == ""`, the
+    /// BLOCKS=1 case) yields an EMPTY store key prefix, so its committed keys +
+    /// gate markers are byte-for-byte the pre-#355 base-prefix locations.
+    #[test]
+    fn empty_block_ns_is_backcompat_no_prefix() {
+        let d = WorkDescriptor::leaf(7, 2, 8, 300);
+        assert_eq!(d.block_ns, "", "leaf ctor defaults to no namespace");
+        assert_eq!(d.store_key_prefix(), "", "empty ns ⇒ empty prefix (back-compat)");
+        // Namespaced descriptor yields a slash-terminated prefix.
+        let n = d.with_block_ns("block_3");
+        assert_eq!(n.block_ns, "block_3");
+        assert_eq!(n.store_key_prefix(), "block_3/");
+        // output_key() is UNCHANGED by the namespace (namespace lives in the
+        // store prefix, not the object base name).
+        assert_eq!(n.output_key(), "leaf_7.proof");
+    }
+
+    /// (#355) The CORE collision-fix invariant: seeding N replays of the same
+    /// block onto ONE `LocalTransport` produces DISTINCT committed paths
+    /// `block_0/leaf_0.proof` vs `block_1/leaf_0.proof` — zero CAS collisions —
+    /// even though the descriptors' `output_key()` is IDENTICAL. Before #355 the
+    /// second replay's `leaf_0.proof` collided and returned AlreadyExists,
+    /// collapsing N blocks into one tree.
+    #[test]
+    fn two_block_seed_yields_non_colliding_keys() {
+        let t = LocalTransport::new(tmp_store("ns-noncollide")).without_auto_gating();
+        // block_0/leaf_0 and block_1/leaf_0: same output_key, different namespace.
+        let b0 = WorkDescriptor::leaf(0, 2, 4, 1).with_block_ns("block_0");
+        let b1 = WorkDescriptor::leaf(0, 2, 4, 1).with_block_ns("block_1");
+        assert_eq!(b0.output_key(), b1.output_key(), "same logical key");
+
+        assert_eq!(
+            t.commit_and_gate(&b0, b"block0-leaf0", 0, 0, &test_telem()),
+            CommitOutcome::Committed,
+            "block_0/leaf_0 commits"
+        );
+        assert_eq!(
+            t.commit_and_gate(&b1, b"block1-leaf0", 0, 0, &test_telem()),
+            CommitOutcome::Committed,
+            "block_1/leaf_0 must ALSO commit (distinct namespace) — NO CAS collision"
+        );
+
+        // Both live under their own namespace with their own bytes.
+        assert!(t.output_exists_in_block("block_0", "leaf_0.proof"));
+        assert!(t.output_exists_in_block("block_1", "leaf_0.proof"));
+        assert_eq!(
+            t.read_output_in_block("block_0", "leaf_0.proof").unwrap(),
+            b"block0-leaf0"
+        );
+        assert_eq!(
+            t.read_output_in_block("block_1", "leaf_0.proof").unwrap(),
+            b"block1-leaf0",
+            "each block's leaf keeps its OWN bytes — not deduped"
+        );
+        // The un-namespaced base location is untouched (back-compat sanity).
+        assert!(!t.output_exists("leaf_0.proof"));
+    }
+
+    /// (#355) A 2-block run over one `LocalTransport` reaches TWO independent
+    /// roots and the per-block gating stays isolated: committing all of block_0's
+    /// leaves publishes ONLY block_0's fold (carrying `block_ns=block_0`), and
+    /// likewise for block_1. Termination logic (`output_exists_in_block` for each
+    /// namespace) recognizes completion only after BOTH roots exist.
+    #[test]
+    fn two_block_run_reaches_two_independent_roots() {
+        // radix=2, N=2 ⇒ depth 1: two leaves fold directly into the level-1 root
+        // `tree_L1_N0.proof`. Kept tiny so the test is pure gating (no proving).
+        let t = LocalTransport::new(tmp_store("ns-two-roots"));
+        let root_key = "tree_L1_N0.proof";
+        let namespaces = ["block_0", "block_1"];
+
+        // Helper: has EVERY block reached its root?
+        let all_roots = |t: &LocalTransport| {
+            namespaces
+                .iter()
+                .all(|ns| t.output_exists_in_block(ns, root_key))
+        };
+        assert!(!all_roots(&t), "no roots yet");
+
+        for ns in namespaces {
+            // Commit leaf 0: parent not ready, and NO cross-block leakage.
+            let l0 = WorkDescriptor::leaf(0, 2, 2, 1).with_block_ns(ns);
+            assert_eq!(
+                t.commit_and_gate(&l0, b"l0", 0, 0, &test_telem()),
+                CommitOutcome::Committed
+            );
+            assert!(
+                t.pull_one().is_none(),
+                "{ns}: root fold must not publish after only leaf 0"
+            );
+
+            // Commit leaf 1: block's root fold publishes, tagged with THIS ns.
+            let l1 = WorkDescriptor::leaf(1, 2, 2, 1).with_block_ns(ns);
+            assert_eq!(
+                t.commit_and_gate(&l1, b"l1", 0, 0, &test_telem()),
+                CommitOutcome::Committed
+            );
+            let lease = t
+                .pull_one()
+                .unwrap_or_else(|| panic!("{ns}: root fold should publish"));
+            let d = lease.descriptor().clone();
+            assert_eq!(d.role, Role::TreeNode);
+            assert_eq!(d.level, 1);
+            assert_eq!(
+                d.block_ns, ns,
+                "published fold must inherit the committing child's block namespace"
+            );
+            // Drive the root fold to its committed proof (its parent is the root).
+            assert_eq!(
+                t.commit_and_gate(&d, b"root", 0, 0, &test_telem()),
+                CommitOutcome::Committed,
+                "{ns}: root fold commits"
+            );
+            lease.ack();
+            assert!(
+                t.output_exists_in_block(ns, root_key),
+                "{ns}: its root proof must now exist under its namespace"
+            );
+        }
+
+        // BOTH block roots exist and are DISTINCT objects (independent trees).
+        assert!(all_roots(&t), "termination: both block roots reached");
+        // Each root has its own bytes under its own namespace (no collision).
+        assert!(t.output_exists_in_block("block_0", root_key));
+        assert!(t.output_exists_in_block("block_1", root_key));
+        // The un-namespaced base root is untouched (a single-block run's location
+        // is not polluted by a multi-block run).
+        assert!(!t.output_exists(root_key));
+    }
+
+    /// (#355) BLOCKS=1 back-compat over the FULL gate path: an un-namespaced run
+    /// commits + gates + roots at EXACTLY the base locations (`leaf_0.proof`,
+    /// `tree_L1_N0.proof`), identical to pre-#355, and the published fold carries
+    /// an empty `block_ns`.
+    #[test]
+    fn single_block_backcompat_uses_base_locations() {
+        let t = LocalTransport::new(tmp_store("ns-backcompat"));
+        let l0 = WorkDescriptor::leaf(0, 2, 2, 1); // empty block_ns
+        let l1 = WorkDescriptor::leaf(1, 2, 2, 1);
+        assert_eq!(l0.block_ns, "");
+        t.commit_and_gate(&l0, b"l0", 0, 0, &test_telem());
+        t.commit_and_gate(&l1, b"l1", 0, 0, &test_telem());
+        // Leaves live at the BASE location, not under any block_N/ subdir.
+        assert!(t.output_exists("leaf_0.proof"));
+        assert!(t.output_exists("leaf_1.proof"));
+        let lease = t.pull_one().expect("root fold should publish");
+        assert_eq!(lease.descriptor().block_ns, "", "no namespace stamped");
+        lease.ack();
     }
 
     // ── geometry helpers ──

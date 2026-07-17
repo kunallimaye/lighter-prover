@@ -720,6 +720,11 @@ spec:
           value: "redis://redis-service:6379"
         - name: RUST_LOG
           value: "info"
+        # (#355) The REPLAY block count so the coordinator waits for ALL N per-block
+        # roots before marking the whole run complete (never terminating after just
+        # one — the collapse this fix closes). Mirrors run_config.json `blocks`.
+        - name: PROVER_BLOCKS
+          value: "{args.blocks}"
         resources:
           requests:
             cpu: "100m"

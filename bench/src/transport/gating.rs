@@ -160,6 +160,20 @@ pub enum GatingOutcome {
 pub struct GatingEngine<'a, S: CasStore, P: Publisher> {
     store: &'a S,
     publisher: &'a P,
+    /// (#355) The slash-terminated BLOCK-NAMESPACE prefix ALL of this engine's
+    /// marker keys are prefixed with (`"block_3/"`, or `""` for a single-block
+    /// run). This isolates readiness gating per replay: without it, two replays
+    /// of the same block would share the SAME position-keyed markers
+    /// (`gate/L1/N0/child_0`, `rgate/committed/0_0`, …), so the coordinator would
+    /// see block_1's leaf as a re-commit of block_0's and publish only ONE fold
+    /// per position → one tree. With it, each block gates independently and its
+    /// published fold descriptors inherit the same `block_ns` so the whole tree
+    /// stays in one namespace. Empty ⇒ pre-#355 keys, byte-for-byte back-compat.
+    block_prefix: String,
+    /// (#355) The raw block namespace (`"block_3"`, or `""`) stamped onto every
+    /// fold descriptor this engine publishes, so a pulled fold self-describes which
+    /// block it belongs to and the worker commits it under the right prefix.
+    block_ns: String,
 }
 
 /// Smallest power of two >= `n` (with `pad(0)=pad(1)=1`). The padded leaf count
@@ -200,25 +214,60 @@ pub struct PairRole {
 }
 
 impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
-    /// Build an engine over `store` (for markers) and `publisher` (for folds).
+    /// Build an engine over `store` (for markers) and `publisher` (for folds) for
+    /// the DEFAULT (un-namespaced) block — the single-block back-compat path.
     pub fn new(store: &'a S, publisher: &'a P) -> Self {
-        Self { store, publisher }
+        Self {
+            store,
+            publisher,
+            block_prefix: String::new(),
+            block_ns: String::new(),
+        }
+    }
+
+    /// (#355) Build an engine scoped to a specific BLOCK NAMESPACE (`"block_3"`,
+    /// or `""` for the default block). ALL marker keys are prefixed with
+    /// `"<block_ns>/"` and every published fold inherits `block_ns`, so multiple
+    /// replays of the same block gate + fold independently over the SAME shared
+    /// store. An empty `block_ns` is identical to [`new`](Self::new) (byte-for-byte
+    /// back-compat). The coordinator constructs one of these per incoming event,
+    /// keyed by the event descriptor's `block_ns`.
+    pub fn new_for_block(store: &'a S, publisher: &'a P, block_ns: &str) -> Self {
+        let block_prefix = if block_ns.is_empty() {
+            String::new()
+        } else if block_ns.ends_with('/') {
+            block_ns.to_string()
+        } else {
+            format!("{block_ns}/")
+        };
+        Self {
+            store,
+            publisher,
+            block_prefix,
+            block_ns: block_ns.trim_end_matches('/').to_string(),
+        }
     }
 
     /// Marker key recording that `child_idx` (in its level's numbering) has
-    /// committed under the parent at `(parent_level, parent_idx)`.
-    fn child_marker_key(parent_level: usize, parent_idx: usize, child_idx: usize) -> String {
-        format!("gate/L{parent_level}/N{parent_idx}/child_{child_idx}")
+    /// committed under the parent at `(parent_level, parent_idx)`. (#355)
+    /// Block-namespaced via `self.block_prefix`.
+    fn child_marker_key(&self, parent_level: usize, parent_idx: usize, child_idx: usize) -> String {
+        format!(
+            "{}gate/L{parent_level}/N{parent_idx}/child_{child_idx}",
+            self.block_prefix
+        )
     }
 
-    /// Prefix matching all child markers under a parent's gate.
-    fn child_marker_prefix(parent_level: usize, parent_idx: usize) -> String {
-        format!("gate/L{parent_level}/N{parent_idx}/child_")
+    /// Prefix matching all child markers under a parent's gate. (#355)
+    /// Block-namespaced via `self.block_prefix`.
+    fn child_marker_prefix(&self, parent_level: usize, parent_idx: usize) -> String {
+        format!("{}gate/L{parent_level}/N{parent_idx}/child_", self.block_prefix)
     }
 
-    /// Publish-marker key guaranteeing the parent fold is published once.
-    fn publish_marker_key(parent_level: usize, parent_idx: usize) -> String {
-        format!("published/L{parent_level}/N{parent_idx}")
+    /// Publish-marker key guaranteeing the parent fold is published once. (#355)
+    /// Block-namespaced via `self.block_prefix`.
+    fn publish_marker_key(&self, parent_level: usize, parent_idx: usize) -> String {
+        format!("{}published/L{parent_level}/N{parent_idx}", self.block_prefix)
     }
 
     /// Advance readiness for the parent of a just-committed `child` and, if the
@@ -266,7 +315,7 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         let needed = real_children_for_node(leaf_count, radix, parent_level, parent_idx);
 
         // Record this child's completion (idempotent via the CAS marker name).
-        let marker = Self::child_marker_key(parent_level, parent_idx, child_idx);
+        let marker = self.child_marker_key(parent_level, parent_idx, child_idx);
         // A re-commit that somehow reaches here (shouldn't, since only the output
         // CAS winner calls in) is still safe: same marker name => AlreadyExists.
         let _ = self.store.cas_create(&marker, b"1")?;
@@ -274,7 +323,7 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         // Count distinct committed children for the parent.
         let have = self
             .store
-            .count_prefix(&Self::child_marker_prefix(parent_level, parent_idx))?;
+            .count_prefix(&self.child_marker_prefix(parent_level, parent_idx))?;
 
         if have < needed {
             return Ok(GatingOutcome::Recorded { have, needed });
@@ -283,16 +332,19 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         // Parent quota met: publish the parent fold EXACTLY once, guarded by the
         // publish marker. Whichever last-child wins this CAS is the sole
         // publisher.
-        let pub_marker = Self::publish_marker_key(parent_level, parent_idx);
+        let pub_marker = self.publish_marker_key(parent_level, parent_idx);
         match self.store.cas_create(&pub_marker, b"1")? {
             CommitOutcome::Committed => {
+                // (#355) The published parent inherits the child's block
+                // namespace so the whole tree stays in one block's namespace.
                 let fold = WorkDescriptor::tree_node(
                     parent_level,
                     parent_idx,
                     radix,
                     leaf_count,
                     child.tx_per_proof,
-                );
+                )
+                .with_block_ns(self.block_ns.clone());
                 self.publisher.publish(fold.clone())?;
                 Ok(GatingOutcome::PublishedParent(fold))
             }
@@ -348,15 +400,17 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         padded_leaf_count(n)
     }
 
-    /// Marker recording that the interval `[lo, hi]` has committed.
-    fn interval_marker_key(lo: usize, hi: usize) -> String {
-        format!("rgate/committed/{lo}_{hi}")
+    /// Marker recording that the interval `[lo, hi]` has committed. (#355)
+    /// Block-namespaced via `self.block_prefix`.
+    fn interval_marker_key(&self, lo: usize, hi: usize) -> String {
+        format!("{}rgate/committed/{lo}_{hi}", self.block_prefix)
     }
 
     /// Publish-marker guaranteeing the merged parent `[lo, hi]` is published
     /// once. Its value is a lease stamp (millis) for crash-recovery re-drive.
-    fn merge_publish_marker_key(lo: usize, hi: usize) -> String {
-        format!("rgate/published/{lo}_{hi}")
+    /// (#355) Block-namespaced via `self.block_prefix`.
+    fn merge_publish_marker_key(&self, lo: usize, hi: usize) -> String {
+        format!("{}rgate/published/{lo}_{hi}", self.block_prefix)
     }
 
     /// The explicit pairing of a same-height interval `[lo, hi]` (span
@@ -416,7 +470,7 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         // Record THIS interval as committed (idempotent via the marker name).
         let _ = self
             .store
-            .cas_create(&Self::interval_marker_key(lo, hi), b"1")?;
+            .cas_create(&self.interval_marker_key(lo, hi), b"1")?;
 
         // The padded tree spans [0, padded-1]. If this interval already spans it,
         // it is the root — nothing above to merge.
@@ -437,7 +491,7 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         let partner_present = partner_is_padding
             || self
                 .store
-                .exists(&Self::interval_marker_key(plo, phi))?;
+                .exists(&self.interval_marker_key(plo, phi))?;
         if !partner_present {
             return Ok(GatingOutcome::Recorded { have: 1, needed: 2 });
         }
@@ -446,10 +500,11 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
         // merged-interval publish marker (value = lease stamp for Phase-5
         // crash-recovery re-drive). Whichever of the pair wins the CAS is the
         // sole publisher; the other observes AlreadyExists.
-        let pub_marker = Self::merge_publish_marker_key(mlo, mhi);
+        let pub_marker = self.merge_publish_marker_key(mlo, mhi);
         let lease_stamp = Self::now_lease_stamp_ms().to_string();
         match self.store.cas_create(&pub_marker, lease_stamp.as_bytes())? {
             CommitOutcome::Committed => {
+                // (#355) The merged parent inherits this engine's block namespace.
                 let fold = WorkDescriptor::reduction_fold(
                     mlo,
                     mhi,
@@ -457,7 +512,8 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
                     radix,
                     leaf_count,
                     tx_per_proof,
-                );
+                )
+                .with_block_ns(self.block_ns.clone());
                 self.publisher.publish(fold.clone())?;
                 Ok(GatingOutcome::PublishedParent(fold))
             }
@@ -567,12 +623,12 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
                 // as `on_interval_committed`.
                 let left_present = self
                     .store
-                    .exists(&Self::interval_marker_key(lo, hi))?;
+                    .exists(&self.interval_marker_key(lo, hi))?;
                 let partner_present = Self::is_all_padding(plo, leaf_count)
-                    || self.store.exists(&Self::interval_marker_key(plo, phi))?;
+                    || self.store.exists(&self.interval_marker_key(plo, phi))?;
 
                 if left_present && partner_present {
-                    let pub_marker = Self::merge_publish_marker_key(mlo, mhi);
+                    let pub_marker = self.merge_publish_marker_key(mlo, mhi);
                     let existing = self.store.read(&pub_marker)?;
                     let should_redrive = match &existing {
                         // Owner crashed before winning the publish CAS: re-drive.
@@ -618,7 +674,10 @@ impl<'a, S: CasStore, P: Publisher> GatingEngine<'a, S, P> {
                                 radix,
                                 leaf_count,
                                 tx_per_proof,
-                            );
+                            )
+                            // (#355) A re-driven fold keeps its block namespace so
+                            // recovery re-publishes into the right block's tree.
+                            .with_block_ns(self.block_ns.clone());
                             // Flag the re-driven descriptor so the completion event
                             // can surface `redriven_after_lease_expiry` (#321 P5 /
                             // #328 telemetry).
@@ -859,6 +918,132 @@ mod tests {
             other => panic!("expected PublishedParent, got {other:?}"),
         }
         assert_eq!(pubr.published().len(), 1);
+    }
+
+    // ── #355 per-block gating namespace isolation ──
+
+    /// (#355) A block-namespaced engine writes ALL its markers under the
+    /// `<block_ns>/` prefix, so a SHARED store hosts two replays of the same block
+    /// without their position-keyed markers colliding. Two engines
+    /// (`new_for_block("block_0")`, `new_for_block("block_1")`) each commit leaf 0
+    /// of an N=4 tree: WITHOUT namespacing these would share
+    /// `gate/L1/N0/child_0` and the second would look like a re-commit; WITH it,
+    /// each block records its OWN child and neither publishes yet (each still
+    /// needs its own leaf 1).
+    #[test]
+    fn gating_markers_are_block_namespaced() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+
+        let l0 = WorkDescriptor::leaf(0, 2, 4, 1);
+
+        let e0 = GatingEngine::new_for_block(&store, &pubr, "block_0");
+        let e1 = GatingEngine::new_for_block(&store, &pubr, "block_1");
+
+        // block_0 records its leaf 0 under block_0/gate/...
+        assert_eq!(
+            e0.on_child_committed(&l0, CommitOutcome::Committed).unwrap(),
+            GatingOutcome::Recorded { have: 1, needed: 2 }
+        );
+        // block_1 records ITS leaf 0 under block_1/gate/... — independent count,
+        // NOT a re-commit of block_0's child (the pre-#355 collision).
+        assert_eq!(
+            e1.on_child_committed(&l0, CommitOutcome::Committed).unwrap(),
+            GatingOutcome::Recorded { have: 1, needed: 2 },
+            "block_1's leaf 0 must be counted independently, not deduped"
+        );
+
+        // The markers live under DISTINCT namespaced keys; neither gate is full.
+        assert_eq!(store.count_prefix("block_0/gate/L1/N0/child_").unwrap(), 1);
+        assert_eq!(store.count_prefix("block_1/gate/L1/N0/child_").unwrap(), 1);
+        // The un-namespaced BASE gate is EMPTY — nothing leaked to the base
+        // (`count_prefix` is a raw prefix match, so the base prefix "gate/..."
+        // matches NEITHER "block_0/gate/..." nor "block_1/gate/..."). This is the
+        // proof of isolation: pre-#355 both blocks would have written the SAME
+        // base key "gate/L1/N0/child_0" and collided.
+        assert_eq!(store.count_prefix("gate/L1/N0/child_").unwrap(), 0,
+            "base gate prefix must match NOTHING — both blocks are namespaced");
+        assert!(pubr.published().is_empty(), "neither block ready after one leaf");
+    }
+
+    /// (#355) A block-namespaced engine publishes a fold that INHERITS its block
+    /// namespace, so the whole tree stays inside one block. Complete both leaves
+    /// of block_0's N=4 level-1 node ⇒ the published fold carries
+    /// `block_ns == "block_0"`.
+    #[test]
+    fn gating_published_fold_inherits_block_ns() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let engine = GatingEngine::new_for_block(&store, &pubr, "block_0");
+
+        let l0 = WorkDescriptor::leaf(0, 2, 4, 1);
+        let l1 = WorkDescriptor::leaf(1, 2, 4, 1);
+        engine.on_child_committed(&l0, CommitOutcome::Committed).unwrap();
+        let o1 = engine.on_child_committed(&l1, CommitOutcome::Committed).unwrap();
+        match o1 {
+            GatingOutcome::PublishedParent(d) => {
+                assert_eq!(d.role, Role::TreeNode);
+                assert_eq!(d.level, 1);
+                assert_eq!(
+                    d.block_ns, "block_0",
+                    "published fold must carry the committing block's namespace"
+                );
+            }
+            other => panic!("expected PublishedParent, got {other:?}"),
+        }
+    }
+
+    /// (#355) BACK-COMPAT: `new_for_block("")` is identical to `new()` — empty
+    /// namespace ⇒ un-prefixed marker keys, byte-for-byte the pre-#355 gate.
+    #[test]
+    fn gating_empty_block_ns_is_backcompat() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let engine = GatingEngine::new_for_block(&store, &pubr, "");
+        let l0 = WorkDescriptor::leaf(0, 2, 4, 1);
+        engine.on_child_committed(&l0, CommitOutcome::Committed).unwrap();
+        // Marker lands at the BASE (un-prefixed) key, exactly as `new()` would.
+        assert_eq!(store.count_prefix("gate/L1/N0/child_").unwrap(), 1);
+        assert_eq!(store.count_prefix("block_").unwrap(), 0, "no namespace prefix");
+    }
+
+    /// (#355) Reduction-path parity: a block-namespaced interval gate isolates
+    /// two replays' `rgate/committed/*` markers and the merged fold inherits the
+    /// namespace. N=2 ⇒ leaf intervals [0,0] and [1,1] merge into root [0,1].
+    #[test]
+    fn reduction_gating_is_block_namespaced() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+        let e0 = GatingEngine::new_for_block(&store, &pubr, "block_0");
+
+        // Commit both leaf intervals for block_0 ⇒ merged fold [0,1] publishes.
+        e0.on_interval_committed(0, 0, 0, 2, 2, 1, CommitOutcome::Committed)
+            .unwrap();
+        let out = e0
+            .on_interval_committed(1, 1, 0, 2, 2, 1, CommitOutcome::Committed)
+            .unwrap();
+        match out {
+            GatingOutcome::PublishedParent(d) => {
+                assert_eq!(d.role, Role::ReductionFold);
+                assert_eq!((d.lo, d.hi), (0, 1));
+                assert_eq!(d.block_ns, "block_0", "merged fold inherits namespace");
+            }
+            // N=2 padded=2 ⇒ [0,1] is the root; some paths report RootReached on
+            // the second commit. Either way the markers must be namespaced.
+            other => panic!("expected PublishedParent for [0,1], got {other:?}"),
+        }
+        // block_0's interval markers are namespaced; the BASE is untouched (raw
+        // prefix "rgate/committed/" matches NEITHER namespaced key).
+        assert_eq!(store.count_prefix("block_0/rgate/committed/").unwrap(), 2);
+        assert_eq!(store.count_prefix("rgate/committed/").unwrap(), 0,
+            "base interval prefix must match NOTHING — block_0 is namespaced");
+
+        // A second block over the SAME store gates independently.
+        let e1 = GatingEngine::new_for_block(&store, &pubr, "block_1");
+        e1.on_interval_committed(0, 0, 0, 2, 2, 1, CommitOutcome::Committed)
+            .unwrap();
+        assert_eq!(store.count_prefix("block_1/rgate/committed/").unwrap(), 1,
+            "block_1's interval marker is isolated under its own namespace");
     }
 
     #[test]
@@ -1219,10 +1404,13 @@ mod tests {
     fn merge_published_exactly_once_under_concurrency() {
         let store = InMemoryCasStore::new();
         let pubr = RecordingPublisher::new();
-        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
+        // (#355) Marker-key builders are now instance methods (block-namespaced).
+        // Use an un-namespaced engine to derive the SAME base keys the racing
+        // drivers below (also un-namespaced) will use.
+        let keygen = GatingEngine::new(&store, &pubr);
         // Pre-record BOTH members so both drivers see the partner and race.
-        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
-        store.cas_create(&G::interval_marker_key(1, 1), b"1").unwrap();
+        store.cas_create(&keygen.interval_marker_key(0, 0), b"1").unwrap();
+        store.cas_create(&keygen.interval_marker_key(1, 1), b"1").unwrap();
 
         let published = Arc::new(AtomicUsize::new(0));
         let mut handles = Vec::new();
@@ -1286,7 +1474,6 @@ mod tests {
     /// recovery path.
     #[test]
     fn redrive_stale_merges_republishes_lost_merge_exactly_once() {
-        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
         let store = InMemoryCasStore::new();
         let pubr = RecordingPublisher::new();
         let eng = GatingEngine::new(&store, &pubr);
@@ -1295,8 +1482,8 @@ mod tests {
         // [1,1] committed, but the merged [0,1] fold was NEVER published (its
         // publish marker rgate/published/0_1 is ABSENT). We create ONLY the two
         // committed markers — not the publish marker — so the seam is "stuck".
-        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
-        store.cas_create(&G::interval_marker_key(1, 1), b"1").unwrap();
+        store.cas_create(&eng.interval_marker_key(0, 0), b"1").unwrap();
+        store.cas_create(&eng.interval_marker_key(1, 1), b"1").unwrap();
         assert!(
             pubr.published().is_empty(),
             "no merge published yet (seam is stuck)"
@@ -1330,17 +1517,16 @@ mod tests {
     /// so a subsequent pass does not re-drive again.
     #[test]
     fn redrive_stale_merges_republishes_on_expired_lease() {
-        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
         let store = InMemoryCasStore::new();
         let pubr = RecordingPublisher::new();
         let eng = GatingEngine::new(&store, &pubr);
 
-        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
-        store.cas_create(&G::interval_marker_key(1, 1), b"1").unwrap();
+        store.cas_create(&eng.interval_marker_key(0, 0), b"1").unwrap();
+        store.cas_create(&eng.interval_marker_key(1, 1), b"1").unwrap();
         // Pre-create the publish marker with an ANCIENT lease stamp (millis=1),
         // i.e. the owner claimed it long ago then crashed before enqueue.
         store
-            .cas_create(&G::merge_publish_marker_key(0, 1), b"1")
+            .cas_create(&eng.merge_publish_marker_key(0, 1), b"1")
             .unwrap();
 
         // With a tiny timeout, the stamp (1ms) is far older than now-timeout, so
@@ -1382,12 +1568,11 @@ mod tests {
     /// committed) — there is no merge to re-drive yet.
     #[test]
     fn redrive_stale_merges_skips_incomplete_pairs() {
-        type G<'a> = GatingEngine<'a, InMemoryCasStore, RecordingPublisher>;
         let store = InMemoryCasStore::new();
         let pubr = RecordingPublisher::new();
         let eng = GatingEngine::new(&store, &pubr);
         // Only the left member committed; the partner [1,1] is absent.
-        store.cas_create(&G::interval_marker_key(0, 0), b"1").unwrap();
+        store.cas_create(&eng.interval_marker_key(0, 0), b"1").unwrap();
         let n = eng.redrive_stale_merges(2, 2, 1, 60_000).unwrap();
         assert_eq!(n, 0, "incomplete pair must not be re-driven");
         assert!(pubr.published().is_empty());

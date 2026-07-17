@@ -146,6 +146,15 @@ _REDRIVEN_RE = re.compile(r"redriven_after_lease_expiry=(?P<v>true|false)")
 # the coordinator line. Absent in pre-#349 logs -> None (honest "not present").
 _PULL_TS_MS_RE = re.compile(r"pull_ts_ms=(?P<v>\d+)")
 _SCHEDULING_CLASS_RE = re.compile(r"scheduling_class=(?P<v>[\w-]+)")
+# #355: the per-replay BLOCK NAMESPACE this event's descriptor belongs to
+# (`block_3`, or the literal `<base>` for a single-block / un-namespaced run).
+# Emitted on the coordinator line since #355. Absent in pre-#355 logs -> None
+# (honest "not present"). Used to COUNT distinct blocks actually observed and
+# cross-check that against the run_config `blocks` divisor (anti-fabrication) and
+# to attribute cold replay-0 vs warm later replays. The value is `block_<n>` or
+# `<base>`; the angle brackets are matched explicitly so a `<base>` sentinel is
+# captured verbatim and distinguished from a real `block_N` namespace.
+_BLOCK_NS_RE = re.compile(r"block_ns=(?P<v>(?:block_\d+|<base>|[\w-]+))")
 
 # Ancillary markers.
 _ROOT_HEX_RE = re.compile(r"^([^\s]+)\s+.*ROOT REACHED!")
@@ -213,6 +222,8 @@ def parse_event_line(line):
       # ---- #349 leaf/fold overlap fields (None if absent in pre-#349 logs) ----
       "pull_ts_ms": _opt_int(_PULL_TS_MS_RE, line),
       "scheduling_class": _opt_str(_SCHEDULING_CLASS_RE, line),
+      # ---- #355 per-replay block namespace (None if absent in pre-#355 logs) ----
+      "block_ns": _opt_str(_BLOCK_NS_RE, line),
   }
 
 
@@ -624,26 +635,73 @@ def compute_throughput(events, run_config=None, target_bps=None,
 
   measured = (len(leaves) + len(folds)) > 0
 
-  # ---- blocks: run_config is authoritative; else infer from distinct block
-  # namespaces if the coordinator stamped them; else default 1 (single block). --
-  blocks = None
+  # ---- blocks CONFIG divisor: run_config is authoritative; else infer from
+  # distinct block namespaces if the coordinator stamped them; else default 1. --
+  blocks_config = None
   blocks_source = None
   if run_config and run_config.get("blocks"):
-    blocks = int(run_config["blocks"])
+    blocks_config = int(run_config["blocks"])
     blocks_source = "run_config.json"
-  if blocks is None:
-    # Try to infer from distinct block numbers on events, if ever stamped.
-    distinct_blocks = {
+  if blocks_config is None:
+    # Try to infer from distinct legacy block_number on events, if ever stamped.
+    distinct_legacy = {
         e["block_number"] for e in events if e.get("block_number") is not None
     }
-    if distinct_blocks:
-      blocks = len(distinct_blocks)
+    if distinct_legacy:
+      blocks_config = len(distinct_legacy)
       blocks_source = "inferred from distinct block_number on events"
-  if blocks is None:
-    blocks = 1
+  if blocks_config is None:
+    blocks_config = 1
     blocks_source = "default 1 (no run_config.json, no block_number in log)"
 
-  core_sec_per_block = (total_cpu_core_sec / blocks) if blocks > 0 else None
+  # ---- #355 divisor-vs-observed GUARD (anti-fabrication, same principle as #354).
+  # Count the DISTINCT per-replay block namespaces ACTUALLY observed on events
+  # (`block_ns=block_N` stamped by the coordinator since #355). If the run genuinely
+  # proved N distinct blocks, we see N distinct `block_N/` namespaces; if the
+  # multi-block replay silently COLLAPSED (the A2/A3 collision bug this fix closes:
+  # identical keys dedup under the GCS CAS → one tree), we see FEWER. We must NEVER
+  # divide a 1-tree cost by a phantom `blocks_config` and report a bogus
+  # per-block cost + undersized fleet — so when the observed distinct blocks are
+  # FEWER than the config divisor, we REFUSE to divide and emit null + a note.
+  #
+  # `<base>` is the un-namespaced single-block sentinel; a run that emitted only
+  # `<base>` (or nothing) is a legitimate 1-block run and observes 1 block.
+  observed_block_namespaces = {
+      e["block_ns"] for e in events if e.get("block_ns") is not None
+  }
+  block_ns_field_present = len(observed_block_namespaces) > 0
+  if block_ns_field_present:
+    distinct_blocks_observed = len(observed_block_namespaces)
+  else:
+    # Pre-#355 logs carry no block_ns field. We cannot OBSERVE the block count,
+    # so we fall back to the config divisor WITHOUT a false disagreement (honest:
+    # "not observable", not "collapsed"). This keeps old logs dividing exactly as
+    # before while new logs get the real guard.
+    distinct_blocks_observed = None
+
+  divisor_guard_note = None
+  if distinct_blocks_observed is not None and distinct_blocks_observed < blocks_config:
+    # The collapse guard fires: refuse to divide by phantom blocks.
+    core_sec_per_block = None
+    blocks = distinct_blocks_observed
+    divisor_guard_note = (
+        f"REFUSING to divide by phantom blocks: observed {distinct_blocks_observed} "
+        f"distinct block namespace(s) on events but run_config claimed "
+        f"{blocks_config} — the multi-block replay likely COLLAPSED under the GCS "
+        f"CAS (the #355 collision this build fixes). core_sec_per_block is null "
+        f"until the observed distinct blocks match the configured divisor."
+    )
+  else:
+    # Trust the config divisor (observed matches, or not observable in old logs).
+    blocks = blocks_config
+    core_sec_per_block = (
+        (total_cpu_core_sec / blocks) if blocks > 0 else None
+    )
+
+  # The number of blocks actually used as the divisor for the "_all" metric.
+  blocks_divisor_used = distinct_blocks_observed if (
+      distinct_blocks_observed is not None
+  ) else blocks_config
 
   # ---- Self-describing knobs. run_config authoritative, else echo from events. -
   def _first_present(key):
@@ -674,6 +732,63 @@ def compute_throughput(events, run_config=None, target_bps=None,
   )
   cold_fold_cpu_core_sec = cold_fold_ms / 1000.0
   warm_fold_cpu_core_sec = warm_fold_ms / 1000.0
+
+  # ---- #355 COLD-START vs WARM STEADY-STATE per-block split (linearity fix). ----
+  # In a replay run, replay 0 is disproportionately COLD: its tasks are the
+  # FIRST-TASK-ON-POD ones that paid the circuit build (~8s leaves) while later
+  # replays run WARM (~4.3s leaves). Blindly averaging blends a one-time startup
+  # transient with steady state, making per-block cost artificially FALL as BLOCKS
+  # rises — it LOOKS like amortization but is not. So we compute BOTH:
+  #   * core_sec_per_block_all  = total (incl. cold) / observed blocks
+  #   * core_sec_per_block_warm = warm-only (excl. first-task-on-pod) / observed
+  # and surface the cold overhead separately as cold_start_core_sec. WARM is the
+  # steady-state number to size fleets from; ALL is the full-including-cold number.
+  #
+  # The cold/warm partition uses the SAME is_first_task_on_pod flag for BOTH leaves
+  # and folds (a pod's first task, whatever its role, is the one that built the
+  # circuit). Absent flag -> we cannot split -> warm metrics are null + a note
+  # (anti-fabrication: never guess which tasks were cold).
+  first_task_known_any = any(
+      e.get("is_first_task_on_pod") is not None for e in (leaves + folds)
+  )
+  cold_leaf_ms = sum(
+      _prove(e) for e in leaves if e.get("is_first_task_on_pod") is True
+  )
+  warm_leaf_ms = sum(
+      _prove(e) for e in leaves if e.get("is_first_task_on_pod") is False
+  )
+  # Total cold-start overhead (leaf + fold first-task-on-pod prove cost). This is
+  # the one-time transient a warm fleet does not repeatedly pay.
+  cold_start_core_sec = (cold_leaf_ms + cold_fold_ms) / 1000.0
+  # Warm steady-state CPU (everything NOT first-task-on-pod).
+  warm_total_core_sec = (warm_leaf_ms + warm_fold_ms) / 1000.0
+
+  # Per-block ALL (incl. cold) and WARM (excl. cold), divided by OBSERVED blocks
+  # so the guard above governs (never divide by a phantom config count). Both are
+  # null when unmeasured / unsplittable — never fabricated.
+  _div = blocks_divisor_used if (blocks_divisor_used and blocks_divisor_used > 0) else None
+  if divisor_guard_note is not None or _div is None:
+    core_sec_per_block_all = None
+  else:
+    core_sec_per_block_all = total_cpu_core_sec / _div
+  if not first_task_known_any or divisor_guard_note is not None or _div is None:
+    core_sec_per_block_warm = None
+    warm_note = (
+        "warm per-block is null: is_first_task_on_pod flag absent (cannot isolate "
+        "the cold transient) — anti-fabrication, never guessed"
+        if not first_task_known_any
+        else "warm per-block is null: divisor guard active (see divisor_guard_note)"
+    )
+  else:
+    core_sec_per_block_warm = warm_total_core_sec / _div
+    warm_note = (
+        "WARM = steady-state per-block cost (excludes replay-0 first-task-on-pod "
+        "cold build); size fleets from THIS. ALL includes the one-time cold start. "
+        "NOTE: multi-block REPLAY proves the SAME block N times, so prestate is "
+        "100% warm across replays BY DESIGN — this is a warm best-case FLOOR; "
+        "production with DISTINCT blocks carries extra cold-prestate variance, so "
+        "size with the #346 1.2-1.4x headroom."
+    )
 
   # ---- Resolve the REAL machine type + DERIVE vcpu_per_node from it. ----
   # Precedence: run_config's self-describing machine_type (survives config drift)
@@ -749,10 +864,21 @@ def compute_throughput(events, run_config=None, target_bps=None,
       "leaf_count": leaf_count,
       "blocks": blocks,
       "blocks_source": blocks_source,
+      # #355 provenance: config divisor vs distinct blocks ACTUALLY observed.
+      "blocks_config": blocks_config,
+      "distinct_blocks_observed": distinct_blocks_observed,
+      "block_ns_field_present": block_ns_field_present,
+      "divisor_guard_note": divisor_guard_note,
       "leaf_cpu_core_sec": leaf_cpu_core_sec,
       "fold_cpu_core_sec": fold_cpu_core_sec,
       "total_cpu_core_sec": total_cpu_core_sec,
       "core_sec_per_block": core_sec_per_block,
+      # #355 cold-start vs warm steady-state per-block split (linearity fix).
+      "core_sec_per_block_all": core_sec_per_block_all,
+      "core_sec_per_block_warm": core_sec_per_block_warm,
+      "cold_start_core_sec": cold_start_core_sec,
+      "warm_total_core_sec": warm_total_core_sec,
+      "warm_note": warm_note,
       "cold_fold_cpu_core_sec": cold_fold_cpu_core_sec,
       "warm_fold_cpu_core_sec": warm_fold_cpu_core_sec,
       "is_first_task_field_present": first_task_known,
@@ -771,6 +897,11 @@ def compute_throughput(events, run_config=None, target_bps=None,
               "perfect bin-packing of prove work onto vCPUs",
               "no scheduler/queueing/GCS overhead in the core-sec accounting",
               "core_sec_per_block itself is REAL (summed measured prove_ms)",
+              # #355: this projection uses core_sec_per_block (all, incl. cold). For
+              # a STEADY-STATE fleet the warm number (core_sec_per_block_warm) is the
+              # right basis — it excludes the one-time replay-0 cold-build transient.
+              # Size steady-state fleets from core_sec_per_block_warm and add the
+              # #346 1.2-1.4x headroom for distinct-block cold-prestate variance.
           ],
           "by_target_bps": fleet_projection,
       },
@@ -787,13 +918,37 @@ def print_throughput(tp):
       f"C(chunk_size)={tp['chunk_size_C']} leaf_count={tp['leaf_count']} "
       f"blocks={tp['blocks']} ({tp['blocks_source']})"
   )
+  # #355 divisor provenance: config vs observed distinct blocks.
+  print(
+      f"  blocks_config={tp['blocks_config']} "
+      f"distinct_blocks_observed={tp['distinct_blocks_observed']} "
+      f"(block_ns field present={tp['block_ns_field_present']})"
+  )
+  if tp.get("divisor_guard_note"):
+    print(f"  [GUARD] {tp['divisor_guard_note']}")
   print(f"prove source: {tp['prove_source_field']}")
   print(
       f"  leaf_cpu={tp['leaf_cpu_core_sec']:.3f} core-sec  "
       f"fold_cpu={tp['fold_cpu_core_sec']:.3f} core-sec  "
       f"total_cpu={tp['total_cpu_core_sec']:.3f} core-sec"
   )
-  print(f"  >>> core_sec_per_block = {tp['core_sec_per_block']:.3f} <<<")
+  # #355 the divisor guard may set core_sec_per_block to null (refuse to divide
+  # by phantom blocks). Print honestly rather than crash on a None format.
+  if tp["core_sec_per_block"] is None:
+    print("  >>> core_sec_per_block = null (divisor guard active — see [GUARD]) <<<")
+  else:
+    print(f"  >>> core_sec_per_block = {tp['core_sec_per_block']:.3f} <<<")
+  # #355 cold-start vs warm steady-state per-block split.
+  _all = tp.get("core_sec_per_block_all")
+  _warm = tp.get("core_sec_per_block_warm")
+  print(
+      "  core_sec_per_block_all="
+      + ("null" if _all is None else f"{_all:.3f}")
+      + "  core_sec_per_block_warm="
+      + ("null" if _warm is None else f"{_warm:.3f}")
+      + f"  cold_start_core_sec={tp['cold_start_core_sec']:.3f}"
+  )
+  print(f"  [warm/all] {tp['warm_note']}")
   print(
       f"  fold CPU cold(first-task-on-pod)={tp['cold_fold_cpu_core_sec']:.3f} "
       f"warm(cached)={tp['warm_fold_cpu_core_sec']:.3f} core-sec "
