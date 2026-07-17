@@ -679,26 +679,55 @@ def compute_throughput(events, run_config=None, target_bps=None,
     # before while new logs get the real guard.
     distinct_blocks_observed = None
 
+  # #357 anti-fabrication invariant: we divide the total cost by the config block
+  # count ONLY when that count is CORROBORATED by the blocks actually OBSERVED on
+  # events. Two failure modes both fabricate a plausible-but-wrong per-block cost:
+  #   (A) COLLAPSE   — observed < config: the multi-block replay collapsed (the
+  #                    #355/#357 dedup bug); dividing an M-tree cost by config N.
+  #   (B) UNKNOWABLE — observed is None (no block_ns on events) while config > 1:
+  #                    we CANNOT confirm N blocks were proved, so dividing by N is
+  #                    an un-corroborated guess (this was the silent JSON-path
+  #                    fabrication: None < N never fired the guard).
+  # In BOTH cases we REFUSE to divide → core_sec_per_block=null + a note. We divide
+  # only when observed >= config, OR when config == 1 (a single-block run's divide-
+  # by-1 is a no-op that changes nothing and preserves byte-for-byte back-compat).
   divisor_guard_note = None
   if distinct_blocks_observed is not None and distinct_blocks_observed < blocks_config:
-    # The collapse guard fires: refuse to divide by phantom blocks.
+    # (A) COLLAPSE guard fires: refuse to divide by phantom blocks.
     core_sec_per_block = None
     blocks = distinct_blocks_observed
     divisor_guard_note = (
         f"REFUSING to divide by phantom blocks: observed {distinct_blocks_observed} "
         f"distinct block namespace(s) on events but run_config claimed "
         f"{blocks_config} — the multi-block replay likely COLLAPSED under the GCS "
-        f"CAS (the #355 collision this build fixes). core_sec_per_block is null "
+        f"CAS (the #355/#357 collision this build fixes). core_sec_per_block is null "
         f"until the observed distinct blocks match the configured divisor."
     )
+  elif distinct_blocks_observed is None and blocks_config > 1:
+    # (B) UNKNOWABLE guard fires: cannot verify the block count, so refuse to
+    # divide by an un-corroborated config divisor (the #357 anti-fabrication fix).
+    core_sec_per_block = None
+    blocks = blocks_config
+    divisor_guard_note = (
+        f"REFUSING to divide by an un-corroborated block count: "
+        f"distinct_blocks_observed could not be determined from events "
+        f"(no block_ns field present) but run_config claimed {blocks_config} "
+        f"blocks. Refusing to divide by config blocks to avoid fabricating a "
+        f"per-block cost; core_sec_per_block is null until the block count can be "
+        f"observed from events."
+    )
   else:
-    # Trust the config divisor (observed matches, or not observable in old logs).
+    # Trust the config divisor: observed corroborates it, or it is a single-block
+    # (blocks_config == 1) run whose divide-by-1 is a behavior-preserving no-op.
     blocks = blocks_config
     core_sec_per_block = (
         (total_cpu_core_sec / blocks) if blocks > 0 else None
     )
 
-  # The number of blocks actually used as the divisor for the "_all" metric.
+  # The number of blocks actually used as the divisor for the "_all"/"_warm"
+  # metrics. When the guard refused (note set), these per-block metrics are forced
+  # null downstream regardless, so this only matters on the trusted path: use the
+  # observed count when known, else the (corroborated or single-block) config.
   blocks_divisor_used = distinct_blocks_observed if (
       distinct_blocks_observed is not None
   ) else blocks_config
@@ -1052,6 +1081,22 @@ def prover_event_json_to_event(obj):
   if isinstance(fold_strategy, str):
     fold_strategy = fold_strategy.lower()
 
+  # #355/#357: the per-replay block namespace (`block_N`) the coordinator stamps
+  # on the descriptor. This is the field that makes N distinct replays DISTINCT;
+  # without it every replay's leaf_0 (role=leaf,L0,N0,lo0,hi0) shares an identical
+  # logical key and dedupe_events_by_logical_key() collapses all N blocks into one
+  # (silently discarding N-1 blocks) AND the divisor guard cannot observe the real
+  # block count. Normalize empty/`<base>` to None so single-block runs (no real
+  # namespace) key + behave EXACTLY as before (`_opt_str` None convention, matching
+  # the coordinator-log parser). The raw JSON always carries it under `descriptor`.
+  block_ns = desc.get("block_ns")
+  if isinstance(block_ns, str):
+    block_ns = block_ns.strip()
+    if not block_ns or block_ns == "<base>":
+      block_ns = None
+  elif block_ns is not None:
+    block_ns = None
+
   return {
       # No wall-clock timestamp travels in the ProverEvent payload (the pull_ts_ms
       # field is a dispatch timestamp, not an emit timestamp); None is honest.
@@ -1085,11 +1130,22 @@ def prover_event_json_to_event(obj):
       # [0,1] and [2,3] both have span 2 but are DIFFERENT logical tasks).
       "lo": desc.get("lo"),
       "hi": desc.get("hi"),
+      # #355/#357: per-replay block namespace, mirroring the coordinator-log
+      # parser's `block_ns` field (None when absent/`<base>`). Feeds the divisor
+      # guard's distinct-blocks-observed accounting AND the logical key below.
+      "block_ns": block_ns,
       # #347 dedup helper: the LOGICAL key (role+level+idx+interval) shared by all
       # attempts (redrives) of the same task. Not emitted into bench_summary; used
       # only to dedupe + count redrives below.
+      #
+      # #357: block_ns is PREPENDED so identical-geometry tasks in DIFFERENT
+      # replays (each replay's leaf_0 is role=leaf,L0,N0,lo0,hi0) are NOT collapsed
+      # into one by dedupe_events_by_logical_key(). A None/empty block_ns (a genuine
+      # single-block run) yields the leading `|` prefix, which is byte-for-byte the
+      # SAME grouping as before for single-block runs (all events share the empty
+      # namespace, so their relative keys are unchanged).
       "_logical_key": (
-          f"{role}|L{desc.get('level', 0)}|N{idx}"
+          f"{block_ns or ''}|{role}|L{desc.get('level', 0)}|N{idx}"
           f"|lo{desc.get('lo', 0)}|hi{desc.get('hi', 0)}"
       ),
   }

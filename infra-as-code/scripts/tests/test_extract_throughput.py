@@ -69,15 +69,24 @@ def test_throughput_core_sec_per_block_default_blocks():
   assert abs(tp["core_sec_per_block"] - 20.0) < 1e-9
 
 
-def test_throughput_blocks_from_run_config():
-  # run_config authoritative for blocks: total 20.0 cs / 4 blocks = 5.0 cs/block.
+def test_throughput_blocks_from_run_config_refuses_uncorroborated_divide():
+  # #357: run_config claims blocks=4 but the single-block throughput fixture has
+  # NO block_ns, so distinct_blocks_observed is UNKNOWN. The extractor MUST NOT
+  # divide 20.0 cs by a phantom 4 (the old, fabricating behavior that emitted a
+  # plausible-but-wrong 5.0 cs/block). Anti-fabrication: refuse + null + note.
   rc = {"blocks": 4, "txs_per_chunk": 4, "leaf_count_per_block": 4}
   m = _parse("coordinator_throughput.log", run_config=rc)
   tp = m["throughput"]
-  assert tp["blocks"] == 4
+  assert tp["blocks_config"] == 4
   assert tp["blocks_source"] == "run_config.json"
-  assert abs(tp["core_sec_per_block"] - 5.0) < 1e-9
-  # C / leaf_count echoed from run_config (self-describing row).
+  assert tp["distinct_blocks_observed"] is None, "no block_ns => unobservable"
+  assert tp["block_ns_field_present"] is False
+  assert tp["core_sec_per_block"] is None, "must REFUSE un-corroborated divide"
+  assert tp["core_sec_per_block_all"] is None
+  assert tp["divisor_guard_note"] is not None
+  note = tp["divisor_guard_note"].lower()
+  assert "un-corroborated" in note or "could not be determined" in note
+  # C / leaf_count still echoed from run_config (self-describing row).
   assert tp["chunk_size_C"] == 4
   assert tp["leaf_count"] == 4
 
