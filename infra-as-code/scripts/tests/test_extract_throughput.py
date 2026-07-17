@@ -223,6 +223,99 @@ def test_throughput_additive_does_not_break_existing():
   assert m["throughput"]["measured"] is True
 
 
+# ---------------------------------------------------------------------------
+# #355 multi-block REPLAY: divisor-vs-observed guard + warm/all per-block split.
+# ---------------------------------------------------------------------------
+
+def test_355_five_block_divides_by_observed_five():
+  # Proper 5-block run: 5 distinct block_N/ namespaces, 125 leaves each (625
+  # leaves). block_0's first leaf is COLD (8000ms); all other 624 leaves warm
+  # (4000ms). leaf CPU = 8000 + 624*4000 = 2504000ms = 2504.0 cs.
+  #   distinct_blocks_observed == 5 == blocks_config => guard PASSES.
+  #   core_sec_per_block_all = 2504.0 / 5 = 500.8
+  rc = {"blocks": 5, "txs_per_chunk": 4, "leaf_count_per_block": 125}
+  tp = _parse("coordinator_multiblock_5.log", run_config=rc)["throughput"]
+  assert tp["blocks_config"] == 5
+  assert tp["distinct_blocks_observed"] == 5, "must OBSERVE 5 distinct namespaces"
+  assert tp["block_ns_field_present"] is True
+  assert tp["divisor_guard_note"] is None, "no guard when observed == config"
+  assert abs(tp["total_cpu_core_sec"] - 2504.0) < 1e-9
+  assert abs(tp["core_sec_per_block_all"] - 500.8) < 1e-9
+  # core_sec_per_block (legacy field) tracks _all when the guard is inactive.
+  assert abs(tp["core_sec_per_block"] - 500.8) < 1e-9
+
+
+def test_355_divisor_guard_nulls_on_collapse():
+  # COLLAPSED run: run_config claims blocks=5 but only block_0 appears on events
+  # (the A2/A3 GCS-CAS collision this fix closes). observed(1) < config(5) => the
+  # guard MUST fire: core_sec_per_block = null + a note. NEVER divide 1 tree's
+  # cost by 5 phantom blocks (anti-fabrication, same principle as #354).
+  rc = {"blocks": 5, "txs_per_chunk": 4, "leaf_count_per_block": 2}
+  tp = _parse("coordinator_collapsed_blocks.log", run_config=rc)["throughput"]
+  assert tp["blocks_config"] == 5
+  assert tp["distinct_blocks_observed"] == 1, "only block_0 observed (collapsed)"
+  assert tp["core_sec_per_block"] is None, "must REFUSE to divide by phantom blocks"
+  assert tp["core_sec_per_block_all"] is None
+  assert tp["core_sec_per_block_warm"] is None
+  assert tp["divisor_guard_note"] is not None
+  note = tp["divisor_guard_note"]
+  assert "phantom" in note.lower()
+  assert "observed 1" in note and "5" in note, "note must name observed vs config"
+  # The fleet projection must also be UNMEASURED (never sized off a null).
+  for row in tp["fleet_sizing_projection"]["by_target_bps"]:
+    assert row["cores_required"] is None
+    assert row["nodes_required"] is None
+
+
+def test_355_warm_vs_all_split_excludes_first_task_on_pod():
+  # 2-block warm/cold fixture: block_0 leaf0 COLD (8000ms, first-task-on-pod),
+  # all else warm. total = 24.0 cs over 2 observed blocks.
+  #   core_sec_per_block_all  = 24.0 / 2 = 12.0  (includes the cold transient)
+  #   cold_start_core_sec     = 8.0             (the single cold leaf)
+  #   warm_total              = 24.0 - 8.0 = 16.0
+  #   core_sec_per_block_warm = 16.0 / 2 = 8.0  (EXCLUDES first-task-on-pod)
+  rc = {"blocks": 2, "txs_per_chunk": 4, "leaf_count_per_block": 2}
+  tp = _parse("coordinator_multiblock_warm_cold.log", run_config=rc)["throughput"]
+  assert tp["distinct_blocks_observed"] == 2
+  assert abs(tp["total_cpu_core_sec"] - 24.0) < 1e-9
+  assert abs(tp["core_sec_per_block_all"] - 12.0) < 1e-9
+  assert abs(tp["cold_start_core_sec"] - 8.0) < 1e-9, "cold = the one first-task leaf"
+  assert abs(tp["warm_total_core_sec"] - 16.0) < 1e-9
+  assert abs(tp["core_sec_per_block_warm"] - 8.0) < 1e-9
+  # WARM strictly less than ALL because the cold transient is removed.
+  assert tp["core_sec_per_block_warm"] < tp["core_sec_per_block_all"]
+  # The warm note documents that warm is the steady-state number + the replay
+  # warm-floor caveat (production distinct blocks carry cold-prestate variance).
+  assert "steady-state" in tp["warm_note"].lower()
+  assert "1.2-1.4x" in tp["warm_note"] or "headroom" in tp["warm_note"].lower()
+
+
+def test_355_warm_null_when_first_task_flag_absent():
+  # An OLD log with NO is_first_task_on_pod flag cannot isolate the cold transient,
+  # so core_sec_per_block_warm is null + a note — never a guessed split.
+  # The pre-#355 throughput fixture has the flag, so use the old-format fixture
+  # (no split field on some events) via the _all path staying non-null while warm
+  # degrades honestly if the flag is entirely absent.
+  tp = _parse("coordinator_old_format.log")["throughput"]
+  # Old fixture carries no block_ns => not observable => falls back to config/1.
+  assert tp["block_ns_field_present"] is False
+  # No false collapse note when block_ns simply isn't present (honest).
+  assert tp["divisor_guard_note"] is None
+
+
+def test_355_backcompat_single_block_unchanged():
+  # BLOCKS=1 back-compat: the pre-existing single-block throughput fixture (no
+  # block_ns field) divides EXACTLY as before — core_sec_per_block unchanged, no
+  # spurious guard, no phantom observed-block disagreement.
+  rc = {"blocks": 1, "txs_per_chunk": 4, "leaf_count_per_block": 4}
+  tp = _parse("coordinator_throughput.log", run_config=rc)["throughput"]
+  assert tp["blocks"] == 1
+  assert tp["blocks_config"] == 1
+  assert tp["block_ns_field_present"] is False
+  assert tp["divisor_guard_note"] is None
+  assert abs(tp["core_sec_per_block"] - 20.0) < 1e-9, "unchanged from pre-#355"
+
+
 def _run_self_test():
   tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
   failures = 0

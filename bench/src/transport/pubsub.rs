@@ -197,6 +197,38 @@ impl GcsCasStore {
         }
     }
 
+    /// (#355) Clone this store with an ADDITIONAL block-namespace segment appended
+    /// to its object prefix, e.g. base `runs/foo/stark_proofs/` + `block_3/` ⇒
+    /// `runs/foo/stark_proofs/block_3/`. The clone shares the SAME Arc'd runtime +
+    /// GCS client (cheap — `GcsCasStore` is `#[derive(Clone)]` over Arc handles),
+    /// so a worker can commit/read a pulled descriptor under its block's prefix by
+    /// cloning once per commit with ~zero cost. An EMPTY `block_prefix` returns a
+    /// clone with the base prefix UNCHANGED (BLOCKS=1 back-compat — the committed
+    /// keys are byte-for-byte identical to pre-#355). This is the pubsub analogue
+    /// of `LocalTransport`'s per-replay `store_dir/block_N/` subdir.
+    fn with_block_prefix(&self, block_prefix: &str) -> Self {
+        if block_prefix.is_empty() {
+            return self.clone();
+        }
+        let object_prefix = if self.object_prefix.is_empty() {
+            block_prefix.to_string()
+        } else {
+            format!("{}{}", self.object_prefix, block_prefix)
+        };
+        Self {
+            rt: self.rt.clone(),
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            object_prefix,
+        }
+    }
+
+    /// (#355) The base object prefix this store commits under (for tests /
+    /// introspection).
+    pub fn object_prefix(&self) -> &str {
+        &self.object_prefix
+    }
+
     /// (#347) The GCS prefix of the durable per-pod telemetry directory: a
     /// SIBLING of the `stark_proofs/` dir the pod writes proofs under. The proof
     /// `object_prefix` is always `<run-prefix>/stark_proofs/` (see
@@ -249,6 +281,21 @@ impl GcsCasStore {
             Ok(_) => Ok(object),
             Err(e) => Err(CasError(format!("gcs event upload error: {e}"))),
         }
+    }
+}
+
+/// (#355) The slash-terminated GCS-object-prefix segment for a raw block
+/// namespace: `""` for an unnamespaced (BLOCKS=1) descriptor, else
+/// `"<block_ns>/"` (e.g. `"block_3/"`). Kept as a free fn so both the trait impl
+/// (`output_exists_in_block`/`read_output_in_block`) and `commit_and_gate` derive
+/// the SAME segment from a descriptor's `block_ns`.
+fn block_ns_prefix(block_ns: &str) -> String {
+    if block_ns.is_empty() {
+        String::new()
+    } else if block_ns.ends_with('/') {
+        block_ns.to_string()
+    } else {
+        format!("{block_ns}/")
     }
 }
 
@@ -694,6 +741,28 @@ impl WorkTransport for PubSubGcsTransport {
         self.gcs.read(key).ok().flatten()
     }
 
+    fn output_exists_in_block(&self, block_ns: &str, key: &str) -> bool {
+        // (#355) Check the key under the block's GCS object-prefix namespace, so
+        // the dispatch loop can wait for each of the N per-block roots
+        // (`block_0/{root}` … `block_{N-1}/{root}`). Empty `block_ns` ⇒ base prefix.
+        let prefix = block_ns_prefix(block_ns);
+        self.gcs
+            .with_block_prefix(&prefix)
+            .exists(key)
+            .unwrap_or(false)
+    }
+
+    fn read_output_in_block(&self, block_ns: &str, key: &str) -> Option<Vec<u8>> {
+        // (#355) Read the key under the block's namespace so each block's root
+        // proof is harvested from the right prefix.
+        let prefix = block_ns_prefix(block_ns);
+        self.gcs
+            .with_block_prefix(&prefix)
+            .read(key)
+            .ok()
+            .flatten()
+    }
+
     /// Commit a child's output via GCS-native CAS **and** advance readiness
     /// gating, publishing the parent fold exactly once when the parent's child
     /// quota is met. The production analogue of `LocalTransport`'s
@@ -708,8 +777,18 @@ impl WorkTransport for PubSubGcsTransport {
         total_time_ms: u64,
         telemetry: &TaskTelemetry,
     ) -> CommitOutcome {
+        // (#355) Commit under the DESCRIPTOR'S block namespace, not the
+        // transport's fixed base prefix. A worker pulls block_r's descriptor from
+        // the SHARED work topic and must commit `block_r/leaf_i.proof` so replays
+        // of the same block don't collide under the GCS `ifGenerationMatch=0` CAS.
+        // Empty `block_ns` ⇒ the base store (BLOCKS=1 byte-for-byte unchanged).
+        let block_store = self.gcs.with_block_prefix(&block_ns_prefix(&descriptor.block_ns));
         let gcs_start = std::time::Instant::now();
-        let outcome = self.commit_output(&descriptor.output_key(), bytes);
+        let outcome = block_store
+            .cas_create(&descriptor.output_key(), bytes)
+            .unwrap_or_else(|e| {
+                panic!("commit_and_gate CAS failed for {}: {e}", descriptor.output_key())
+            });
         let gcs_time_ms = gcs_start.elapsed().as_millis() as u64;
 
         if outcome == CommitOutcome::Committed {
@@ -850,6 +929,7 @@ impl PubSubGcsTransport {
     /// seeder per replay for true isolation.
     pub fn seed_leaves_with_prefix(
         &self,
+        block_ns: &str,
         prefix: &str,
         radix: usize,
         leaf_count: usize,
@@ -858,13 +938,28 @@ impl PubSubGcsTransport {
         reduction: bool,
     ) {
         log::info!(
-            "[seed] seeding {leaf_count} {} leaf descriptor(s) intended for object-prefix \
-             namespace '{prefix}' (radix={radix}, tx_per_proof={tx_per_proof}, \
-             seed_order={})",
+            "[seed] seeding {leaf_count} {} leaf descriptor(s) under block-namespace \
+             '{ns}' (object-prefix '{prefix}', radix={radix}, tx_per_proof={tx_per_proof}, \
+             seed_order={order})",
             if reduction { "reduction" } else { "hex" },
-            order.as_str()
+            ns = if block_ns.is_empty() { "<base>" } else { block_ns },
+            order = order.as_str()
         );
-        self.seed_leaves(radix, leaf_count, tx_per_proof, order, reduction);
+        // (#355) ACTUALLY apply the namespace: stamp each leaf descriptor with
+        // `block_ns` so it commits under `<base>/<block_ns>/leaf_i.proof` and its
+        // readiness-gating markers live under the same namespace. Previously this
+        // method only LOGGED `prefix` and then seeded UN-namespaced leaves, so
+        // every replay published identical keys that deduped away under the GCS
+        // CAS (`AlreadyExists`) — the collision bug this fix closes. An empty
+        // `block_ns` leaves the descriptors un-namespaced (BLOCKS=1 back-compat).
+        let descriptors = if reduction {
+            super::seed_reduction_leaf_descriptors_scheduled(radix, leaf_count, tx_per_proof, order)
+        } else {
+            super::seed_leaf_descriptors_scheduled(radix, leaf_count, tx_per_proof, order)
+        };
+        for d in descriptors {
+            self.publish(d.with_block_ns(block_ns));
+        }
     }
 
     /// The configured ack deadline (seconds).

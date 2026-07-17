@@ -1,0 +1,11 @@
+SYNTHETIC FIXTURE (issue #355) — NOT a real benchmark.
+COLLAPSED multi-block run: run_config claims blocks=5 but ONLY block_0 appears
+on events (the A2/A3 GCS-CAS collision this fix closes). Exactly ONE tree's
+worth of events (2 leaves + 1 fold, all under block_0). The divisor-vs-observed
+guard MUST fire: distinct_blocks_observed=1 < blocks_config=5 =>
+core_sec_per_block = null + a note (refuse to divide by phantom blocks).
+MUST NEVER be copied into reports/ or treated as measured.
+
+2026-07-16T00:00:00.000000000Z INFO coordinator: Received event: role=leaf, idx=0, fold_strategy=Reduction, level=0, status=success, prove_time_ms=8000, gcs_time_ms=10, total_time_ms=8010, peak_rss_bytes=0, prestate_source=corpus, is_first_task_on_pod=true, chunk_size=4, leaf_count=2, pull_ms=1, pre_exec_ms=0, prove_ms=8000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=n/a, merge_interval_span=0, redriven_after_lease_expiry=false, pull_ts_ms=0, scheduling_class=sequential, block_ns=block_0
+2026-07-16T00:00:01.000000000Z INFO coordinator: Received event: role=leaf, idx=1, fold_strategy=Reduction, level=0, status=success, prove_time_ms=4000, gcs_time_ms=10, total_time_ms=4010, peak_rss_bytes=0, prestate_source=corpus, is_first_task_on_pod=false, chunk_size=4, leaf_count=2, pull_ms=1, pre_exec_ms=0, prove_ms=4000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=n/a, merge_interval_span=0, redriven_after_lease_expiry=false, pull_ts_ms=0, scheduling_class=sequential, block_ns=block_0
+2026-07-16T00:00:02.000000000Z INFO coordinator: Received event: role=reduction, idx=0, fold_strategy=Reduction, level=1, status=success, prove_time_ms=2000, gcs_time_ms=10, total_time_ms=2010, peak_rss_bytes=0, prestate_source=corpus, is_first_task_on_pod=false, chunk_size=4, leaf_count=2, pull_ms=1, pre_exec_ms=0, prove_ms=2000, gcs_write_ms=10, queue_wait_ms=0, fold_kind=real, merge_interval_span=2, redriven_after_lease_expiry=false, pull_ts_ms=0, scheduling_class=sequential, block_ns=block_0
