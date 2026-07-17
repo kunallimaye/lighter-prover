@@ -38,23 +38,31 @@ _spec.loader.exec_module(ext)
 def _prover_event(role, *, level=0, chunk_idx=0, node_idx=0, lo=0, hi=0,
                   prove_ms=1000, peak_rss=0, fold_kind="n/a",
                   is_first=False, status="success", tx_per_proof=4,
-                  leaf_count=4, merge_span=0):
-  """Build ONE ProverEvent JSON dict exactly as a prover pod serializes it."""
+                  leaf_count=4, merge_span=0, block_ns=None):
+  """Build ONE ProverEvent JSON dict exactly as a prover pod serializes it.
+
+  `block_ns` (#355/#357) is the per-replay block namespace stamped on the
+  descriptor (`block_N`). When None it is OMITTED from the descriptor entirely,
+  reproducing a pre-#355 / single-block event that carries no namespace.
+  """
+  descriptor = {
+      "role": role,
+      "radix": 2,
+      "leaf_count": leaf_count,
+      "tx_per_proof": tx_per_proof,
+      "chunk_idx": chunk_idx,
+      "level": level,
+      "node_idx": node_idx,
+      "lo": lo,
+      "hi": hi,
+      "fold_strategy": "reduction" if role == "reduction-fold" else "hex",
+      "redriven": False,
+      "dispatch_ts_ms": 0,
+  }
+  if block_ns is not None:
+    descriptor["block_ns"] = block_ns
   return {
-      "descriptor": {
-          "role": role,
-          "radix": 2,
-          "leaf_count": leaf_count,
-          "tx_per_proof": tx_per_proof,
-          "chunk_idx": chunk_idx,
-          "level": level,
-          "node_idx": node_idx,
-          "lo": lo,
-          "hi": hi,
-          "fold_strategy": "reduction" if role == "reduction-fold" else "hex",
-          "redriven": False,
-          "dispatch_ts_ms": 0,
-      },
+      "descriptor": descriptor,
       "status": status,
       "prove_time_ms": prove_ms,
       "gcs_time_ms": 50,
@@ -159,8 +167,12 @@ def _sample_run_events():
 
 def test_metrics_core_sec_per_block():
   events = _sample_run_events()
+  # vcpu_per_node is DERIVED from the supplied machine type (#352); c3d-highcpu-60
+  # => 60, reproducing the /60 math from the REAL machine type (not a hardcoded
+  # constant). Single-block sample (no block_ns) => blocks_config=1 => guard OK.
   m = ext.build_metrics_from_events(events, run_config={"blocks": 1},
-                                    target_bps=[10, 12])
+                                    target_bps=[10, 12],
+                                    machine_type="c3d-highcpu-60")
   tp = m["throughput"]
   assert tp["measured"] is True
   assert abs(tp["leaf_cpu_core_sec"] - 4.0) < 1e-9
@@ -176,11 +188,97 @@ def test_metrics_core_sec_per_block():
   assert proj[12]["c3d_nodes_required"] == 2     # ceil(66/60)
 
 
-def test_metrics_core_sec_per_block_multi_block():
-  # Same per-task cost, but 2 blocks -> core_sec_per_block halves.
-  events = _sample_run_events()
-  m = ext.build_metrics_from_events(events, run_config={"blocks": 2})
-  assert abs(m["throughput"]["core_sec_per_block"] - 2.75) < 1e-9
+def test_metrics_two_block_events_not_collapsed():
+  # #357 REGRESSION GUARD for the events-JSON collapse bug. TWO distinct replays
+  # (block_0, block_1), EACH with the SAME geometry (leaf_0..leaf_3 + 3 folds).
+  # Before the fix, every block's leaf_0 (role=leaf,L0,N0,lo0,hi0) shared an
+  # identical logical key and dedupe collapsed the 2 blocks into 1 (silently
+  # discarding block_1). With block_ns in the key + the observed-block accounting:
+  #   * BOTH blocks' tasks are retained (14 events, not 7),
+  #   * distinct_blocks_observed == 2, block_ns_field_present is True,
+  #   * the guard PASSES (observed 2 == config 2) and core_sec_per_block = total/2.
+  def _block(ns):
+    leaves = [
+        ext.prover_event_json_to_event(
+            _prover_event("leaf", chunk_idx=i, prove_ms=1000,
+                          peak_rss=4_200_000_000, block_ns=ns))
+        for i in range(4)
+    ]
+    folds = [
+        ext.prover_event_json_to_event(
+            _prover_event("reduction-fold", level=1, lo=0, hi=1, prove_ms=500,
+                          fold_kind="real", block_ns=ns)),
+        ext.prover_event_json_to_event(
+            _prover_event("reduction-fold", level=1, lo=2, hi=3, prove_ms=500,
+                          fold_kind="real", block_ns=ns)),
+        ext.prover_event_json_to_event(
+            _prover_event("reduction-fold", level=2, lo=0, hi=3, prove_ms=500,
+                          fold_kind="real", block_ns=ns)),
+    ]
+    return leaves + folds
+
+  raw = _block("block_0") + _block("block_1")
+  # Each event carries its block_ns; the mapper must extract it.
+  assert all(e["block_ns"] in ("block_0", "block_1") for e in raw)
+  # Dedup must NOT collapse the two blocks: 14 distinct logical tasks, 0 redrives.
+  deduped, redrive_extra = ext.dedupe_events_by_logical_key(raw)
+  assert len(deduped) == 14, "both blocks' tasks retained (NOT collapsed to 7)"
+  assert redrive_extra == 0, "distinct blocks are NOT redrives of one another"
+
+  m = ext.build_metrics_from_events(deduped, run_config={"blocks": 2},
+                                    machine_type="c3d-highcpu-60")
+  tp = m["throughput"]
+  # total = 2 blocks * (4*1.0 + 3*0.5) = 2 * 5.5 = 11.0 core-sec.
+  assert abs(tp["total_cpu_core_sec"] - 11.0) < 1e-9
+  assert tp["blocks_config"] == 2
+  assert tp["distinct_blocks_observed"] == 2, "must OBSERVE 2 distinct namespaces"
+  assert tp["block_ns_field_present"] is True
+  assert tp["divisor_guard_note"] is None, "no guard when observed == config"
+  # core_sec_per_block = total / 2 = 5.5 (a REAL number, guard NOT fired).
+  assert abs(tp["core_sec_per_block"] - 5.5) < 1e-9
+  assert abs(tp["core_sec_per_block_all"] - 5.5) < 1e-9
+
+
+def test_metrics_guard_refuses_divide_when_block_ns_absent():
+  # #357 guard null-handling on the events-JSON path: run_config claims blocks=5
+  # but the events carry NO block_ns (unobservable). The extractor MUST NOT divide
+  # a 1-block cost by 5 phantom blocks and emit a plausible-but-WRONG per-block
+  # cost — it must refuse: core_sec_per_block=null + a divisor_guard_note.
+  events = _sample_run_events()               # no block_ns on any event
+  assert all(e["block_ns"] is None for e in events)
+  m = ext.build_metrics_from_events(events, run_config={"blocks": 5},
+                                    machine_type="c3d-highcpu-60")
+  tp = m["throughput"]
+  assert tp["blocks_config"] == 5
+  assert tp["distinct_blocks_observed"] is None, "no block_ns => unobservable"
+  assert tp["block_ns_field_present"] is False
+  assert tp["core_sec_per_block"] is None, "must REFUSE un-corroborated divide"
+  assert tp["core_sec_per_block_all"] is None
+  assert tp["core_sec_per_block_warm"] is None
+  assert tp["divisor_guard_note"] is not None
+  note = tp["divisor_guard_note"].lower()
+  assert "un-corroborated" in note or "could not be determined" in note
+  # Fleet projection must also be UNMEASURED (never sized off a null).
+  for row in tp["fleet_sizing_projection"]["by_target_bps"]:
+    assert row["cores_required"] is None
+    assert row["nodes_required"] is None
+
+
+def test_metrics_single_block_backcompat_unchanged():
+  # #357 back-compat: a BLOCKS=1 events-JSON run with NO block_ns must behave
+  # EXACTLY as before — divide-by-1 is a no-op, no spurious guard, output equals
+  # the pre-change single-block result (core_sec_per_block == total_cpu_core_sec).
+  events = _sample_run_events()               # no block_ns; single-block run
+  assert all(e["block_ns"] is None for e in events)
+  m = ext.build_metrics_from_events(events, run_config={"blocks": 1},
+                                    machine_type="c3d-highcpu-60")
+  tp = m["throughput"]
+  assert tp["blocks_config"] == 1
+  assert tp["block_ns_field_present"] is False
+  assert tp["divisor_guard_note"] is None, "no guard for a legitimate 1-block run"
+  # Byte-for-byte: 1 block => core_sec_per_block == total == 5.5 (unchanged).
+  assert abs(tp["core_sec_per_block"] - 5.5) < 1e-9
+  assert abs(tp["total_cpu_core_sec"] - 5.5) < 1e-9
 
 
 def test_metrics_peak_rss_and_redrive_surfaced():
