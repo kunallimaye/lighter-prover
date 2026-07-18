@@ -64,6 +64,13 @@ steps:
           # clean: unified emits `lighter-fungible-prover`; split emits
           # `lighter-fungible-leaf` + `lighter-fungible-agg`. --ignore-not-found
           # makes deleting the absent set a no-op.
+          # (#363) Fold dispatch is DECENTRALIZED (workers self-gate via GCS CAS);
+          # the central dispatch coordinator daemon + Redis are RETIRED. We STILL
+          # delete `deployment/lighter-active-coordinator`, `deployment/lighter-redis`
+          # and `service/redis-service` here so a cluster left over from a
+          # pre-#363 run is cleaned up (idempotent via --ignore-not-found), but we
+          # no longer DEPLOY them. `job/lighter-coordinator` is the KEPT
+          # RootCoordinator HARVESTER (proof verification), cleaned for a fresh run.
           kubectl delete \
             deployment/lighter-fungible-prover \
             deployment/lighter-fungible-leaf \
@@ -124,12 +131,13 @@ steps:
           PROJECT_ID="${_RUNTIME_PROJECT_ID:-${_BUILD_PROJECT_ID}}"
           gcloud container clusters get-credentials lighter-prover-cluster-${_ARCH} --zone=${_REGION}-b --project=$${PROJECT_ID}
           
-          echo "[INFO] Deploying Redis..."
-          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-redis.rendered.yaml
-          
-          echo "[INFO] Deploying Active Coordinator..."
-          kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-active-coordinator.rendered.yaml
-          
+          # (#363) DECENTRALIZED fold dispatch: Redis + the central dispatch
+          # coordinator daemon (`lighter-active-coordinator`) are RETIRED — workers
+          # perform readiness gating themselves via GCS CAS
+          # (PubSubGcsTransport::commit_and_gate). The renderer no longer emits the
+          # `-redis`/`-active-coordinator` manifests, so those apply steps are
+          # removed. The RootCoordinator HARVESTER (`lighter-coordinator` Job,
+          # deployed below) still gates run completion.
           echo "[INFO] Deploying Fungible Workers (topology=${_POOL_TOPOLOGY})..."
           # The renderer always writes the worker Deployment(s) to
           # prover_pod_unit-fungible.rendered.yaml regardless of topology, so this
@@ -160,20 +168,25 @@ steps:
           echo "[INFO] Deploying Seeder (Bootstrapping Queue)..."
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-seeder.rendered.yaml
           
-          echo "[INFO] Deploying Coordinator..."
+          # (#363) The `lighter-coordinator` Job is the RootCoordinator HARVESTER
+          # (waits for the root proof, then verifies it) — NOT the retired dispatch
+          # daemon. With worker-side gating driving the tree to root, the harvester
+          # completing IS the run-completion signal. KEPT.
+          echo "[INFO] Deploying RootCoordinator harvester (lighter-coordinator Job)..."
           kubectl apply -f infra-as-code/kubernetes/prover_pod_unit-coordinator.rendered.yaml
           
-          echo "[INFO] Waiting for pipeline completion (waiting on coordinator)..."
+          echo "[INFO] Waiting for pipeline completion (waiting on RootCoordinator harvester)..."
           kubectl wait --for=condition=complete job/lighter-coordinator --timeout=1200s || WORKLOAD_FAILED=true
           
-          # Best-effort coordinator log grab (the FALLBACK telemetry source). The
-          # PRIMARY source is now the durable per-pod events/ prefix in GCS (#347),
+          # Best-effort harvester log grab (a FALLBACK telemetry source). The
+          # PRIMARY source is the durable per-pod events/ prefix in GCS (#347),
           # which survives even when these logs are unavailable — so a failure here
           # is NON-FATAL and must never abort the build before telemetry runs.
-          echo "[INFO] Extracting coordinator logs (best-effort fallback source)..."
-          kubectl logs deployment/lighter-active-coordinator -c coordinator > active_coordinator.log 2>/dev/null || true
-          kubectl logs job/lighter-coordinator -c coordinator > passive_coordinator.log 2>/dev/null || true
-          cat active_coordinator.log passive_coordinator.log > coordinator.log 2>/dev/null || true
+          # (#363) The retired dispatch daemon (`lighter-active-coordinator`) is no
+          # longer deployed, so its log grab is removed; only the harvester Job's
+          # log remains.
+          echo "[INFO] Extracting RootCoordinator harvester logs (best-effort fallback source)..."
+          kubectl logs job/lighter-coordinator -c coordinator > coordinator.log 2>/dev/null || true
           
           # (#347) DO NOT `exit 1` here on workload failure: that aborted the whole
           # build and the telemetry+upload step never ran (attempt-57 lost its

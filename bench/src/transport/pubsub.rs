@@ -67,8 +67,8 @@ use google_cloud_storage::http::objects::upload::{Media, UploadObjectRequest, Up
 use google_cloud_storage::http::Error as GcsHttpError;
 use tokio::runtime::Runtime;
 
-use super::gating::{CasError, CasStore, Publisher};
-use super::{CommitOutcome, WorkDescriptor, WorkLease, WorkTransport, ProverEvent};
+use super::gating::{CasError, CasStore, GatingEngine, GatingOutcome, Publisher};
+use super::{CommitOutcome, FoldStrategy, WorkDescriptor, WorkLease, WorkTransport, ProverEvent};
 use crate::telemetry::TaskTelemetry;
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -764,11 +764,37 @@ impl WorkTransport for PubSubGcsTransport {
     }
 
     /// Commit a child's output via GCS-native CAS **and** advance readiness
-    /// gating, publishing the parent fold exactly once when the parent's child
-    /// quota is met. The production analogue of `LocalTransport`'s
-    /// `commit_and_gate`, driving the shared [`GatingEngine`] over the GCS CAS
-    /// store + Pub/Sub publisher. Implemented as the [`WorkTransport`] trait
-    /// method so the generic dispatch loop drives it.
+    /// gating DECENTRALIZED ON THE WORKER, publishing the parent fold exactly
+    /// once when the parent is ready. The production analogue of
+    /// `LocalTransport`'s `commit_and_gate`, driving the shared [`GatingEngine`]
+    /// over the GCS CAS store + Pub/Sub publisher. Implemented as the
+    /// [`WorkTransport`] trait method so the generic dispatch loop drives it.
+    ///
+    /// # Worker-side gating (#363): retire the central coordinator for dispatch
+    ///
+    /// After committing the child output, THIS worker performs the readiness
+    /// check + parent publish itself, using the SAME pure [`GatingEngine`] the
+    /// former `coordinator.rs` daemon drove — the algorithm is backend- AND
+    /// location-agnostic (its reduction decision is `exists(sibling_marker)` +
+    /// `cas_create(parent_publish_marker)`), so running it on the worker instead
+    /// of a single daemon removes the serial bottleneck (~127 folds/block under
+    /// radix-2 reduction) without changing the exactly-once invariant. The gate
+    /// is driven against the GCS CAS store (`ifGenerationMatch=0`), never Redis —
+    /// coordination now scales with the fleet.
+    ///
+    /// Routing mirrors the retired coordinator EXACTLY (do not diverge): a
+    /// [`FoldStrategy::Reduction`] descriptor drives the order-free interval gate
+    /// [`GatingEngine::on_interval_committed`]; a [`FoldStrategy::Hex`] descriptor
+    /// drives the fixed-node gate [`GatingEngine::on_child_committed`]. The engine
+    /// is built with [`GatingEngine::new_for_block`] over the DESCRIPTOR'S
+    /// `block_ns` (over the BASE `self.gcs` store — the engine prefixes markers
+    /// with the namespace itself, so passing the block-prefixed store here would
+    /// double-prefix), so multi-block replays (#355) gate independently.
+    ///
+    /// The completion event is STILL published to the events topic — but for
+    /// TELEMETRY only, no longer to drive dispatch. Crash recovery for a lost
+    /// merge is handled by the existing pure [`GatingEngine::redrive_stale_merges`]
+    /// sweep, unchanged.
     fn commit_and_gate(
         &self,
         descriptor: &WorkDescriptor,
@@ -873,6 +899,86 @@ impl WorkTransport for PubSubGcsTransport {
                         descriptor.output_key()
                     ),
                 }
+            }
+
+            // ── (#363) DECENTRALIZED WORKER-SIDE READINESS GATING ────────────
+            // This worker — having just WON the output-commit CAS — now performs
+            // the readiness check + parent publish ITSELF, retiring the central
+            // coordinator daemon's dispatch role. It drives the SAME pure
+            // `GatingEngine` the coordinator drove, against the GCS CAS store
+            // (`ifGenerationMatch=0`) + the Pub/Sub work publisher, so the
+            // exactly-once parent-publish invariant is preserved (only the CAS
+            // winner reaches here, and the engine's publish marker guarantees a
+            // single publisher when the last sibling commits).
+            //
+            // The engine is built over the DESCRIPTOR'S block namespace via
+            // `new_for_block` (over the BASE `self.gcs` — the engine prefixes
+            // marker keys with the namespace itself; passing the block-prefixed
+            // store would double-prefix), so multi-block replays (#355) gate in
+            // their own namespaces. Routing by `fold_strategy` mirrors the
+            // retired coordinator BYTE-FOR-BYTE: reduction → interval gate; hex →
+            // fixed-node gate. A reduction LEAF is the interval [chunk_idx,
+            // chunk_idx] at level 0, so routing on `lo`/`hi`/`level` is correct
+            // for both leaves and folds.
+            let gating_engine = GatingEngine::new_for_block(
+                &self.gcs,
+                &self.publisher,
+                &descriptor.block_ns,
+            );
+            let gating_result = match descriptor.fold_strategy {
+                FoldStrategy::Reduction => gating_engine.on_interval_committed(
+                    descriptor.lo,
+                    descriptor.hi,
+                    descriptor.level,
+                    descriptor.radix,
+                    descriptor.leaf_count,
+                    descriptor.tx_per_proof,
+                    outcome,
+                ),
+                FoldStrategy::Hex => gating_engine.on_child_committed(descriptor, outcome),
+            };
+
+            // A gating error is FATAL for this task: the child output IS durably
+            // committed, but the parent may never be published unless the gate
+            // advances. Failing here nacks the message (the dispatch loop acks
+            // only after a successful return), so redelivery re-runs the gate;
+            // the output CAS is idempotent (re-commit observes AlreadyExists ⇒
+            // the gate treats it as NotWinner and does nothing) and the publish
+            // marker keeps the eventual publish exactly-once. Never silently drop
+            // a gating failure — that is precisely how a merge is lost forever.
+            match gating_result {
+                Ok(GatingOutcome::PublishedParent(parent)) => log::info!(
+                    "[gate] worker published parent fold {} (fold_strategy={:?}, level={}) \
+                     after committing {}",
+                    parent.output_key(),
+                    parent.fold_strategy,
+                    parent.level,
+                    descriptor.output_key(),
+                ),
+                Ok(GatingOutcome::ParentAlreadyPublished) => log::info!(
+                    "[gate] parent of {} already published by a concurrent sibling (exactly-once)",
+                    descriptor.output_key(),
+                ),
+                Ok(GatingOutcome::Recorded { have, needed }) => log::info!(
+                    "[gate] recorded {} — parent progress {}/{} (not yet ready)",
+                    descriptor.output_key(),
+                    have,
+                    needed,
+                ),
+                Ok(GatingOutcome::RootReached) => log::info!(
+                    "[gate] ROOT reached at {} (block_ns='{}') — no parent to publish",
+                    descriptor.output_key(),
+                    descriptor.block_ns,
+                ),
+                Ok(GatingOutcome::NotWinner) => log::warn!(
+                    "[gate] unexpected NotWinner for {} (output CAS was Committed)",
+                    descriptor.output_key(),
+                ),
+                Err(e) => panic!(
+                    "worker-side readiness gating FAILED for {} (output committed, parent \
+                     publish at risk): {e}",
+                    descriptor.output_key()
+                ),
             }
         }
         outcome
