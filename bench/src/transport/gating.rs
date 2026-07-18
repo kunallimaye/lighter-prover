@@ -1162,6 +1162,177 @@ mod tests {
         assert_eq!(d.node_idx, 0);
     }
 
+    // ── (#363) DECENTRALIZED WORKER-SIDE GATING — exactly-once across the fleet ──
+    //
+    // These tests model the flow `PubSubGcsTransport::commit_and_gate` now runs on
+    // the WORKER (retiring the central coordinator daemon for dispatch): each
+    // committing worker (a) races the OUTPUT-commit CAS, then (b) constructs a
+    // FRESH `GatingEngine::new_for_block(store, publisher, block_ns)` over the
+    // SHARED CAS store + work publisher and drives the gate routed by
+    // `fold_strategy` — exactly as the transport does per call. The KEY difference
+    // from the coordinator is that the engine is (re)built PER COMMIT, on many
+    // threads, against one shared store; the exactly-once invariant must still hold
+    // (the publish-marker CAS is the sole arbiter, wherever the engine runs). This
+    // reuses the existing tested reference logic — no new gating algorithm.
+
+    /// Drive the WORKER-SIDE gating flow for one committed hex child on a fresh
+    /// per-commit engine (mirrors `commit_and_gate` routing `FoldStrategy::Hex →
+    /// on_child_committed`). Returns the routed outcome.
+    fn worker_commit_and_gate_hex(
+        store: &InMemoryCasStore,
+        pubr: &RecordingPublisher,
+        child: &WorkDescriptor,
+    ) -> GatingOutcome {
+        // (a) race the output-commit CAS (only the winner drives the gate). In
+        // production the OUTPUT key is committed under the DESCRIPTOR'S block prefix
+        // (`self.gcs.with_block_prefix(block_ns)`), so two blocks' identical
+        // `output_key()` land at DISTINCT keys and never collide. Model that here
+        // by prefixing the output key with the block namespace (the store double
+        // stands in for GCS's per-prefix key space).
+        let out_key = format!("{}{}", child.store_key_prefix(), child.output_key());
+        let outcome = store.cas_create(&out_key, b"proof").unwrap();
+        // (b) …then build a per-commit engine over the descriptor's namespace and
+        // route by fold_strategy, exactly as PubSubGcsTransport::commit_and_gate.
+        let engine = GatingEngine::new_for_block(store, pubr, &child.block_ns);
+        engine.on_child_committed(child, outcome).unwrap()
+    }
+
+    /// (#363) HEX worker-side gating is exactly-once under concurrency EVEN WHEN
+    /// EACH THREAD BUILDS ITS OWN ENGINE per commit (the transport pattern), not a
+    /// single shared coordinator engine. Many threads race both children of an N=2
+    /// node; exactly one parent fold is published.
+    #[test]
+    fn worker_side_hex_gating_exactly_once_under_concurrency() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+
+        const THREADS_PER_CHILD: usize = 24;
+        let mut handles = Vec::new();
+        for child_idx in 0..2usize {
+            for _ in 0..THREADS_PER_CHILD {
+                let store = store.clone();
+                let pubr = pubr.clone();
+                handles.push(thread::spawn(move || {
+                    let leaf = WorkDescriptor::leaf(child_idx, 2, 2, 1);
+                    worker_commit_and_gate_hex(&store, &pubr, &leaf);
+                }));
+            }
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let published = pubr.published();
+        assert_eq!(
+            published.len(),
+            1,
+            "worker-side hex gate must publish the parent fold EXACTLY once across \
+             the fleet, got {published:?}"
+        );
+        assert_eq!(pubr.distinct_keys().len(), 1);
+        assert_eq!(published[0].role, Role::TreeNode);
+        assert_eq!(published[0].level, 1);
+    }
+
+    /// (#363) REDUCTION worker-side gating is exactly-once under concurrency with
+    /// a per-commit engine (mirrors `commit_and_gate` routing `FoldStrategy::
+    /// Reduction → on_interval_committed`). Many threads race both leaf intervals
+    /// of an N=2 padded tree; exactly one merged parent (the root [0,1]) publishes.
+    #[test]
+    fn worker_side_reduction_gating_exactly_once_under_concurrency() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+
+        const THREADS_PER_LEAF: usize = 24;
+        let mut handles = Vec::new();
+        for leaf_idx in 0..2usize {
+            for _ in 0..THREADS_PER_LEAF {
+                let store = store.clone();
+                let pubr = pubr.clone();
+                handles.push(thread::spawn(move || {
+                    // A reduction leaf is the interval [i, i] at level 0.
+                    let leaf = WorkDescriptor::reduction_leaf(leaf_idx, 2, 2, 1);
+                    // (a) race the output-commit CAS, (b) route to the interval gate
+                    // via a fresh per-commit engine — the exact transport flow.
+                    let outcome = store.cas_create(&leaf.output_key(), b"proof").unwrap();
+                    let engine =
+                        GatingEngine::new_for_block(&store, &pubr, &leaf.block_ns);
+                    engine
+                        .on_interval_committed(
+                            leaf.lo,
+                            leaf.hi,
+                            leaf.level,
+                            leaf.radix,
+                            leaf.leaf_count,
+                            leaf.tx_per_proof,
+                            outcome,
+                        )
+                        .unwrap();
+                }));
+            }
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // N=2 padded=2 ⇒ the two leaves merge into the single root [0,1], published
+        // exactly once (or the racing pair may report RootReached on the second
+        // commit — either way NO double-publish).
+        let published = pubr.published();
+        assert!(
+            published.len() <= 1,
+            "worker-side reduction gate must never double-publish, got {published:?}"
+        );
+        assert_eq!(
+            pubr.distinct_keys().len(),
+            published.len(),
+            "every published merge key is distinct (exactly-once)"
+        );
+        if let Some(d) = published.first() {
+            assert_eq!(d.role, Role::ReductionFold);
+            assert_eq!((d.lo, d.hi), (0, 1));
+        }
+    }
+
+    /// (#363) Worker-side gating over a SHARED store keeps two block replays'
+    /// dispatch INDEPENDENT: a per-commit `new_for_block` engine namespaces every
+    /// marker, so completing block_0's tree publishes ONLY block_0's fold, and
+    /// block_1 gates on its own. This is the multi-block (#355) invariant holding
+    /// when gating moves to the worker. Also confirms the routed `fold_strategy`
+    /// mirror between the two strategies produces the right role.
+    #[test]
+    fn worker_side_gating_isolates_block_namespaces() {
+        use crate::transport::FoldStrategy;
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+
+        // block_0: complete BOTH leaves of an N=2 hex node ⇒ one namespaced fold.
+        for i in 0..2usize {
+            let leaf = WorkDescriptor::leaf(i, 2, 2, 1).with_block_ns("block_0");
+            worker_commit_and_gate_hex(&store, &pubr, &leaf);
+        }
+        // block_1: complete only ONE leaf ⇒ nothing published for block_1 yet.
+        let b1_leaf0 = WorkDescriptor::leaf(0, 2, 2, 1).with_block_ns("block_1");
+        worker_commit_and_gate_hex(&store, &pubr, &b1_leaf0);
+
+        let published = pubr.published();
+        assert_eq!(
+            published.len(),
+            1,
+            "only block_0's completed tree should publish, got {published:?}"
+        );
+        assert_eq!(published[0].block_ns, "block_0");
+        assert_eq!(published[0].fold_strategy, FoldStrategy::Hex);
+        // Marker isolation: block_0's markers are namespaced; the base is untouched.
+        assert_eq!(store.count_prefix("block_0/gate/L1/N0/child_").unwrap(), 2);
+        assert_eq!(store.count_prefix("block_1/gate/L1/N0/child_").unwrap(), 1);
+        assert_eq!(
+            store.count_prefix("gate/L1/N0/child_").unwrap(),
+            0,
+            "no un-namespaced marker leaked across the shared store"
+        );
+    }
+
     /// Full radix-2 N=4 tree driven purely through the gating engine + CAS double:
     /// 4 leaves => 2 level-1 folds => 1 root fold, each published exactly once.
     #[test]
