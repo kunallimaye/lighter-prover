@@ -292,6 +292,438 @@ def _mean_max(vals):
 
 
 # ---------------------------------------------------------------------------
+# Fold PARALLELISM telemetry (#365). The existing derived block above captures
+# aggregate CPU cost (core-sec/block, prove-time distributions); it does NOT
+# capture the WALL-CLOCK / CONCURRENCY advantage of the radix-2 `reduction` fold
+# strategy over radix-16 `hex`. These three blocks close that gap so the
+# reduction thesis (umbrella #366) can be proven on both axes:
+#
+#   (1) fold_critical_path   -- sum of per-level MAX fold prove-time = the true
+#                               serialized wall-clock through the fold tree
+#                               (hex ~2 deep x ~74s vs reduction ~7 deep x ~1.7s).
+#   (2) fold_parallelism     -- per-level fold width + peak concurrent width
+#                               (hex caps ~8, reduction reaches ~64).
+#   (3) gating_ingestion_rate-- completion events ingested/sec + reset/redrive/
+#                               duplicate counters (coordinator-scaling signal).
+#
+# ANTI-FABRICATION: every number traces to a REAL measured field on a parsed
+# event (see parse_event_line / prover_event_json_to_event). The fold role set,
+# the prove_ms->prove_time_ms fallback, the pull_ts_ms 0/None sentinel, the
+# completion-timestamp derivation (parse_k8s_timestamp(ev['ts'])), and the
+# per-block `block_ns` grouping all MATCH compute_derived exactly. When a source
+# field is absent the block is still emitted but with null values + a
+# machine-readable "UNMEASURED" note (mirroring the all-zero-RSS / partial-
+# pull_ts guards above) -- never a fabricated or back-filled value.
+# ---------------------------------------------------------------------------
+
+# Fold roles, shared verbatim with compute_derived / build_metrics_from_events.
+_FOLD_ROLES = ("node", "tree-node", "reduction", "reduction-fold")
+
+
+def _fold_events(events):
+  """Successful fold (aggregation) events, using the SAME role set + status
+  filter as compute_derived so the two blocks describe the same population."""
+  return [
+      e for e in events
+      if e["role"] in _FOLD_ROLES and e["status"] == "success"
+  ]
+
+
+def _fold_prove_ms(e):
+  """Fold prove-time in ms: prove_ms, falling back to prove_time_ms on OLD logs
+  that predate the split prove_ms field (identical to compute_derived's
+  _fold_prove). Returns None only if BOTH are absent."""
+  v = e.get("prove_ms")
+  if v is not None:
+    return float(v)
+  v = e.get("prove_time_ms")
+  return float(v) if v is not None else None
+
+
+def _block_ns_key(e):
+  """Per-block grouping key. Since #355 the coordinator stamps `block_ns`
+  (e.g. `block_0`). A None/empty block_ns (single-block runs / pre-#355 logs)
+  groups under one synthetic namespace -- byte-for-byte the same grouping the
+  duplicate detector uses, so single-block behaviour is unchanged."""
+  ns = e.get("block_ns")
+  return ns if ns else "__single_block__"
+
+
+def _completion_ts_ms(e):
+  """Completion timestamp (epoch-ms) from the coordinator log line ev['ts'], or
+  None when unparseable/absent (events-GCS payloads carry ts=None)."""
+  ts = e.get("ts")
+  if ts is None:
+    return None
+  try:
+    dt = parse_k8s_timestamp(ts)
+  except Exception:  # noqa: BLE001 -- honest None on any parse failure
+    return None
+  return int(dt.timestamp() * 1000)
+
+
+def _pull_ts_ms(e):
+  """Absolute pull timestamp in epoch-ms, or None when unstamped (0/None is the
+  coordinator's honest 'dispatch time not recorded' sentinel)."""
+  v = e.get("pull_ts_ms")
+  return v if (v is not None and v > 0) else None
+
+
+def _sweepline_peak_concurrency(intervals):
+  """Max number of simultaneously-open [start, end) intervals (a sweep-line).
+  End is processed BEFORE a start at the same timestamp, so a task that finishes
+  exactly when another begins is NOT counted as concurrent."""
+  points = []
+  for start, end in intervals:
+    points.append((start, 1))
+    points.append((end, -1))
+  # -1 (ends) sort before +1 (starts) at an equal timestamp.
+  points.sort(key=lambda p: (p[0], p[1]))
+  cur = peak = 0
+  for _, delta in points:
+    cur += delta
+    if cur > peak:
+      peak = cur
+  return peak
+
+
+def compute_fold_critical_path(events):
+  """(#365) Per-block fold critical-path wall-clock = sum over tree levels of the
+  MAX fold prove-time at that level.
+
+  A tree level cannot finish until its SLOWEST fold finishes, and the next level
+  cannot start until the level below it is done, so the true serialized critical
+  path through the fold tree is ``sum_levels(max_folds(prove_time))``. This is
+  the metric that exposes hex (~2 levels x ~74s = ~148s) vs reduction (~7 levels
+  x ~1.7s = ~12s) -- an advantage the aggregate core-sec/block metric hides.
+
+  When wall-clock timestamps exist (pull_ts_ms + a parseable completion ts) an
+  OBSERVED critical path (max completion - min pull over the block's folds) is
+  ALSO reported, clearly distinguished from the prove-time-modeled figure.
+  Absent fields -> the corresponding value is null + "UNMEASURED", never faked.
+  """
+  folds = _fold_events(events)
+  if not folds:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": "no fold events (role in node/tree-node/reduction/reduction-fold)",
+        "per_block": [],
+        "avg_modeled_critical_path_ms": None,
+        "avg_observed_critical_path_ms": None,
+    }
+
+  # block_ns -> level -> [prove_ms]; and block_ns -> ([pull_ts], [completion_ts]).
+  by_block_level = {}
+  ts_by_block = {}
+  saw_prove = False
+  saw_ts = False
+
+  for e in folds:
+    bk = _block_ns_key(e)
+    lvl = e.get("level")
+    pm = _fold_prove_ms(e)
+    if lvl is not None and pm is not None:
+      saw_prove = True
+      by_block_level.setdefault(bk, {}).setdefault(int(lvl), []).append(pm)
+    pull = _pull_ts_ms(e)
+    comp = _completion_ts_ms(e)
+    if pull is not None and comp is not None:
+      saw_ts = True
+      pulls, comps = ts_by_block.setdefault(bk, ([], []))
+      pulls.append(pull)
+      comps.append(comp)
+
+  if not saw_prove and not saw_ts:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "fold events lack a level+prove_time AND lack (pull_ts_ms, "
+            "parseable completion ts); critical path not derivable"
+        ),
+        "per_block": [],
+        "avg_modeled_critical_path_ms": None,
+        "avg_observed_critical_path_ms": None,
+    }
+
+  per_block = []
+  modeled_totals = []
+  observed_totals = []
+  all_blocks = sorted(set(by_block_level) | set(ts_by_block), key=str)
+
+  for bk in all_blocks:
+    entry = {"block_ns": None if bk == "__single_block__" else bk}
+
+    levels = by_block_level.get(bk)
+    if levels:
+      per_level_max = {lvl: max(v) for lvl, v in levels.items()}
+      modeled = float(sum(per_level_max.values()))
+      entry["num_levels"] = len(per_level_max)
+      entry["per_level_max_prove_ms"] = {
+          str(k): per_level_max[k] for k in sorted(per_level_max)
+      }
+      entry["modeled_critical_path_ms"] = modeled
+      entry["modeled_provenance"] = "modeled-from-prove-times"
+      modeled_totals.append(modeled)
+    else:
+      entry["num_levels"] = None
+      entry["per_level_max_prove_ms"] = None
+      entry["modeled_critical_path_ms"] = None
+      entry["modeled_provenance"] = "UNMEASURED"
+
+    tspair = ts_by_block.get(bk)
+    if tspair and tspair[0] and tspair[1]:
+      pulls, comps = tspair
+      observed = float(max(comps) - min(pulls))
+      entry["observed_critical_path_ms"] = observed
+      entry["observed_provenance"] = "observed-from-timestamps"
+      observed_totals.append(observed)
+    else:
+      entry["observed_critical_path_ms"] = None
+      entry["observed_provenance"] = "UNMEASURED"
+
+    per_block.append(entry)
+
+  return {
+      "measured": True,
+      "provenance": "measured-derived",
+      "definition": (
+          "critical_path = sum over tree levels of the MAX fold prove_time at "
+          "that level (a level cannot complete until its slowest fold does)"
+      ),
+      "num_blocks": len(per_block),
+      "per_block": per_block,
+      "avg_modeled_critical_path_ms": (
+          sum(modeled_totals) / len(modeled_totals) if modeled_totals else None
+      ),
+      "avg_observed_critical_path_ms": (
+          sum(observed_totals) / len(observed_totals) if observed_totals else None
+      ),
+  }
+
+
+def compute_fold_parallelism(events):
+  """(#365) Per-level fold width + peak concurrent fold width.
+
+  ``per_level_width`` counts folds at each tree level; ``peak_width`` is the
+  widest level = the maximum AVAILABLE fold parallelism (hex caps ~8 at the
+  fan-in bound; reduction reaches ~64 at the base level). When fold events carry
+  BOTH pull_ts_ms and a parseable completion ts, ``observed_peak_concurrency``
+  reports the TRUE simultaneously-in-flight maximum via a timestamp sweep-line
+  (which can be lower than peak_width if the pool is under-provisioned).
+
+  Widths are grouped by block_ns and the peak is taken over the whole run so a
+  multi-block run does not inflate a single level's width. Absent fields -> null
+  + "UNMEASURED"; nothing is fabricated.
+  """
+  folds = _fold_events(events)
+  if not folds:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": "no fold events (role in node/tree-node/reduction/reduction-fold)",
+        "per_level_width": None,
+        "peak_width": None,
+        "observed_peak_concurrency": None,
+        "observed_peak_concurrency_provenance": "UNMEASURED",
+    }
+
+  # Per (block_ns, level) width so cross-block same-level folds are not summed
+  # into a false wider level; the reported per_level_width is the MAX width seen
+  # for that level across blocks (the available parallelism per block).
+  width_by_block_level = {}
+  intervals = []
+  saw_level = False
+  saw_ts = False
+
+  for e in folds:
+    lvl = e.get("level")
+    if lvl is not None:
+      saw_level = True
+      key = (_block_ns_key(e), int(lvl))
+      width_by_block_level[key] = width_by_block_level.get(key, 0) + 1
+    pull = _pull_ts_ms(e)
+    comp = _completion_ts_ms(e)
+    if pull is not None and comp is not None:
+      saw_ts = True
+      intervals.append((pull, comp))
+
+  if not saw_level and not saw_ts:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "fold events lack a level field AND lack (pull_ts_ms, parseable "
+            "completion ts); fold width/concurrency not derivable"
+        ),
+        "per_level_width": None,
+        "peak_width": None,
+        "observed_peak_concurrency": None,
+        "observed_peak_concurrency_provenance": "UNMEASURED",
+    }
+
+  if saw_level:
+    max_width_per_level = {}
+    for (_bk, lvl), w in width_by_block_level.items():
+      if w > max_width_per_level.get(lvl, 0):
+        max_width_per_level[lvl] = w
+    per_level_width = {
+        str(lvl): max_width_per_level[lvl] for lvl in sorted(max_width_per_level)
+    }
+    peak_width = max(max_width_per_level.values())
+  else:
+    per_level_width = None
+    peak_width = None
+
+  if saw_ts and intervals:
+    observed_peak = _sweepline_peak_concurrency(intervals)
+    observed_prov = "observed-from-timestamps"
+  else:
+    observed_peak = None
+    observed_prov = "UNMEASURED"
+
+  return {
+      "measured": True,
+      "provenance": "measured-derived",
+      "definition": (
+          "per_level_width = folds at each tree level (max across blocks); "
+          "peak_width = widest level (available parallelism); "
+          "observed_peak_concurrency = max simultaneously in-flight folds via a "
+          "pull_ts_ms->completion-ts sweep-line"
+      ),
+      "per_level_width": per_level_width,
+      "peak_width": peak_width,
+      "peak_width_provenance": (
+          "measured-derived" if peak_width is not None else "UNMEASURED"
+      ),
+      "observed_peak_concurrency": observed_peak,
+      "observed_peak_concurrency_provenance": observed_prov,
+  }
+
+
+def compute_gating_ingestion_rate(events):
+  """(#365) Coordinator completion-event ingestion rate + resilience counters.
+
+  ingestion_rate = completion-event count / event-time span (seconds), derived
+  from the coordinator log line timestamps (ev['ts']). This is the coordinator-
+  scaling signal: how fast the single coordinator drains the completion stream.
+  A per-second histogram is reported when timestamps exist so backlog build-up
+  (a falling rate over time) is visible.
+
+  Resilience counters REUSE the fields the extractor already surfaces rather
+  than duplicating them: queue_wait_ms (dispatch backlog), redriven_after_lease
+  _expiry (redeliveries), and the duplicate-output-key count from the same
+  output_key() identity compute_derived uses. Absent timestamps -> rate is null
+  + "UNMEASURED" but the counters (which need no timestamp) are still reported.
+  """
+  # Reuse queue_wait exactly as compute_derived measures it (positive-only; 0 is
+  # the coordinator's 'dispatch timestamp not stamped' sentinel).
+  qw_positive = [
+      e["queue_wait_ms"] for e in events
+      if e.get("queue_wait_ms") is not None and e["queue_wait_ms"] > 0
+  ]
+  qw_field_present = any(e.get("queue_wait_ms") is not None for e in events)
+  redriven = sum(
+      1 for e in events if e.get("redriven_after_lease_expiry") is True
+  )
+  redrive_field_present = any(
+      e.get("redriven_after_lease_expiry") is not None for e in events
+  )
+
+  # Duplicate completions = same logical output proved by >1 event. Reuse the
+  # SAME identity compute_derived's duplicate_proved uses (block_ns-prefixed).
+  def _output_key(e):
+    ns = e.get("block_ns") or ""
+    role = e["role"]
+    if role == "leaf":
+      return f"{ns}|leaf_{e['idx']}"
+    if role in ("node", "tree-node"):
+      return f"{ns}|tree_L{e.get('level')}_N{e['idx']}"
+    if role in ("reduction", "reduction-fold"):
+      lo, hi = e.get("lo"), e.get("hi")
+      if lo is not None and hi is not None:
+        return f"{ns}|reduction_L{e.get('level')}_lo{lo}_hi{hi}"
+      return f"{ns}|reduction_{e['idx']}_span{e.get('merge_interval_span')}"
+    return f"{ns}|{role}_{e['idx']}"
+
+  key_counts = {}
+  for e in events:
+    if e["status"] == "success":
+      k = _output_key(e)
+      key_counts[k] = key_counts.get(k, 0) + 1
+  duplicate_completions = sum(c - 1 for c in key_counts.values() if c > 1)
+
+  counters = {
+      "duplicate_completions": duplicate_completions,
+      "redriven_after_lease_expiry_count": redriven,
+      "redriven_field_present": redrive_field_present,
+      "queue_wait_field_present": qw_field_present,
+      "queue_wait_ms_mean": (
+          sum(qw_positive) / len(qw_positive) if qw_positive else None
+      ),
+      "queue_wait_ms_max": max(qw_positive) if qw_positive else None,
+      "queue_wait_provenance": "measured" if qw_positive else "UNMEASURED",
+  }
+
+  completion_ts = [
+      t for t in (_completion_ts_ms(e) for e in events
+                  if e["status"] == "success") if t is not None
+  ]
+
+  if not completion_ts:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "no parseable completion timestamps (ev['ts']); ingestion rate not "
+            "derivable (events-GCS payloads carry ts=None). Counters below need "
+            "no timestamp and are still measured."
+        ),
+        "completion_event_count": len(completion_ts),
+        "span_sec": None,
+        "events_per_sec": None,
+        "events_per_sec_provenance": "UNMEASURED",
+        "ingestion_rate_per_sec_histogram": None,
+        "counters": counters,
+    }
+
+  span_ms = max(completion_ts) - min(completion_ts)
+  span_sec = span_ms / 1000.0
+  count = len(completion_ts)
+  # A single instantaneous completion has no measurable span: rate is null, not
+  # a fabricated infinity (mirrors the wall_sec>0 guards elsewhere).
+  events_per_sec = (count / span_sec) if span_sec > 0 else None
+
+  histogram = None
+  if span_sec > 0:
+    origin = min(completion_ts)
+    buckets = {}
+    for t in completion_ts:
+      b = int((t - origin) // 1000)
+      buckets[b] = buckets.get(b, 0) + 1
+    histogram = [{"t_sec": b, "events": buckets[b]} for b in sorted(buckets)]
+
+  return {
+      "measured": True,
+      "provenance": "measured-derived",
+      "definition": (
+          "events_per_sec = successful completion-event count / completion-"
+          "timestamp span (sec); histogram buckets completions per 1s window "
+          "from the first completion to reveal backlog build-up"
+      ),
+      "completion_event_count": count,
+      "span_sec": span_sec,
+      "events_per_sec": events_per_sec,
+      "events_per_sec_provenance": (
+          "measured-derived" if events_per_sec is not None else "UNMEASURED"
+      ),
+      "ingestion_rate_per_sec_histogram": histogram,
+      "counters": counters,
+  }
+
+
+# ---------------------------------------------------------------------------
 # Derived sizing metrics (#328 §C). Everything here is computed from the parsed
 # REAL events; no constant is invented.
 # ---------------------------------------------------------------------------
@@ -540,6 +972,15 @@ def compute_derived(events):
           # max_stale_lease_redrive_count filled in by the caller (it comes from
           # a separate log marker, not the event line).
       },
+      # ---- #365 fold parallelism / wall-clock / ingestion telemetry. These
+      # quantify the reduction strategy's CONCURRENCY + WALL-CLOCK advantage,
+      # which the aggregate core-sec/block metrics above cannot show. Each block
+      # is self-describing (provenance + measured flag) and emits null +
+      # "UNMEASURED" when its source fields are absent -- never a fabricated
+      # value. See compute_fold_critical_path / _parallelism / gating_ingestion.
+      "fold_critical_path": compute_fold_critical_path(events),
+      "fold_parallelism": compute_fold_parallelism(events),
+      "gating_ingestion_rate": compute_gating_ingestion_rate(events),
   }
 
 
