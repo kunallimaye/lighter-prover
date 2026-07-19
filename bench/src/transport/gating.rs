@@ -1333,6 +1333,97 @@ mod tests {
         );
     }
 
+    /// (#376) STREAMED / STAGGERED admission keeps interleaved in-flight blocks
+    /// gating INDEPENDENTLY. Under streaming admission (issue #376) multiple blocks
+    /// are in flight at once, so their leaf commits INTERLEAVE on the shared store.
+    /// This drives TWO full N=2 hex trees whose 4 leaf commits are interleaved
+    /// across many concurrent threads (block_0 leaf0, block_1 leaf0, block_0 leaf1,
+    /// block_1 leaf1, …) — the concurrency shape streaming produces — and asserts:
+    ///   * each block publishes EXACTLY ONE root fold (2 total, no duplicates),
+    ///   * the two roots are DISTINCT keys (independent per-block roots),
+    ///   * each block's namespaced gate markers are complete + isolated, and
+    ///   * ZERO un-namespaced markers leak across the shared store.
+    /// Admission pacing (the #376 seeder change) does NOT touch gating — this
+    /// confirms the #363 worker-side GCS-CAS gate already isolates per-block trees
+    /// no matter the arrival interleaving, so streaming cannot break it.
+    #[test]
+    fn streamed_interleaved_admission_gates_blocks_independently() {
+        let store = InMemoryCasStore::new();
+        let pubr = RecordingPublisher::new();
+
+        // Two blocks, each an N=2 hex tree (2 leaves ⇒ one root fold at L1/N0).
+        // Race ALL 4 (block, leaf) commits concurrently with heavy redelivery
+        // duplication — the exact interleaving streamed admission causes when two
+        // blocks are in flight and workers commit their leaves out of order.
+        const THREADS_PER_LEAF: usize = 16;
+        let mut handles = Vec::new();
+        for block in 0..2usize {
+            let block_ns = format!("block_{block}");
+            for leaf_idx in 0..2usize {
+                for _ in 0..THREADS_PER_LEAF {
+                    let store = store.clone();
+                    let pubr = pubr.clone();
+                    let block_ns = block_ns.clone();
+                    handles.push(thread::spawn(move || {
+                        let leaf =
+                            WorkDescriptor::leaf(leaf_idx, 2, 2, 1).with_block_ns(&block_ns);
+                        worker_commit_and_gate_hex(&store, &pubr, &leaf);
+                    }));
+                }
+            }
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Each block's completed tree publishes its own root fold EXACTLY once ⇒
+        // 2 published, 2 distinct keys (0 duplicate publish, 0 redrive path hit).
+        let published = pubr.published();
+        assert_eq!(
+            published.len(),
+            2,
+            "each in-flight block must publish its own root fold exactly once \
+             (0 duplicate), got {published:?}"
+        );
+        // The two roots are INDEPENDENT per block: same position-keyed
+        // `output_key()` (`tree_L1_N0.proof`) but DISTINCT block namespaces, so
+        // they commit + gate under separate GCS prefixes and never collide.
+        let mut ns_keys: Vec<(String, String)> = published
+            .iter()
+            .map(|d| (d.block_ns.clone(), d.output_key()))
+            .collect();
+        ns_keys.sort();
+        ns_keys.dedup();
+        assert_eq!(
+            ns_keys.len(),
+            2,
+            "the two per-block roots must be DISTINCT (namespace, key) pairs \
+             (independent roots), got {ns_keys:?}"
+        );
+        let mut namespaces: Vec<String> =
+            published.iter().map(|d| d.block_ns.clone()).collect();
+        namespaces.sort();
+        assert_eq!(
+            namespaces,
+            vec!["block_0".to_string(), "block_1".to_string()],
+            "one independent fold per block namespace"
+        );
+        for d in &published {
+            assert_eq!(d.role, Role::TreeNode);
+            assert_eq!(d.level, 1);
+            assert_eq!(d.node_idx, 0);
+        }
+
+        // Per-block markers complete + isolated; ZERO un-namespaced leakage.
+        assert_eq!(store.count_prefix("block_0/gate/L1/N0/child_").unwrap(), 2);
+        assert_eq!(store.count_prefix("block_1/gate/L1/N0/child_").unwrap(), 2);
+        assert_eq!(
+            store.count_prefix("gate/L1/N0/child_").unwrap(),
+            0,
+            "no un-namespaced marker leaked across the shared store under streaming"
+        );
+    }
+
     /// Full radix-2 N=4 tree driven purely through the gating engine + CAS double:
     /// 4 leaves => 2 level-1 folds => 1 root fold, each published exactly once.
     #[test]

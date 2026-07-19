@@ -38,6 +38,8 @@ steps:
             --chunk="${_CHUNK_SIZE}" \
             --benchmark-id="${_BENCHMARK_ID}" \
             --fold-strategy="${_FOLD_STRATEGY}" \
+            --admission-mode="${_ADMISSION_MODE}" \
+            --admission-rate-bps="${_ADMISSION_RATE_BPS}" \
             --pool-topology="${_POOL_TOPOLOGY}" \
             --emit-fungible \
             --baseload=10 \
@@ -265,6 +267,12 @@ substitutions:
   _RADIX: '16'
   # #321 Phase 8: reduction is the DEFAULT fold strategy on GKE; 'hex' opts out.
   _FOLD_STRATEGY: 'reduction'
+  # #376 Seeder block-admission mode: 'batch' (DEFAULT, admit all blocks up front
+  # — unchanged) or 'stream' (pace admission on wall-clock at _ADMISSION_RATE_BPS
+  # blocks/sec; prereq for lag-to-tip validation in #372). Rate is ignored in
+  # batch mode; must be > 0 in stream mode.
+  _ADMISSION_MODE: 'batch'
+  _ADMISSION_RATE_BPS: '0.0'
   # #321 fungible worker-pool topology: 'split' (default; two fixed leaf/agg
   # Deployments — zero behavior change) or 'unified' (one self-balancing
   # `lighter-fungible-prover` Deployment on prover-unified-work-sub). Opt in via

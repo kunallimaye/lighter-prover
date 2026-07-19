@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use log::{Level, LevelFilter, info};
@@ -390,6 +390,26 @@ pub enum Role {
         /// pre-state is never fabricated. See `bench/corpus/cap-block/README.md`.
         #[arg(long)]
         prestate_corpus_path: Option<String>,
+        /// (#376) Block ADMISSION MODE for the seeder. `batch` (DEFAULT) admits
+        /// all `--blocks` blocks' leaves up front with no pacing — byte-for-byte
+        /// the pre-#376 behaviour. `stream` paces admission on the WALL CLOCK at
+        /// `--admission-rate-bps` blocks/sec so leaf and fold work stay
+        /// concurrently in flight and there is a steady "tip" to lag behind
+        /// (prerequisite for the lag-to-tip validation in #372). Admission is
+        /// OPEN-LOOP: paced purely by wall-clock cadence, NEVER gated by proving
+        /// progress (we measure whether the fleet keeps up, so admission must not
+        /// wait on prior-block completion). Only the seeder (`--seed`) consumes
+        /// this; workers ignore it. Batch mode ignores `--admission-rate-bps`.
+        #[arg(long, value_enum, default_value_t = AdmissionMode::Batch)]
+        admission_mode: AdmissionMode,
+        /// (#376) Target admission RATE in blocks/sec for `--admission-mode=stream`.
+        /// The CANONICAL rate knob: the inter-block interval is derived internally
+        /// as `interval_ms = 1000 / rate`. Must be `> 0` when stream mode is
+        /// selected (rejected fail-fast otherwise). Ignored in `batch` mode. E.g.
+        /// `--admission-rate-bps 0.5` admits one block every 2s; `2.0` admits two
+        /// blocks per second. Default `0.0` (unset) — only meaningful with stream.
+        #[arg(long, default_value_t = 0.0)]
+        admission_rate_bps: f64,
     },
     /// Bake circuit artifacts to disk for image-baking (issue #322 Phase B).
     ///
@@ -452,6 +472,71 @@ impl FoldStrategy {
     fn is_reduction(self) -> bool {
         matches!(self, FoldStrategy::Reduction)
     }
+}
+
+/// (#376) How the seeder ADMITS blocks onto the work queue.
+///
+/// * `Batch` (DEFAULT) — admit ALL `--blocks` blocks' leaf descriptors up front
+///   with no pacing. Byte-for-byte the pre-#376 behaviour; back-compat is
+///   mandatory, so this is the default and nothing about batch seeding changes.
+/// * `Stream` — admit block `b`'s leaves, then pace on the WALL CLOCK to the
+///   target cadence (`interval_ms = 1000 / --admission-rate-bps`) before
+///   admitting block `b+1`, for all B blocks. Admission is OPEN-LOOP: paced by
+///   elapsed wall-clock only, NEVER gated by proving progress / prior-block
+///   completion. This produces a continuous arrival "tip" so the fleet's
+///   keep-up (lag-to-tip) is measurable (#372). Per-block gating/namespacing is
+///   unchanged — interleaved in-flight blocks still gate independently via the
+///   #363 worker-side GCS-CAS path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum AdmissionMode {
+    /// Admit all blocks immediately (no pacing). The default; unchanged behaviour.
+    Batch,
+    /// Pace admission on wall-clock at `--admission-rate-bps` blocks/sec.
+    Stream,
+}
+
+impl AdmissionMode {
+    /// `true` iff this is the wall-clock-paced streaming mode (vs. batch).
+    /// (`#[allow(dead_code)]`: consumed by the pubsub-gated seeder + the tests;
+    /// the default cloud-free build links neither, matching the pattern used by
+    /// the other seeder-only helpers below.)
+    #[allow(dead_code)]
+    fn is_stream(self) -> bool {
+        matches!(self, AdmissionMode::Stream)
+    }
+}
+
+/// (#376) Current wall-clock time as UNIX epoch MILLISECONDS.
+///
+/// Used to stamp each block's admission (`admit_ts_ms`) so downstream lag-to-tip
+/// telemetry (#377) can align admitted-vs-proven over time. Uses the real system
+/// clock (`SystemTime::now`); before the epoch (clock skew) it clamps to 0 rather
+/// than panicking — a stamp is always produced.
+#[allow(dead_code)]
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// (#376) Derive the inter-block admission INTERVAL (ms) from the canonical
+/// blocks/sec rate: `interval_ms = 1000 / rate`.
+///
+/// Returns `Err(message)` when `rate` is not a usable cadence (`<= 0`, `NaN`, or
+/// non-finite) so stream mode fails FAST with an actionable message instead of
+/// dividing by zero / sleeping forever. `batch` mode never calls this.
+fn admission_interval_ms(rate_bps: f64) -> Result<u64, String> {
+    if !rate_bps.is_finite() || rate_bps <= 0.0 {
+        return Err(format!(
+            "--admission-rate-bps must be a finite value > 0 for --admission-mode=stream \
+             (got {rate_bps}); it is blocks/sec and the interval is derived as 1000/rate."
+        ));
+    }
+    // Round to the nearest ms; clamp to >=1ms so a very high rate still paces
+    // deterministically (0ms would collapse stream into an un-paced batch).
+    let interval = (1000.0 / rate_bps).round() as i64;
+    Ok(interval.max(1) as u64)
 }
 
 /// (#321 Phase 6) CLI mirror of [`bench::transport::SeedOrder`]: which order the
@@ -773,6 +858,27 @@ impl WorkloadPlan {
 #[allow(dead_code)]
 const RUN_CONFIG_PATH: &str = "reports/run_config.json";
 
+/// (#376) A per-block ADMISSION record: the wall-clock instant (epoch ms) at
+/// which the seeder admitted a given block's leaf descriptors onto the queue.
+///
+/// Persisted as the `admissions: [...]` array in `run_config.json` so downstream
+/// telemetry (the sibling lag-to-tip issue #377) can compute distance-behind-tip
+/// = f(admitted-over-time vs. proven-over-time). The field name `admit_ts_ms` is
+/// the STABLE, explicit contract #377 consumes — do not rename without
+/// coordinating there. Written for BOTH batch and stream admission (batch stamps
+/// every block at ~the same instant; stream stamps them ~`1000/rate` ms apart),
+/// so the record is always present and the extractor never has to special-case
+/// the mode. `#[serde(default)]` on the parent field keeps older
+/// `run_config.json` files (written before #376) deserializable.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct AdmissionRecord {
+    /// The block namespace this admission stamped (`block_0`..; empty for B==1).
+    block_ns: String,
+    /// Wall-clock admission time as UNIX epoch MILLISECONDS. STABLE name for #377.
+    admit_ts_ms: u64,
+}
+
 /// The seeded run-config: the single source of truth the seeder writes and every
 /// worker validates against to prevent drift. Used by the pubsub seeder/worker
 /// and the unit tests (drift guard); see [`RUN_CONFIG_PATH`].
@@ -804,6 +910,13 @@ struct RunConfig {
     /// deployment supplies it. Never a guessed constant (#352).
     #[serde(default)]
     vcpu_per_node: Option<u32>,
+    /// (#376) Per-block admission timestamps (wall-clock epoch ms), one entry per
+    /// admitted block in admission order. The lag-to-tip telemetry (#377) reads
+    /// `admissions[*].admit_ts_ms` to compute distance-behind-tip over time.
+    /// Empty on older `run_config.json` files (pre-#376) via `#[serde(default)]`,
+    /// so existing configs keep deserializing byte-for-byte.
+    #[serde(default)]
+    admissions: Vec<AdmissionRecord>,
 }
 
 #[allow(dead_code)]
@@ -3180,6 +3293,8 @@ fn main() {
             prestate_corpus_path: prestate_corpus_path_arg,
             fold_strategy,
             seed_order,
+            admission_mode,
+            admission_rate_bps,
         } => {
             // Issue #321 Phase 8: the fold-strategy flag now GOVERNS which leaves
             // the `work` pool seeds — `Reduction` (the default) seeds reduction
@@ -3220,6 +3335,34 @@ fn main() {
                 }
             };
 
+            // (#376) Validate the admission knobs FAIL-FAST on the seeder/laptop
+            // (never in the pod): stream mode REQUIRES a usable rate so we never
+            // divide by zero / sleep forever. Batch mode ignores the rate. Echo
+            // the effective admission cadence for operator visibility.
+            match admission_mode {
+                AdmissionMode::Batch => {
+                    info!(
+                        "[admission] mode=batch (all {} block(s) admitted immediately; \
+                         --admission-rate-bps ignored)",
+                        plan.blocks
+                    );
+                }
+                AdmissionMode::Stream => match admission_interval_ms(admission_rate_bps) {
+                    Ok(interval_ms) => {
+                        info!(
+                            "[admission] mode=stream rate={admission_rate_bps} blocks/sec \
+                             (interval={interval_ms}ms; {} block(s) paced open-loop on \
+                             wall-clock, NOT gated by proving progress)",
+                            plan.blocks
+                        );
+                    }
+                    Err(msg) => {
+                        eprintln!("Invalid admission config: {msg}");
+                        std::process::exit(2);
+                    }
+                },
+            }
+
             match transport {
                 TransportKind::Local => {
                     run_local_work(
@@ -3255,6 +3398,8 @@ fn main() {
                         object_prefix,
                         event_topic,
                         prewarm_port,
+                        admission_mode,
+                        admission_rate_bps,
                     );
                 }
             }
@@ -3758,6 +3903,84 @@ fn start_readiness_listener(port: u16) {
     }
 }
 
+/// (#376) The block-ADMISSION driver: transport-agnostic pacing over B blocks.
+///
+/// For each block `b in 0..blocks` it (1) stamps the wall-clock admission time
+/// (`admit_ts_ms`) via `now_ms`, (2) invokes `admit(replay, block_ns)` — the
+/// caller's per-block seed action (e.g. `seed_leaves_with_prefix`), and (3) in
+/// STREAM mode paces to the target cadence before the NEXT block by sleeping via
+/// `sleep` until the wall clock reaches `first_admit + b*interval_ms`.
+///
+/// Pacing is OPEN-LOOP and wall-clock-anchored to the FIRST admission, so per-block
+/// `admit()` cost does not accumulate drift: block `b` targets `t0 + b*interval`,
+/// and if `admit()` already ran long we skip the sleep (never sleep negative).
+/// In BATCH mode there is no sleep at all — all blocks are admitted back-to-back,
+/// byte-for-byte the pre-#376 behaviour.
+///
+/// `now_ms` and `sleep` are injected so tests can drive deterministic timing
+/// without a real clock, and `admit` is a closure so the real seeder and the
+/// test double share ONE pacing implementation. The block namespace matches the
+/// existing rule EXACTLY: empty for `blocks <= 1`, else `block_<replay>` (#355).
+///
+/// Returns the per-block [`AdmissionRecord`]s in admission order (monotonic
+/// non-decreasing `admit_ts_ms`), which the seeder persists into `run_config.json`.
+/// (`#[allow(dead_code)]`: the real caller is the pubsub-gated seeder, and the
+/// tests drive it directly with injected clock/sleep; the default cloud-free
+/// build links neither, matching the other seeder-only helpers.)
+#[allow(dead_code)]
+fn drive_admission<A, N, S>(
+    blocks: usize,
+    mode: AdmissionMode,
+    interval_ms: u64,
+    mut now_ms: N,
+    mut sleep: S,
+    mut admit: A,
+) -> Vec<AdmissionRecord>
+where
+    A: FnMut(usize, &str),
+    N: FnMut() -> u64,
+    S: FnMut(Duration),
+{
+    let mut admissions = Vec::with_capacity(blocks);
+    // Wall-clock anchor for the whole schedule: block b targets `anchor + b*interval`.
+    // Captured on the FIRST iteration so pacing is relative to the first admit.
+    let mut anchor: Option<u64> = None;
+    for replay in 0..blocks {
+        let block_ns = if blocks <= 1 {
+            String::new()
+        } else {
+            format!("block_{replay}")
+        };
+
+        // In stream mode, pace to the target cadence BEFORE admitting block b>0:
+        // sleep until the wall clock reaches `anchor + b*interval_ms`. Anchored to
+        // the first admission so slow `admit()` calls don't accumulate drift, and
+        // never negative (if we're already past target we admit immediately).
+        if mode.is_stream() && replay > 0 && let Some(anchor_ms) = anchor {
+            let target = anchor_ms + (replay as u64) * interval_ms;
+            let now = now_ms();
+            // Only sleep a POSITIVE remaining interval — on overrun (slow admit /
+            // slow fleet) we admit immediately rather than stalling.
+            if let Some(remaining) = target.checked_sub(now).filter(|&r| r > 0) {
+                sleep(Duration::from_millis(remaining));
+            }
+        }
+
+        let admit_ts_ms = now_ms();
+        if anchor.is_none() {
+            anchor = Some(admit_ts_ms);
+        }
+
+        admit(replay, &block_ns);
+
+        admissions.push(AdmissionRecord {
+            block_ns,
+            admit_ts_ms,
+        });
+    }
+    admissions
+}
+
 /// Drive the fungible dispatch loop over the production
 /// [`PubSubGcsTransport`](bench::transport::pubsub::PubSubGcsTransport).
 ///
@@ -3783,6 +4006,11 @@ fn run_pubsub_work(
     object_prefix: String,
     event_topic: String,
     prewarm_port: Option<u16>,
+    // (#376) Seeder block-admission pacing. `Batch` (default) admits all blocks
+    // immediately (unchanged); `Stream` paces on wall-clock at `admission_rate_bps`
+    // blocks/sec. Only consumed by the seeder (`seed == true`); workers ignore it.
+    admission_mode: AdmissionMode,
+    admission_rate_bps: f64,
 ) {
     use bench::transport::pubsub::{PubSubGcsConfig, PubSubGcsTransport};
     use bench::transport::tree_depth as t_depth;
@@ -3911,7 +4139,12 @@ fn run_pubsub_work(
         // guessed.
         let machine_type = resolve_machine_type();
         let vcpu_per_node = vcpu_per_node_from_machine_type(machine_type.as_deref());
-        let run_config = RunConfig {
+        // Build the run-config helper so we can persist it BEFORE admission (drift
+        // guard, so a worker that starts pulling immediately can validate) and
+        // AGAIN after admission with the per-block timestamps filled in. The
+        // `admissions` array is telemetry only — never a drift-guard field — so
+        // rewriting it does not affect the worker's geometry validation.
+        let build_run_config = |admissions: Vec<AdmissionRecord>| RunConfig {
             blocks: plan.blocks,
             txs_per_block: plan.txs_per_block,
             txs_per_chunk: plan.txs_per_chunk,
@@ -3922,48 +4155,97 @@ fn run_pubsub_work(
             subscription: config_sub_for_echo.clone(),
             bucket: config_bucket_for_echo.clone(),
             object_prefix: base_object_prefix.clone(),
-            machine_type,
+            machine_type: machine_type.clone(),
             vcpu_per_node,
+            admissions,
         };
-        if let Err(e) = run_config.write_local(RUN_CONFIG_PATH) {
+        if let Err(e) = build_run_config(Vec::new()).write_local(RUN_CONFIG_PATH) {
             info!("[seed] could not persist run-config to {RUN_CONFIG_PATH} ({e}); continuing");
         } else {
             info!("[seed] wrote shared run-config to {RUN_CONFIG_PATH} (drift guard)");
         }
 
-        // Seed each replay's leaves. For B>1 each replay is namespaced under a
-        // distinct object-prefix (`<base>block_<b>/`) so identical-content proofs
-        // across replays land under DISTINCT GCS keys and cannot dedup/collapse.
+        // (#376) Resolve the inter-block admission interval for stream mode. Batch
+        // mode never paces, so its interval is unused (0). Stream mode was already
+        // validated fail-fast in `main`, so `admission_interval_ms` cannot error
+        // here — but if it somehow did, fall back to batch (no pacing) rather than
+        // panicking, since the leaves are still correct either way.
+        let interval_ms = if admission_mode.is_stream() {
+            admission_interval_ms(admission_rate_bps).unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Seed each replay's leaves, PACED per the admission mode. For B>1 each
+        // replay is namespaced under a distinct object-prefix (`<base>block_<b>/`)
+        // so identical-content proofs across replays land under DISTINCT GCS keys
+        // and cannot dedup/collapse. In STREAM mode admission is paced open-loop on
+        // the wall clock (NOT gated by proving progress); in BATCH mode all blocks
+        // are admitted back-to-back exactly as before #376.
         let mut total_seeded = 0usize;
-        for replay in 0..plan.blocks {
-            // (#355) The per-replay BLOCK NAMESPACE stamped onto every leaf so it
-            // commits + gates under `block_<replay>/` — isolating identical-content
-            // replays so they don't dedup via the GCS `ifGenerationMatch=0` CAS.
-            // For BLOCKS=1 this is EMPTY (`""`) so the committed keys + gate markers
-            // are byte-for-byte the pre-#355 base-prefix keys (back-compat). The
-            // full object-prefix is still logged for operator observability.
-            let block_ns = if plan.blocks <= 1 {
-                String::new()
-            } else {
-                format!("block_{replay}")
-            };
-            let prefix = replay_object_prefix(&base_object_prefix, replay, plan.blocks);
-            transport.seed_leaves_with_prefix(
-                &block_ns,
-                &prefix,
-                radix,
-                leaf_count,
-                tx_per_proof,
-                seed_order.to_seed_order(),
-                fold_strategy.is_reduction(),
-            );
-            total_seeded += leaf_count;
+        let admit_started = Instant::now();
+        let admissions = drive_admission(
+            plan.blocks,
+            admission_mode,
+            interval_ms,
+            now_epoch_ms,
+            std::thread::sleep,
+            |replay, block_ns| {
+                // (#355) The per-replay BLOCK NAMESPACE is passed in by the driver:
+                // EMPTY for BLOCKS<=1 (byte-for-byte the pre-#355 base-prefix keys),
+                // else `block_<replay>` — isolating identical-content replays so they
+                // don't dedup via the GCS `ifGenerationMatch=0` CAS.
+                let prefix = replay_object_prefix(&base_object_prefix, replay, plan.blocks);
+                transport.seed_leaves_with_prefix(
+                    block_ns,
+                    &prefix,
+                    radix,
+                    leaf_count,
+                    tx_per_proof,
+                    seed_order.to_seed_order(),
+                    fold_strategy.is_reduction(),
+                );
+                total_seeded += leaf_count;
+                // Observability (#376 req 5): log the admission with block index,
+                // namespace, admit timestamp, and target-vs-actual cadence drift.
+                // Target for block b is `b * interval_ms` after the first admit;
+                // actual is the elapsed wall-clock since the first admit. Drift is
+                // meaningful only in stream mode (batch has no target cadence).
+                let actual_ms = admit_started.elapsed().as_millis() as i64;
+                let cadence = if admission_mode.is_stream() {
+                    let target_ms = (replay as i64) * (interval_ms as i64);
+                    format!(
+                        ", target={target_ms}ms actual={actual_ms}ms drift={}ms",
+                        actual_ms - target_ms
+                    )
+                } else {
+                    String::new()
+                };
+                info!(
+                    "[seed] replay {}/{}: admitted {leaf_count} leaf descriptor(s) under \
+                     block-namespace '{}' (object-prefix '{prefix}') at admit_ts_ms={}{cadence}",
+                    replay + 1,
+                    plan.blocks,
+                    if block_ns.is_empty() { "<base>" } else { block_ns },
+                    now_epoch_ms(),
+                );
+            },
+        );
+
+        // (#376) Persist the run-config AGAIN with the per-block admission
+        // timestamps now filled in, so the lag-to-tip telemetry (#377) can read
+        // `admissions[*].admit_ts_ms` from `run_config.json`. Best-effort: a
+        // failure here leaves the drift-guard copy (written above) intact.
+        if let Err(e) = build_run_config(admissions.clone()).write_local(RUN_CONFIG_PATH) {
             info!(
-                "[seed] replay {}/{}: published {leaf_count} leaf descriptor(s) under \
-                 block-namespace '{}' (object-prefix '{prefix}')",
-                replay + 1,
-                plan.blocks,
-                if block_ns.is_empty() { "<base>" } else { &block_ns },
+                "[seed] could not persist admission timestamps to {RUN_CONFIG_PATH} ({e}); \
+                 drift-guard run-config remains intact"
+            );
+        } else {
+            info!(
+                "[seed] recorded {} block admission timestamp(s) to {RUN_CONFIG_PATH} \
+                 (admissions[*].admit_ts_ms — consumed by #377 lag-to-tip telemetry)",
+                admissions.len()
             );
         }
 
@@ -3982,6 +4264,16 @@ fn run_pubsub_work(
             "fold_strategy": format!("{fold_strategy:?}"),
             "seeded_leaf_descriptors": total_seeded,
             "run_config_path": RUN_CONFIG_PATH,
+            // (#376) Admission telemetry: mode, rate, and the per-block admit
+            // timestamps (mirrors run_config.json's admissions[] for consumers
+            // that read the durable event instead of the file — e.g. #377).
+            "admission_mode": format!("{admission_mode:?}"),
+            "admission_rate_bps": admission_rate_bps,
+            "admission_interval_ms": interval_ms,
+            "admissions": admissions
+                .iter()
+                .map(|a| json!({ "block_ns": a.block_ns, "admit_ts_ms": a.admit_ts_ms }))
+                .collect::<Vec<_>>(),
             "status": "SEEDED_AND_EXITING",
             "live_run": "TODO(confirm-on-live-run)"
         });
@@ -4146,6 +4438,8 @@ fn run_pubsub_work(
     _object_prefix: String,
     _event_topic: String,
     _prewarm_port: Option<u16>,
+    _admission_mode: AdmissionMode,
+    _admission_rate_bps: f64,
 ) {
     eprintln!(
         "--transport=pubsub requires building with the `pubsub` cargo feature \
@@ -4207,6 +4501,248 @@ mod tests {
             }
             _ => panic!("expected Role::Work"),
         }
+    }
+
+    // ── (#376) Streaming/staggered block admission ───────────────────────────
+
+    /// (#376) BACK-COMPAT: the admission-mode default is `batch` and the rate
+    /// default is `0.0`, so an invocation with NO admission flags is byte-for-byte
+    /// the pre-#376 seeder (admit all blocks immediately, no pacing). This is the
+    /// mandatory back-compat guarantee.
+    #[test]
+    fn cli_admission_mode_default_is_batch() {
+        let cli = Cli::parse_from(["prover-node", "work"]);
+        match cli.role {
+            Role::Work {
+                admission_mode,
+                admission_rate_bps,
+                ..
+            } => {
+                assert_eq!(
+                    admission_mode,
+                    AdmissionMode::Batch,
+                    "admission default MUST be batch (back-compat #376)"
+                );
+                assert_eq!(admission_rate_bps, 0.0, "rate default must be 0.0 (unset)");
+            }
+            _ => panic!("expected Role::Work"),
+        }
+    }
+
+    /// (#376) Stream mode + rate parse from the canonical flags.
+    #[test]
+    fn cli_admission_stream_and_rate_parse() {
+        let cli = Cli::parse_from([
+            "prover-node",
+            "work",
+            "--admission-mode",
+            "stream",
+            "--admission-rate-bps",
+            "0.5",
+        ]);
+        match cli.role {
+            Role::Work {
+                admission_mode,
+                admission_rate_bps,
+                ..
+            } => {
+                assert_eq!(admission_mode, AdmissionMode::Stream);
+                assert_eq!(admission_rate_bps, 0.5);
+            }
+            _ => panic!("expected Role::Work"),
+        }
+    }
+
+    /// (#376) `interval_ms = 1000 / rate` (rounded, clamped to >=1ms), and a
+    /// non-positive / non-finite rate is rejected fail-fast (never divide-by-zero
+    /// or sleep-forever).
+    #[test]
+    fn admission_interval_ms_derives_from_rate() {
+        assert_eq!(admission_interval_ms(1.0).unwrap(), 1000);
+        assert_eq!(admission_interval_ms(2.0).unwrap(), 500);
+        assert_eq!(admission_interval_ms(0.5).unwrap(), 2000);
+        assert_eq!(admission_interval_ms(4.0).unwrap(), 250);
+        // Very high rate clamps to a 1ms floor rather than collapsing to 0.
+        assert_eq!(admission_interval_ms(10_000.0).unwrap(), 1);
+        // Invalid rates are rejected with an actionable message.
+        assert!(admission_interval_ms(0.0).unwrap_err().contains("> 0"));
+        assert!(admission_interval_ms(-1.0).unwrap_err().contains("> 0"));
+        assert!(admission_interval_ms(f64::NAN).unwrap_err().contains("> 0"));
+        assert!(admission_interval_ms(f64::INFINITY).unwrap_err().contains("> 0"));
+    }
+
+    /// (#376) BATCH mode admits ALL blocks back-to-back with NO sleep — the driver
+    /// never calls the injected `sleep`, and every block gets the correct
+    /// namespace (`block_<b>` for B>1). This is the byte-for-byte-unchanged path.
+    #[test]
+    fn drive_admission_batch_admits_all_immediately_no_sleep() {
+        let mut clock = 1_000u64; // fixed, non-advancing wall clock (ms).
+        let mut sleeps: Vec<Duration> = Vec::new();
+        let mut seeded: Vec<(usize, String)> = Vec::new();
+
+        let admissions = drive_admission(
+            3,
+            AdmissionMode::Batch,
+            /* interval_ms (ignored in batch) */ 500,
+            || {
+                clock += 1; // each now_ms() read advances 1ms (admit cost), no sleep.
+                clock
+            },
+            |d| sleeps.push(d),
+            |replay, block_ns| seeded.push((replay, block_ns.to_string())),
+        );
+
+        assert!(sleeps.is_empty(), "batch mode must NOT pace (no sleeps)");
+        assert_eq!(
+            seeded,
+            vec![
+                (0, "block_0".to_string()),
+                (1, "block_1".to_string()),
+                (2, "block_2".to_string()),
+            ],
+            "batch seeds all blocks in order with per-block namespaces"
+        );
+        assert_eq!(admissions.len(), 3);
+        // Namespaces recorded; timestamps monotonic non-decreasing.
+        for w in admissions.windows(2) {
+            assert!(
+                w[1].admit_ts_ms >= w[0].admit_ts_ms,
+                "admit_ts_ms must be monotonic non-decreasing"
+            );
+        }
+        assert_eq!(admissions[0].block_ns, "block_0");
+        assert_eq!(admissions[2].block_ns, "block_2");
+    }
+
+    /// (#376) BLOCKS==1 gets the EMPTY namespace (byte-for-byte the pre-#355
+    /// base-prefix keys) in BOTH modes — the single-block back-compat invariant.
+    #[test]
+    fn drive_admission_single_block_uses_empty_namespace() {
+        let mut clock = 42u64;
+        let admissions = drive_admission(
+            1,
+            AdmissionMode::Batch,
+            500,
+            || {
+                clock += 1;
+                clock
+            },
+            |_| panic!("single block must not sleep"),
+            |_, block_ns| assert_eq!(block_ns, "", "B==1 namespace must be empty"),
+        );
+        assert_eq!(admissions.len(), 1);
+        assert_eq!(admissions[0].block_ns, "");
+    }
+
+    /// (#376) STREAM mode paces on WALL-CLOCK: with a simulated clock that
+    /// advances only by the sleeps the driver requests, N blocks are admitted at
+    /// ~`interval_ms` apart, timestamps are MONOTONIC and ~`1/rate` apart, and
+    /// admission is OPEN-LOOP (paced purely by the injected clock, never gated on
+    /// any proving progress). Deterministic — no real sleeping, no flakiness.
+    #[test]
+    fn drive_admission_stream_paces_on_wall_clock() {
+        let interval_ms = 200u64; // == rate 5 bps.
+        let blocks = 4usize;
+
+        // A simulated monotonic clock advanced ONLY by the driver's sleeps, plus a
+        // tiny per-admit cost so admits are not instantaneous (stresses the
+        // anchor-relative, drift-free pacing).
+        let clock = std::cell::RefCell::new(0u64);
+        let admits_seen = std::cell::RefCell::new(Vec::<usize>::new());
+
+        let admissions = drive_admission(
+            blocks,
+            AdmissionMode::Stream,
+            interval_ms,
+            || {
+                // Each clock read costs 3ms of "wall time" (simulated admit work).
+                *clock.borrow_mut() += 3;
+                *clock.borrow()
+            },
+            |d| {
+                // The requested sleep advances the simulated wall clock exactly.
+                *clock.borrow_mut() += d.as_millis() as u64;
+            },
+            |replay, _block_ns| admits_seen.borrow_mut().push(replay),
+        );
+
+        // All blocks admitted, in order.
+        assert_eq!(*admits_seen.borrow(), vec![0, 1, 2, 3]);
+        assert_eq!(admissions.len(), blocks);
+
+        // Timestamps strictly monotonic.
+        for w in admissions.windows(2) {
+            assert!(
+                w[1].admit_ts_ms > w[0].admit_ts_ms,
+                "stream admit_ts_ms must strictly increase: {admissions:?}"
+            );
+        }
+
+        // Each consecutive pair is ~interval_ms apart. The pacing anchors to the
+        // FIRST admit and targets `anchor + b*interval`, so the gap is within a
+        // small tolerance of the per-admit clock cost (drift-free, non-cumulative).
+        let anchor = admissions[0].admit_ts_ms;
+        for (b, rec) in admissions.iter().enumerate() {
+            let target = anchor + (b as u64) * interval_ms;
+            let drift = (rec.admit_ts_ms as i64 - target as i64).unsigned_abs();
+            assert!(
+                drift <= 20,
+                "block {b} admit drift {drift}ms exceeds tolerance (target={target}, \
+                 actual={}, all={admissions:?})",
+                rec.admit_ts_ms
+            );
+        }
+
+        // Total admission span ≈ (N-1)/rate: 3 intervals of 200ms ≈ 600ms.
+        let span = admissions.last().unwrap().admit_ts_ms - anchor;
+        let expected = (blocks as u64 - 1) * interval_ms;
+        assert!(
+            span.abs_diff(expected) <= 30,
+            "total span {span}ms should be ~{expected}ms ((N-1)/rate)"
+        );
+    }
+
+    /// (#376) STREAM pacing NEVER sleeps negative: if an admit already overran the
+    /// target cadence (slow seed), the next block is admitted immediately (drift
+    /// absorbed, no panic, no backwards clock). Open-loop pacing must degrade to
+    /// best-effort when the fleet/seed is slow — that lag is exactly what #372
+    /// measures.
+    #[test]
+    fn drive_admission_stream_never_sleeps_negative_on_overrun() {
+        let interval_ms = 100u64;
+        let clock = std::cell::RefCell::new(0u64);
+        let mut negative_or_zero_sleeps = 0usize;
+
+        let admissions = drive_admission(
+            3,
+            AdmissionMode::Stream,
+            interval_ms,
+            || {
+                // Each admit costs 500ms — WAY over the 100ms interval, so every
+                // block is already past its target cadence when it's admitted.
+                *clock.borrow_mut() += 500;
+                *clock.borrow()
+            },
+            |d| {
+                if d.as_millis() == 0 {
+                    negative_or_zero_sleeps += 1;
+                }
+                *clock.borrow_mut() += d.as_millis() as u64;
+            },
+            |_, _| {},
+        );
+
+        // Never panicked; all 3 admitted; timestamps still monotonic.
+        assert_eq!(admissions.len(), 3);
+        for w in admissions.windows(2) {
+            assert!(w[1].admit_ts_ms > w[0].admit_ts_ms);
+        }
+        // On overrun the driver skips the sleep entirely (no zero/negative sleeps
+        // requested), so admission is best-effort and never stalls further.
+        assert_eq!(
+            negative_or_zero_sleeps, 0,
+            "overrun must SKIP the sleep, not request a zero/negative one"
+        );
     }
 
     // ── Generic dispatch-loop signature: drives ANY WorkTransport ────────────
@@ -4793,6 +5329,7 @@ mod tests {
             object_prefix: "runs/".into(),
             machine_type: None,
             vcpu_per_node: None,
+            admissions: Vec::new(),
         };
         // JSON round-trip (write/read via a temp file).
         let dir = std::env::temp_dir().join(format!("runcfg-{}", std::process::id()));
@@ -4843,6 +5380,7 @@ mod tests {
             object_prefix: "runs/".into(),
             machine_type: Some("c4d-highcpu-64".into()),
             vcpu_per_node: Some(64),
+            admissions: Vec::new(),
         };
         cfg.write_local(&path_str).unwrap();
         let back = RunConfig::read_local(&path_str).expect("must read back");
@@ -4861,6 +5399,9 @@ mod tests {
         let legacy_back = RunConfig::read_local(&path_str).expect("legacy must read back");
         assert_eq!(legacy_back.machine_type, None);
         assert_eq!(legacy_back.vcpu_per_node, None);
+        // (#376) An OLD run_config.json with no `admissions` key also deserializes,
+        // defaulting to an empty vec (back-compat for the lag-to-tip field).
+        assert!(legacy_back.admissions.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }
