@@ -1100,6 +1100,29 @@ def compute_throughput(events, run_config=None, target_bps=None,
     if distinct_legacy:
       blocks_config = len(distinct_legacy)
       blocks_source = "inferred from distinct block_number on events"
+  # #371 step-2b: run_config.json absent (or carried no `blocks`) AND no legacy
+  # block_number stamped, but the coordinator DID stamp per-replay `block_ns`
+  # (`block_N`) since #355. Events carry `block_ns`, NEVER `block_number`, so the
+  # legacy inference above never fires for real multi-block runs — the old code
+  # then defaulted to blocks=1, dividing an N-tree cost by 1 and inflating the
+  # projected fleet ~N×. Infer the divisor from the DISTINCT REAL block
+  # namespaces on events. "Real" EXCLUDES the `<base>` single-block sentinel and
+  # any None/empty: a genuine single-block run (only `<base>`, or no block_ns at
+  # all) has zero real namespaces and correctly falls through to the default 1
+  # below — preserving byte-for-byte back-compat. Note: the coordinator-log
+  # parser captures `<base>` verbatim (it is NOT normalized to None like the
+  # events-GCS path), so we must filter it explicitly here.
+  if blocks_config is None:
+    distinct_real_block_ns = {
+        e["block_ns"]
+        for e in events
+        if e.get("block_ns") not in (None, "", "<base>")
+    }
+    if distinct_real_block_ns:
+      blocks_config = len(distinct_real_block_ns)
+      blocks_source = (
+          "inferred from distinct block_ns on events (no run_config.json)"
+      )
   if blocks_config is None:
     blocks_config = 1
     blocks_source = "default 1 (no run_config.json, no block_number in log)"
@@ -1120,6 +1143,13 @@ def compute_throughput(events, run_config=None, target_bps=None,
       e["block_ns"] for e in events if e.get("block_ns") is not None
   }
   block_ns_field_present = len(observed_block_namespaces) > 0
+  # #371: the count of DISTINCT REAL block namespaces (excludes the `<base>`
+  # single-block sentinel and any None/empty). This is the same set the step-2b
+  # inference above uses; recomputed here so the defensive provenance guard below
+  # can assert the divisor never silently collapses a multi-block run to 1.
+  distinct_real_block_ns_observed = {
+      e["block_ns"] for e in events if e.get("block_ns") not in (None, "", "<base>")
+  }
   if block_ns_field_present:
     distinct_blocks_observed = len(observed_block_namespaces)
   else:
@@ -1165,6 +1195,25 @@ def compute_throughput(events, run_config=None, target_bps=None,
         f"blocks. Refusing to divide by config blocks to avoid fabricating a "
         f"per-block cost; core_sec_per_block is null until the block count can be "
         f"observed from events."
+    )
+  elif blocks_config == 1 and len(distinct_real_block_ns_observed) > 1:
+    # (C) #371 DEFENSIVE provenance invariant. After the step-2b inference above,
+    # this state should be UNREACHABLE: a run with multiple distinct real
+    # `block_ns` always infers blocks_config = that count, never the default 1.
+    # This belt-and-suspenders branch guards against a FUTURE regression that
+    # re-introduces the "default 1" path for a genuine multi-block run. Rather
+    # than silently divide an N-tree cost by 1 (the exact fleet-inflating bug
+    # #371 fixes), we REFUSE to divide → null + a loud note (anti-fabrication,
+    # same principle as the (A)/(B) guards above).
+    core_sec_per_block = None
+    blocks = len(distinct_real_block_ns_observed)
+    divisor_guard_note = (
+        f"REFUSING to divide by a collapsed block count: blocks_config fell "
+        f"through to the default 1 but {len(distinct_real_block_ns_observed)} "
+        f"distinct real block_ns namespace(s) were observed on events "
+        f"(#371 regression tripwire — inference should have set blocks_config to "
+        f"{len(distinct_real_block_ns_observed)}). core_sec_per_block is null "
+        f"until the divisor reflects the real block count."
     )
   else:
     # Trust the config divisor: observed corroborates it, or it is a single-block
@@ -1376,6 +1425,10 @@ def compute_throughput(events, run_config=None, target_bps=None,
               "perfect bin-packing of prove work onto vCPUs",
               "no scheduler/queueing/GCS overhead in the core-sec accounting",
               "core_sec_per_block itself is REAL (summed measured prove_ms)",
+              # #371: core_sec_per_block divides total by the REAL block count —
+              # from run_config.json when present, else inferred from the distinct
+              # `block_ns` namespaces on events (never a phantom default 1 that
+              # would inflate the projected fleet ~N× for an N-block run).
               # #355: this projection uses core_sec_per_block (all, incl. cold). For
               # a STEADY-STATE fleet the warm number (core_sec_per_block_warm) is the
               # right basis — it excludes the one-time replay-0 cold-build transient.
