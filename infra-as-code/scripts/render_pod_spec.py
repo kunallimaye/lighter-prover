@@ -864,6 +864,8 @@ spec:
         - "--radix=$(RADIX)"
         - "--tx-per-proof=$(TX_PER_PROOF)"
         - "--fold-strategy=$(FOLD_STRATEGY)"
+        - "--admission-mode=$(ADMISSION_MODE)"
+        - "--admission-rate-bps=$(ADMISSION_RATE_BPS)"
         - "--ack-deadline=$(ACK_DEADLINE)"
         env:
         - name: PROVER_PUBSUB_PROJECT
@@ -888,6 +890,10 @@ spec:
           value: "{leaf_chunk}"
         - name: FOLD_STRATEGY
           value: "{args.fold_strategy}"
+        - name: ADMISSION_MODE
+          value: "{args.admission_mode}"
+        - name: ADMISSION_RATE_BPS
+          value: "{args.admission_rate_bps}"
         - name: RUST_LOG
           value: "info"
         resources:
@@ -995,6 +1001,30 @@ def main():
       help="(#321) Reduction-tree fold strategy for the seeder + fungible pool: "
            "'reduction' (default, order-free) or 'hex' (explicit opt-out, legacy "
            "radix-16 fold). Threaded into the seeder/leaf/agg 'work' args.",
+  )
+  # ── #376 Streaming/staggered block admission. Threaded ONLY into the seeder
+  #    pod's `prover-node work --seed` args (workers ignore admission). 'batch'
+  #    (DEFAULT) admits all blocks up front — byte-for-byte the pre-#376 seeder;
+  #    'stream' paces admission on the wall clock at --admission-rate-bps
+  #    blocks/sec so leaf+fold work stay concurrently in flight (prereq for the
+  #    lag-to-tip validation in #372). Open-loop pacing (not gated by proving).
+  parser.add_argument(
+      "--admission-mode",
+      default="batch",
+      choices=["batch", "stream"],
+      help="(#376) Seeder block-admission mode: 'batch' (default, admit all "
+           "blocks immediately — unchanged) or 'stream' (pace admission on the "
+           "wall clock at --admission-rate-bps blocks/sec). Threaded into the "
+           "seeder 'work --seed' args only; workers ignore it.",
+  )
+  parser.add_argument(
+      "--admission-rate-bps",
+      type=float,
+      default=0.0,
+      help="(#376) Target admission rate in blocks/sec for --admission-mode="
+           "stream (canonical rate knob; interval_ms = 1000/rate derived "
+           "internally). Must be > 0 in stream mode; ignored in batch. Default "
+           "0.0 (unset).",
   )
   # ── #321 Unified pool topology (SELECTABLE, opt-in) ─────────────────────────
   # 'split' (DEFAULT, zero behavior change): emit the two fixed Deployments —

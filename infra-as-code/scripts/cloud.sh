@@ -851,11 +851,15 @@ _cloud_gke_bench_arch() {
   # #321 fungible worker-pool topology (default 'split'; 'unified' opts in to the
   # single self-balancing pool). Mirrors the fold_strategy threading pattern.
   local pool_topology="${13:-split}"
+  # #376 seeder block-admission: mode (default 'batch' = unchanged) + rate
+  # (blocks/sec, only used in stream mode). Same threading pattern as above.
+  local admission_mode="${14:-batch}"
+  local admission_rate_bps="${15:-0.0}"
 
-  _log_info "Running benchmark on GKE cluster (arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix}, fold_strategy=${fold_strategy}, pool_topology=${pool_topology}, image=${image})..."
+  _log_info "Running benchmark on GKE cluster (arch=${arch}, blocks=${blocks}, chunk=${chunk}, radix=${radix}, fold_strategy=${fold_strategy}, pool_topology=${pool_topology}, admission_mode=${admission_mode}, admission_rate_bps=${admission_rate_bps}, image=${image})..."
   local substitutions
   substitutions="$(_build_substitutions "${build_project}" "apply" "${builder_sa}" "${runtime_sa}")"
-  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix},_FOLD_STRATEGY=${fold_strategy},_POOL_TOPOLOGY=${pool_topology},_BENCHMARK_BUCKET=${tf_state_bucket}"
+  substitutions="${substitutions},_ENGINE=gke,_ARCH=${arch},_BLOCK_CONCURRENCY=${blocks},_CHUNK_SIZE=${chunk},_IMAGE=${image},_BENCHMARK_ID=${benchmark_id},_RADIX=${radix},_FOLD_STRATEGY=${fold_strategy},_POOL_TOPOLOGY=${pool_topology},_ADMISSION_MODE=${admission_mode},_ADMISSION_RATE_BPS=${admission_rate_bps},_BENCHMARK_BUCKET=${tf_state_bucket}"
 
   local cb_args=()
   if [[ -n "${builder_sa}" ]]; then
@@ -894,6 +898,11 @@ cloud_gke_bench() {
   # #321: split is the DEFAULT pool topology; opt in with POOL_TOPOLOGY=unified
   # env or --pool-topology=unified flag. Empty env falls back to 'split'.
   local pool_topology="${POOL_TOPOLOGY:-split}"
+  # #376: batch is the DEFAULT admission mode (unchanged); opt in to streaming
+  # with ADMISSION_MODE=stream + ADMISSION_RATE_BPS=<blocks/sec> env or the
+  # --admission-mode / --admission-rate-bps flags. Empty env falls back to batch.
+  local admission_mode="${ADMISSION_MODE:-batch}"
+  local admission_rate_bps="${ADMISSION_RATE_BPS:-0.0}"
   for arg in "$@"; do
     case "$arg" in
       --arch=*)   arch="${arg#*=}" ;;
@@ -903,6 +912,8 @@ cloud_gke_bench() {
       --radix=*)  radix="${arg#*=}" ;;
       --fold-strategy=*) fold_strategy="${arg#*=}" ;;
       --pool-topology=*) pool_topology="${arg#*=}" ;;
+      --admission-mode=*) admission_mode="${arg#*=}" ;;
+      --admission-rate-bps=*) admission_rate_bps="${arg#*=}" ;;
       --benchmark-id=*) benchmark_id="${arg#*=}" ;;
       [0-9]*)     blocks="$arg" ;;
     esac
@@ -910,6 +921,8 @@ cloud_gke_bench() {
   # Normalize empty values back to their defaults.
   fold_strategy="${fold_strategy:-reduction}"
   pool_topology="${pool_topology:-split}"
+  admission_mode="${admission_mode:-batch}"
+  admission_rate_bps="${admission_rate_bps:-0.0}"
 
   local build_project="$(_resolve_build_project)"
   if [[ ! -f "infra-as-code/terraform/vms.auto.tfvars.json" || ! -f "infra-as-code/terraform/target.auto.tfvars.json" ]]; then
@@ -939,10 +952,10 @@ cloud_gke_bench() {
       c4d_img="amd64"
       c4a_img="arm64"
     fi
-    _cloud_gke_bench_arch "t2d" "${blocks}" "${chunk}" "${t2d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
-    _cloud_gke_bench_arch "c3d" "${blocks}" "${chunk}" "${c3d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
-    _cloud_gke_bench_arch "c4a" "${blocks}" "${chunk}" "${c4a_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
-    _cloud_gke_bench_arch "c4d" "${blocks}" "${chunk}" "${c4d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" &
+    _cloud_gke_bench_arch "t2d" "${blocks}" "${chunk}" "${t2d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" "${admission_mode}" "${admission_rate_bps}" &
+    _cloud_gke_bench_arch "c3d" "${blocks}" "${chunk}" "${c3d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" "${admission_mode}" "${admission_rate_bps}" &
+    _cloud_gke_bench_arch "c4a" "${blocks}" "${chunk}" "${c4a_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" "${admission_mode}" "${admission_rate_bps}" &
+    _cloud_gke_bench_arch "c4d" "${blocks}" "${chunk}" "${c4d_img}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" "${admission_mode}" "${admission_rate_bps}" &
     wait
     _log_ok "All GKE benchmarks completed."
   else
@@ -954,7 +967,7 @@ cloud_gke_bench() {
         resolved_image="amd64"
       fi
     fi
-    _cloud_gke_bench_arch "${arch}" "${blocks}" "${chunk}" "${resolved_image}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}"
+    _cloud_gke_bench_arch "${arch}" "${blocks}" "${chunk}" "${resolved_image}" "${benchmark_id}" "${radix}" "${build_project}" "${builder_sa}" "${runtime_sa}" "${build_machine}" "${tf_state_bucket}" "${fold_strategy}" "${pool_topology}" "${admission_mode}" "${admission_rate_bps}"
   fi
 }
 

@@ -41,6 +41,14 @@ FOLD_STRATEGY ?= reduction
 # self-balancing pool where every pod pulls both leaf and fold work. Opt in with
 # `POOL_TOPOLOGY=unified make cloud-gke-bench ...`.
 POOL_TOPOLOGY ?= split
+# #376: seeder block-admission mode. 'batch' (DEFAULT) admits all blocks up front
+# — byte-for-byte the pre-#376 seeder. 'stream' paces admission on the wall clock
+# at ADMISSION_RATE_BPS blocks/sec so leaf+fold work stay concurrently in flight
+# (prereq for the lag-to-tip validation in #372). Opt in with e.g.
+# `ADMISSION_MODE=stream ADMISSION_RATE_BPS=0.5 make cloud-gke-bench ...`.
+# ADMISSION_RATE_BPS is ignored in batch mode and must be > 0 in stream mode.
+ADMISSION_MODE ?= batch
+ADMISSION_RATE_BPS ?= 0.0
 IMAGE := $(if $(IMAGE),$(IMAGE),default)
 cloud-bench-run: ## Run remote ZKP benchmark container across GCE VMs (defaults to ALL VMs in config.toml)
 	@bash infra-as-code/scripts/cloud.sh cloud-bench-run "$(VM)" "$(JOBS)" "$(CHUNK)" "$(IMAGE)" "$(BENCHMARK_ID)"
@@ -51,8 +59,8 @@ cloud-run-distributed-cluster: ## Run collaborative cloud distributed proving ex
 cloud-gke-provision: ## Provision GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all)
 	@bash infra-as-code/scripts/cloud.sh cloud-gke-provision --arch=$(GKE_ARCH)
 
-cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 FOLD_STRATEGY=reduction|hex POOL_TOPOLOGY=split|unified)
-	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(GKE_CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --pool-topology=$(POOL_TOPOLOGY) --benchmark-id=$(BENCHMARK_ID)
+cloud-gke-bench: ## Run benchmark on existing GKE cluster(s) (accepts ARCH=c4a/c3d/t2d/c4d/all, defaults to all; BLOCKS=10 IMAGE=amd64/arm64 RADIX=16 FOLD_STRATEGY=reduction|hex POOL_TOPOLOGY=split|unified ADMISSION_MODE=batch|stream ADMISSION_RATE_BPS=0.5)
+	@bash infra-as-code/scripts/cloud.sh cloud-gke-bench --arch=$(GKE_ARCH) --blocks=$(BLOCKS) --chunk=$(GKE_CHUNK) --image=$(IMAGE) --radix=$(RADIX) --fold-strategy=$(FOLD_STRATEGY) --pool-topology=$(POOL_TOPOLOGY) --admission-mode=$(ADMISSION_MODE) --admission-rate-bps=$(ADMISSION_RATE_BPS) --benchmark-id=$(BENCHMARK_ID)
 
 # --- C-sweep (#321): sweep chunk size C to find the CPU-optimal (throughput)
 # operating point. The lever is TOTAL CPU per block (core-sec/block): fewer
