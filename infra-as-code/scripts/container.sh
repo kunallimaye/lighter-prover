@@ -156,8 +156,10 @@ bench_reduction_local() {
   _log_info "Extracting telemetry (extract_gke_telemetry.py --log-file)..."
   # #321 C-sweep: pass reports/run_config.json (blocks, txs_per_chunk=C, ...) if
   # the pipeline wrote one, so the THROUGHPUT metric echoes C/N and computes
-  # core_sec_per_block against the REAL block count. Absent => extractor defaults
-  # blocks=1 and echoes C/N from the events (never fabricated).
+  # core_sec_per_block against the REAL block count. Absent => the extractor
+  # infers the block count from the distinct `block_ns` namespaces on events
+  # (#371; only defaults to blocks=1 for a genuine single-block run) and echoes
+  # C/N from the events (never fabricated).
   local run_config_arg=()
   if [[ -f "${ROOT_DIR}/reports/run_config.json" ]]; then
     run_config_arg=(--run-config "${ROOT_DIR}/reports/run_config.json")

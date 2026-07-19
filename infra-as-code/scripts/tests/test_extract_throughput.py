@@ -325,6 +325,150 @@ def test_355_backcompat_single_block_unchanged():
   assert abs(tp["core_sec_per_block"] - 20.0) < 1e-9, "unchanged from pre-#355"
 
 
+# ---------------------------------------------------------------------------
+# #371 blocks-inference from block_ns when run_config.json is ABSENT.
+# Events carry `block_ns` (block_0..block_N), NEVER `block_number`, so the legacy
+# block_number inference never fired and blocks defaulted to 1 — dividing an
+# N-tree cost by 1 and inflating the projected fleet ~N×. The fix infers the
+# divisor from the distinct REAL block_ns namespaces on events.
+# ---------------------------------------------------------------------------
+
+def test_371_infer_blocks_from_block_ns_no_run_config():
+  # 2-block warm/cold fixture (block_0, block_1), total = 24.0 cs. With NO
+  # run_config the extractor MUST infer blocks=2 from block_ns and divide:
+  #   core_sec_per_block = 24.0 / 2 = 12.0  (was buggy 24.0 / 1 = 24.0)
+  # and the fleet projection MUST reflect the per-block cost:
+  #   @10bps cores = 12.0 * 10 = 120 => nodes = ceil(120/60) = 2 (NOT 4).
+  m = _parse("coordinator_multiblock_warm_cold.log", run_config=None,
+             target_bps=[10], machine_type="c3d-highcpu-60")
+  tp = m["throughput"]
+  assert tp["blocks"] == 2, "must infer 2 blocks from distinct block_ns"
+  assert "block_ns" in tp["blocks_source"], "source must credit block_ns inference"
+  assert tp["distinct_blocks_observed"] == 2
+  assert tp["block_ns_field_present"] is True
+  assert tp["divisor_guard_note"] is None, "inference succeeded => no guard"
+  assert abs(tp["core_sec_per_block"] - 12.0) < 1e-9, "per-block must be total/2"
+  # fleet projection reflects the PER-BLOCK cost, not the total.
+  by = {r["target_bps"]: r for r in tp["fleet_sizing_projection"]["by_target_bps"]}
+  assert abs(by[10]["cores_required"] - 120.0) < 1e-9, "12.0*10, not 24.0*10"
+  assert by[10]["nodes_required"] == 2, "ceil(120/60)=2, NOT the 24.0-based 4"
+  assert by[10]["nodes_required"] == math.ceil(12.0 * 10 / 60)
+
+
+def test_371_infer_blocks_from_block_ns_five_block_regression():
+  # 5-block fixture, total = 2504.0 cs. With NO run_config the extractor MUST
+  # infer blocks=5 and divide: core_sec_per_block = 2504.0 / 5 = 500.8 — NOT the
+  # buggy 2504.0 (blocks=1). Nodes must be ~1/5 of the total-cost figure.
+  m = _parse("coordinator_multiblock_5.log", run_config=None,
+             target_bps=[10], machine_type="c3d-highcpu-60")
+  tp = m["throughput"]
+  assert tp["blocks"] == 5, "must infer 5 blocks from distinct block_ns"
+  assert "block_ns" in tp["blocks_source"]
+  assert tp["distinct_blocks_observed"] == 5
+  assert tp["divisor_guard_note"] is None
+  assert abs(tp["core_sec_per_block"] - 500.8) < 1e-9, "2504.0 / 5"
+  by = {r["target_bps"]: r for r in tp["fleet_sizing_projection"]["by_target_bps"]}
+  # Expected nodes computed from the PER-BLOCK cost (500.8), not the total.
+  expected_cores = 500.8 * 10
+  expected_nodes = math.ceil(expected_cores / 60)
+  assert abs(by[10]["cores_required"] - expected_cores) < 1e-9
+  assert by[10]["nodes_required"] == expected_nodes, "per-block sized, not total"
+  # Sanity: this is ~1/5 of what the total-cost bug would have produced.
+  buggy_nodes = math.ceil(2504.0 * 10 / 60)
+  assert by[10]["nodes_required"] < buggy_nodes / 4, "must NOT reflect total cost"
+
+
+def test_371_backcompat_single_block_no_block_ns():
+  # A genuine single-block run (no block_ns at all) MUST still infer blocks=1
+  # and divide by 1 — byte-for-byte back-compat, no spurious guard.
+  m = _parse("coordinator_throughput.log", run_config=None)
+  tp = m["throughput"]
+  assert tp["blocks"] == 1, "single-block run stays blocks=1"
+  assert "default 1" in tp["blocks_source"]
+  assert tp["block_ns_field_present"] is False
+  assert tp["distinct_blocks_observed"] is None
+  assert abs(tp["core_sec_per_block"] - 20.0) < 1e-9, "unchanged single-block cost"
+  assert tp["divisor_guard_note"] is None, "no guard for a real single-block run"
+
+
+def test_371_base_sentinel_infers_single_block():
+  # The coordinator-log parser captures the literal `<base>` single-block
+  # sentinel verbatim (unlike the events-GCS path which normalizes it to None).
+  # A run whose ONLY block_ns is `<base>` has zero REAL namespaces and MUST infer
+  # blocks=1 (not 1 "real" block from the sentinel) — the divide-by-1 no-op that
+  # preserves back-compat. Drive compute_throughput directly with synthetic
+  # events carrying block_ns="<base>".
+  events = [
+      {"role": "leaf", "status": "success", "prove_ms": 10000.0,
+       "prove_time_ms": 10000.0, "is_first_task_on_pod": True,
+       "block_ns": "<base>"},
+      {"role": "leaf", "status": "success", "prove_ms": 10000.0,
+       "prove_time_ms": 10000.0, "is_first_task_on_pod": False,
+       "block_ns": "<base>"},
+  ]
+  tp = ext.compute_throughput(events, run_config=None)
+  assert tp["blocks"] == 1, "`<base>` sentinel is NOT a real block namespace"
+  assert "default 1" in tp["blocks_source"]
+  assert tp["divisor_guard_note"] is None
+  # total = 20.0 cs / 1 block = 20.0 (divide-by-1 no-op).
+  assert abs(tp["core_sec_per_block"] - 20.0) < 1e-9
+
+
+def test_371_multi_block_never_silently_divides_by_one():
+  # Defensive invariant (#371 step 2): a multi-block run must NEVER silently
+  # divide the total by 1. With the step-1 inference the normal path infers the
+  # real block count, so the guard does NOT fire and per-block is non-null. This
+  # locks in that a run carrying multiple distinct REAL block_ns yields
+  # blocks==(distinct count) with a correct per-block cost.
+  events = [
+      {"role": "leaf", "status": "success", "prove_ms": 6000.0,
+       "prove_time_ms": 6000.0, "is_first_task_on_pod": True,
+       "block_ns": "block_0"},
+      {"role": "leaf", "status": "success", "prove_ms": 6000.0,
+       "prove_time_ms": 6000.0, "is_first_task_on_pod": False,
+       "block_ns": "block_1"},
+      {"role": "leaf", "status": "success", "prove_ms": 6000.0,
+       "prove_time_ms": 6000.0, "is_first_task_on_pod": False,
+       "block_ns": "block_2"},
+  ]
+  tp = ext.compute_throughput(events, run_config=None)
+  # Inference fires: 3 distinct real block_ns => blocks=3, per-block = 18.0/3=6.0.
+  assert tp["blocks"] == 3, "must infer 3 blocks, never default 1"
+  assert "block_ns" in tp["blocks_source"]
+  assert tp["divisor_guard_note"] is None, "inference succeeded => no guard fires"
+  assert tp["core_sec_per_block"] is not None, "multi-block must NOT divide by 1"
+  assert abs(tp["core_sec_per_block"] - 6.0) < 1e-9, "18.0 / 3 real blocks"
+
+
+def test_371_defensive_guard_fires_if_inference_bypassed():
+  # Belt-and-suspenders tripwire: if a FUTURE regression ever reaches the divide
+  # step with blocks_config forced to 1 while multiple distinct real block_ns are
+  # present on events, the (C) guard MUST fire → per-block null + a loud note,
+  # rather than silently dividing an N-tree cost by 1. We simulate that state by
+  # forcing run_config blocks=1 with events that carry 2 distinct real block_ns:
+  # run_config is authoritative for blocks_config, so inference is bypassed and
+  # blocks_config==1, but the observed real namespaces disagree.
+  events = [
+      {"role": "leaf", "status": "success", "prove_ms": 6000.0,
+       "prove_time_ms": 6000.0, "is_first_task_on_pod": True,
+       "block_ns": "block_0"},
+      {"role": "leaf", "status": "success", "prove_ms": 6000.0,
+       "prove_time_ms": 6000.0, "is_first_task_on_pod": False,
+       "block_ns": "block_1"},
+  ]
+  tp = ext.compute_throughput(events, run_config={"blocks": 1})
+  assert tp["blocks_config"] == 1, "run_config forced blocks_config=1"
+  assert tp["distinct_blocks_observed"] == 2, "two real namespaces observed"
+  assert tp["core_sec_per_block"] is None, "must REFUSE to divide N-tree cost by 1"
+  assert tp["core_sec_per_block_all"] is None
+  assert tp["divisor_guard_note"] is not None, "loud tripwire note required"
+  assert "collapsed" in tp["divisor_guard_note"].lower()
+  # And the fleet projection must be UNMEASURED (never sized off a null).
+  for row in tp["fleet_sizing_projection"]["by_target_bps"]:
+    assert row["cores_required"] is None
+    assert row["nodes_required"] is None
+
+
 def _run_self_test():
   tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
   failures = 0
