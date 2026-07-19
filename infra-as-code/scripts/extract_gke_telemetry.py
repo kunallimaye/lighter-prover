@@ -369,6 +369,38 @@ def _pull_ts_ms(e):
   return v if (v is not None and v > 0) else None
 
 
+def _total_time_ms(e):
+  """Per-task total wall time in ms (>0), or None when absent/non-positive."""
+  v = e.get("total_time_ms")
+  return float(v) if (v is not None and v > 0) else None
+
+
+def _derive_completion_ts_ms(e):
+  """Absolute completion timestamp (epoch-ms) for a task, or None if underivable.
+
+  Two sanctioned sources, in priority order:
+
+    (1) the coordinator log line's completion timestamp ``ev['ts']`` (an ABSOLUTE
+        emit time), when present + parseable; else
+    (2) ``pull_ts_ms + total_time_ms`` -- the pull (dispatch) timestamp plus the
+        measured per-task wall duration. This is the completion-time method used
+        in the shape15 hand analysis and is the ONLY completion anchor available
+        on the events-GCS path (ProverEvent payloads carry ts=None but DO carry
+        pull_ts_ms + total_time_ms). Both operands are REAL measured fields, so
+        the derived completion is measured-DERIVED, never fabricated.
+
+  Returns None when NEITHER source is available (honest "not derivable").
+  """
+  ts = _completion_ts_ms(e)
+  if ts is not None:
+    return ts
+  pull = _pull_ts_ms(e)
+  total = _total_time_ms(e)
+  if pull is not None and total is not None:
+    return int(pull + total)
+  return None
+
+
 def _sweepline_peak_concurrency(intervals):
   """Max number of simultaneously-open [start, end) intervals (a sweep-line).
   End is processed BEFORE a start at the same timestamp, so a task that finishes
@@ -427,7 +459,7 @@ def compute_fold_critical_path(events):
       saw_prove = True
       by_block_level.setdefault(bk, {}).setdefault(int(lvl), []).append(pm)
     pull = _pull_ts_ms(e)
-    comp = _completion_ts_ms(e)
+    comp = _derive_completion_ts_ms(e)  # ts OR pull_ts_ms + total_time_ms (#377)
     if pull is not None and comp is not None:
       saw_ts = True
       pulls, comps = ts_by_block.setdefault(bk, ([], []))
@@ -439,8 +471,9 @@ def compute_fold_critical_path(events):
         "measured": False,
         "provenance": "UNMEASURED",
         "note": (
-            "fold events lack a level+prove_time AND lack (pull_ts_ms, "
-            "parseable completion ts); critical path not derivable"
+            "fold events lack a level+prove_time AND lack a derivable "
+            "completion ts (neither ev['ts'] nor pull_ts_ms + total_time_ms); "
+            "critical path not derivable"
         ),
         "per_block": [],
         "avg_modeled_critical_path_ms": None,
@@ -543,8 +576,12 @@ def compute_fold_parallelism(events):
       saw_level = True
       key = (_block_ns_key(e), int(lvl))
       width_by_block_level[key] = width_by_block_level.get(key, 0) + 1
+    # ROOT-CAUSE FIX (#377): observed_peak_concurrency was ALWAYS UNMEASURED on
+    # the events-GCS path because completion was read only from ev['ts'] (None on
+    # ProverEvent payloads). Derive completion as ts OR (pull_ts_ms +
+    # total_time_ms) so the sweep-line populates whenever real timestamps exist.
     pull = _pull_ts_ms(e)
-    comp = _completion_ts_ms(e)
+    comp = _derive_completion_ts_ms(e)
     if pull is not None and comp is not None:
       saw_ts = True
       intervals.append((pull, comp))
@@ -554,8 +591,9 @@ def compute_fold_parallelism(events):
         "measured": False,
         "provenance": "UNMEASURED",
         "note": (
-            "fold events lack a level field AND lack (pull_ts_ms, parseable "
-            "completion ts); fold width/concurrency not derivable"
+            "fold events lack a level field AND lack a derivable completion ts "
+            "(neither ev['ts'] nor pull_ts_ms + total_time_ms); fold "
+            "width/concurrency not derivable"
         ),
         "per_level_width": None,
         "peak_width": None,
@@ -590,7 +628,8 @@ def compute_fold_parallelism(events):
           "per_level_width = folds at each tree level (max across blocks); "
           "peak_width = widest level (available parallelism); "
           "observed_peak_concurrency = max simultaneously in-flight folds via a "
-          "pull_ts_ms->completion-ts sweep-line"
+          "pull_ts_ms->completion-ts sweep-line (completion ts = ev['ts'] OR "
+          "pull_ts_ms + total_time_ms)"
       ),
       "per_level_width": per_level_width,
       "peak_width": peak_width,
@@ -724,10 +763,495 @@ def compute_gating_ingestion_rate(events):
 
 
 # ---------------------------------------------------------------------------
+# LAG-TO-TIP / OCCUPANCY / PER-BLOCK LATENCY telemetry (#377). These are the
+# decision-critical WALL-CLOCK / OCCUPANCY / LAG metrics #372 gates on and that
+# the aggregate CPU-cost metrics above cannot show. Each block traces every value
+# to a REAL event/run_config field; an absent source field yields null +
+# "UNMEASURED" with the specific missing field named -- NEVER a fabricated or
+# back-filled value, and NEVER a faked tip. Completion time is derived as
+# ev['ts'] OR pull_ts_ms + total_time_ms (the sanctioned method, see
+# _derive_completion_ts_ms); pod count / idle need a pod-identity or run_config
+# source that the per-task events do not carry, so idle is honestly UNMEASURED
+# when underivable.
+# ---------------------------------------------------------------------------
+
+# Leaf role, shared with compute_derived's leaf population.
+_LEAF_ROLE = "leaf"
+
+
+def _is_leaf(e):
+  return e["role"] == _LEAF_ROLE
+
+
+def _busy_intervals_tagged(events):
+  """[(pull_ts_ms, completion_ts_ms, is_leaf)] for every successful task that has
+  BOTH a pull timestamp and a derivable completion timestamp. Tasks lacking a
+  timestamp are skipped (they cannot be placed on the wall-clock)."""
+  out = []
+  for e in events:
+    if e.get("status") != "success":
+      continue
+    if e["role"] not in ("leaf",) + _FOLD_ROLES:
+      continue
+    pull = _pull_ts_ms(e)
+    comp = _derive_completion_ts_ms(e)
+    if pull is None or comp is None or comp < pull:
+      continue
+    out.append((pull, comp, _is_leaf(e)))
+  return out
+
+
+def _derive_pod_count(events, run_config):
+  """(pod_count, source) or (None, note). The per-task event line carries NO pod
+  identity (there is no pod_name/pod_id/instance field on the parsed event), so
+  distinct-pod inference is not possible from events alone. run_config MAY carry
+  an explicit pod / worker count; consume it when present. Otherwise idle is
+  UNMEASURED -- never guessed."""
+  if run_config:
+    for key in ("pod_count", "worker_count", "fungible_pool_size",
+                "pool_size", "replicas"):
+      v = run_config.get(key)
+      if isinstance(v, (int, float)) and v > 0:
+        return int(v), f"run_config.json:{key}"
+  return None, (
+      "pod_count not derivable: per-task events carry no pod identity and "
+      "run_config.json has no pod_count/worker_count/pool_size/replicas field"
+  )
+
+
+def compute_fleet_occupancy(events, run_config=None):
+  """(#377) Per-second wall-clock fleet occupancy via an interval sweep.
+
+  For every successful task with [pull_ts_ms, pull_ts_ms + total_time_ms] (or an
+  absolute completion ts), count how many leaf vs fold tasks are in-flight in
+  each 1-second wall-clock bucket from the first pull to the last completion.
+  ``idle = pod_count - busy`` needs a pod count; when it is underivable the busy
+  counts are still reported and idle is UNMEASURED (never guessed).
+
+  Summary: mean/peak busy %, mean idle % (only when pod_count known), and the
+  observed busy leaf:fold ratio. UNMEASURED when no task carries pull_ts_ms.
+  """
+  intervals = _busy_intervals_tagged(events)
+  if not intervals:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "no task carries both pull_ts_ms and a derivable completion ts "
+            "(ev['ts'] or pull_ts_ms + total_time_ms); occupancy not derivable"
+        ),
+        "pod_count": None,
+        "per_second": None,
+        "summary": None,
+    }
+
+  origin = min(p for p, _c, _l in intervals)
+  end = max(c for _p, c, _l in intervals)
+  # Number of 1s buckets spanning [origin, end]. A zero-width run still yields
+  # one bucket so an instantaneous burst is visible (not silently dropped).
+  n_buckets = int((end - origin) // 1000) + 1
+
+  busy_leaf = [0] * n_buckets
+  busy_fold = [0] * n_buckets
+  for pull, comp, is_leaf in intervals:
+    first = int((pull - origin) // 1000)
+    # A task occupies every second in which it is in-flight; [pull, comp) is
+    # half-open so a task completing exactly on a second boundary is NOT counted
+    # in the next bucket (matches the sweep-line's end-before-start convention).
+    last = int((max(comp - 1, pull) - origin) // 1000)
+    for b in range(first, last + 1):
+      if is_leaf:
+        busy_leaf[b] += 1
+      else:
+        busy_fold[b] += 1
+
+  pod_count, pod_source = _derive_pod_count(events, run_config)
+
+  per_second = []
+  busy_totals = []
+  idle_pcts = []
+  busy_pcts = []
+  total_leaf_seconds = 0
+  total_fold_seconds = 0
+  for b in range(n_buckets):
+    bl, bf = busy_leaf[b], busy_fold[b]
+    busy = bl + bf
+    busy_totals.append(busy)
+    total_leaf_seconds += bl
+    total_fold_seconds += bf
+    row = {"t_sec": b, "busy_leaf": bl, "busy_fold": bf, "busy": busy}
+    if pod_count is not None:
+      idle = pod_count - busy
+      row["idle"] = idle
+      row["busy_pct"] = (100.0 * busy / pod_count) if pod_count > 0 else None
+      row["idle_pct"] = (100.0 * idle / pod_count) if pod_count > 0 else None
+      if pod_count > 0:
+        busy_pcts.append(row["busy_pct"])
+        idle_pcts.append(row["idle_pct"])
+    else:
+      row["idle"] = None
+      row["idle_provenance"] = "UNMEASURED"
+    per_second.append(row)
+
+  peak_busy = max(busy_totals) if busy_totals else 0
+  # Observed busy leaf:fold ratio = total leaf-seconds : total fold-seconds
+  # (task-seconds of work actually in flight), reported as leaf/fold when fold>0.
+  if total_fold_seconds > 0:
+    leaf_fold_ratio = total_leaf_seconds / total_fold_seconds
+  else:
+    leaf_fold_ratio = None
+
+  summary = {
+      "num_seconds": n_buckets,
+      "peak_busy": peak_busy,
+      "mean_busy": (sum(busy_totals) / len(busy_totals)) if busy_totals else None,
+      "total_leaf_task_seconds": total_leaf_seconds,
+      "total_fold_task_seconds": total_fold_seconds,
+      "observed_busy_leaf_fold_ratio": leaf_fold_ratio,
+      "leaf_fold_ratio_provenance": (
+          "measured-derived" if leaf_fold_ratio is not None else "UNMEASURED"
+      ),
+  }
+  if pod_count is not None and pod_count > 0:
+    summary["pod_count"] = pod_count
+    summary["mean_busy_pct"] = sum(busy_pcts) / len(busy_pcts) if busy_pcts else None
+    summary["peak_busy_pct"] = 100.0 * peak_busy / pod_count
+    summary["mean_idle_pct"] = sum(idle_pcts) / len(idle_pcts) if idle_pcts else None
+    summary["idle_provenance"] = "measured-derived"
+  else:
+    summary["pod_count"] = None
+    summary["mean_busy_pct"] = None
+    summary["peak_busy_pct"] = None
+    summary["mean_idle_pct"] = None
+    summary["idle_provenance"] = "UNMEASURED"
+    summary["idle_note"] = pod_source
+
+  return {
+      "measured": True,
+      "provenance": "measured-derived",
+      "definition": (
+          "per-second sweep over each successful task's [pull_ts_ms, pull_ts_ms "
+          "+ total_time_ms] (half-open), tagged leaf vs fold; busy = in-flight "
+          "task count per 1s bucket; idle = pod_count - busy (only when a pod "
+          "count is derivable from run_config)"
+      ),
+      "pod_count": pod_count,
+      "per_second": per_second,
+      "summary": summary,
+  }
+
+
+def _root_verified_ts_by_block(events):
+  """block_ns -> root-verified completion ts (epoch-ms), for every block whose
+  root fold has a derivable completion ts.
+
+  A block is root-verified when its FINAL/root fold completes. The root fold is
+  the fold at the MAXIMUM tree level for that block (reduction root = the top
+  interval fold; hex root = tree_L{depth}_N0 -- the single highest-level node).
+  We take the completion ts of the max-level fold(s) per block (the root level
+  has exactly one fold, so this is unambiguous); when several share the max level
+  we take the latest completion (conservative -- the block is not root-verified
+  until the last of them finishes). Blocks whose root fold lacks a derivable
+  completion ts are omitted (surfaced as UNMEASURED by callers).
+  """
+  # block_ns -> max level seen among folds (with a derivable completion ts).
+  max_level = {}
+  # (block_ns, level) -> [completion_ts]
+  comps = {}
+  for e in _fold_events(events):
+    lvl = e.get("level")
+    if lvl is None:
+      continue
+    comp = _derive_completion_ts_ms(e)
+    if comp is None:
+      continue
+    bk = _block_ns_key(e)
+    lvl = int(lvl)
+    if lvl > max_level.get(bk, -1):
+      max_level[bk] = lvl
+    comps.setdefault((bk, lvl), []).append(comp)
+
+  out = {}
+  for bk, lvl in max_level.items():
+    root_comps = comps.get((bk, lvl))
+    if root_comps:
+      out[bk] = max(root_comps)
+  return out
+
+
+def _admissions_from_run_config(run_config):
+  """[(block_ns_key, admit_ts_ms)] parsed from run_config['admissions'] (the #378
+  streaming-admission contract), or None if the array is absent/empty.
+
+  Each entry is {"block_ns": <str>, "admit_ts_ms": <int epoch ms>}; block_ns is
+  "" for single-block runs, which we normalize to the SAME synthetic key
+  _block_ns_key uses so admissions join to events. Malformed entries (missing
+  admit_ts_ms) are skipped. Returns None (not []) when admissions[] is absent so
+  callers can distinguish 'batch run / pre-#378' from 'present but empty'.
+  """
+  if not run_config:
+    return None
+  adm = run_config.get("admissions")
+  if not isinstance(adm, list) or not adm:
+    return None
+  out = []
+  for a in adm:
+    if not isinstance(a, dict):
+      continue
+    ts = a.get("admit_ts_ms")
+    if ts is None:
+      continue
+    ns = a.get("block_ns")
+    key = ns if ns else "__single_block__"
+    out.append((key, int(ts)))
+  return out or None
+
+
+def _trend_slope(points):
+  """Least-squares slope (dy/dx) over [(x, y), ...] with x in SECONDS, or None
+  when fewer than two distinct x-values exist. Pure math over measured points."""
+  xs = [x for x, _y in points]
+  ys = [y for _x, y in points]
+  n = len(points)
+  if n < 2:
+    return None
+  mean_x = sum(xs) / n
+  mean_y = sum(ys) / n
+  denom = sum((x - mean_x) ** 2 for x in xs)
+  if denom == 0:
+    return None
+  num = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(n))
+  return num / denom
+
+
+def compute_lag_to_tip(events, run_config=None):
+  """(#377) distance-behind-tip over time = (blocks admitted by t) - (blocks
+  root-verified by t), sampled per second, plus a trend summary.
+
+  Requires the #378 per-block admission timestamps (run_config['admissions'][*]
+  .admit_ts_ms) AND per-block root-verified completion timestamps (the max-level
+  fold's completion ts per block). The TREND (slope / bounded-flat vs
+  monotonically rising) is the #372 pass/fail signal, not any single value.
+
+  UNMEASURED (with the specific reason) when admissions[] is absent (a batch run
+  / pre-#378 run_config) or when NO block's root-verified ts is derivable. The
+  tip is NEVER faked.
+  """
+  admissions = _admissions_from_run_config(run_config)
+  if admissions is None:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "run_config.json has no non-empty admissions[] array "
+            "(admissions[*].admit_ts_ms is the #378 streaming-admission "
+            "contract; a batch run / pre-#378 run_config lacks it); "
+            "distance-behind-tip not derivable and the tip is NOT faked"
+        ),
+        "per_second": None,
+        "trend": None,
+    }
+
+  root_ts = _root_verified_ts_by_block(events)
+  if not root_ts:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "no block has a derivable root-verified completion ts (the "
+            "max-level fold's ev['ts'] or pull_ts_ms + total_time_ms); "
+            "distance-behind-tip not derivable"
+        ),
+        "per_second": None,
+        "trend": None,
+    }
+
+  admit_ts = sorted(t for _bk, t in admissions)
+  verified_ts = sorted(root_ts.values())
+
+  origin = min(admit_ts[0], verified_ts[0])
+  end = max(admit_ts[-1], verified_ts[-1])
+  n_buckets = int((end - origin) // 1000) + 1
+
+  def _count_by(ts_list, t_abs):
+    return sum(1 for t in ts_list if t <= t_abs)
+
+  per_second = []
+  slope_points = []
+  distances = []
+  for b in range(n_buckets):
+    t_abs = origin + b * 1000
+    admitted = _count_by(admit_ts, t_abs)
+    verified = _count_by(verified_ts, t_abs)
+    distance = admitted - verified
+    per_second.append({
+        "t_sec": b,
+        "blocks_admitted": admitted,
+        "blocks_root_verified": verified,
+        "distance_behind_tip": distance,
+    })
+    slope_points.append((float(b), float(distance)))
+    distances.append(distance)
+
+  slope = _trend_slope(slope_points)
+  # Classify the decision signal. "bounded-flat" (slope ~ 0 or negative) = keeping
+  # up; "rising" (slope > 0) = falling behind. The threshold is expressed in
+  # blocks/second and is a REPORTED classification of the measured slope, not a
+  # fabricated metric.
+  if slope is None:
+    classification = "insufficient-samples"
+  elif slope > 0.01:
+    classification = "monotonically-rising"
+  elif slope < -0.01:
+    classification = "draining"
+  else:
+    classification = "bounded-flat"
+
+  trend = {
+      "slope_blocks_per_sec": slope,
+      "classification": classification,
+      "max_distance_behind_tip": max(distances) if distances else None,
+      "final_distance_behind_tip": distances[-1] if distances else None,
+      "blocks_admitted_total": len(admit_ts),
+      "blocks_root_verified_total": len(verified_ts),
+      "slope_provenance": (
+          "measured-derived" if slope is not None else "UNMEASURED"
+      ),
+  }
+
+  return {
+      "measured": True,
+      "provenance": "measured-derived",
+      "definition": (
+          "distance_behind_tip(t) = (blocks admitted by t, from "
+          "admissions[*].admit_ts_ms) - (blocks root-verified by t, from each "
+          "block's max-level fold completion ts); sampled per second. The trend "
+          "slope (blocks/sec) is the #372 pass/fail signal"
+      ),
+      "per_second": per_second,
+      "trend": trend,
+  }
+
+
+def compute_per_block_latency(events, run_config=None):
+  """(#377) Per-block end-to-end latency = (root-verified ts) - (anchor ts),
+  where the anchor is the block's admission ts (admissions[*].admit_ts_ms) when
+  available, else the block's EARLIEST leaf pull_ts_ms. Reports the p50/p95/p99/
+  max distribution across blocks and records which anchor was used.
+
+  UNMEASURED when no block has both a root-verified ts and an anchor ts. Each
+  per-block latency traces to real timestamps; nothing is fabricated.
+  """
+  root_ts = _root_verified_ts_by_block(events)
+  if not root_ts:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "no block has a derivable root-verified completion ts (max-level "
+            "fold's ev['ts'] or pull_ts_ms + total_time_ms); per-block latency "
+            "not derivable"
+        ),
+        "anchor": None,
+        "per_block": [],
+        "distribution_ms": distribution([]),
+    }
+
+  # Admission anchor (preferred): block_ns key -> admit_ts_ms.
+  admissions = _admissions_from_run_config(run_config)
+  admit_by_block = {}
+  if admissions:
+    for bk, ts in admissions:
+      # Keep the EARLIEST admission per block if duplicated (monotonic anyway).
+      if bk not in admit_by_block or ts < admit_by_block[bk]:
+        admit_by_block[bk] = ts
+
+  # Earliest-leaf-pull fallback anchor: block_ns key -> min leaf pull_ts_ms.
+  earliest_pull = {}
+  for e in events:
+    if e.get("status") != "success" or not _is_leaf(e):
+      continue
+    pull = _pull_ts_ms(e)
+    if pull is None:
+      continue
+    bk = _block_ns_key(e)
+    if bk not in earliest_pull or pull < earliest_pull[bk]:
+      earliest_pull[bk] = pull
+
+  per_block = []
+  latencies = []
+  used_admit = 0
+  used_pull = 0
+  for bk in sorted(root_ts, key=str):
+    verified = root_ts[bk]
+    anchor_ts = None
+    anchor_kind = None
+    if bk in admit_by_block:
+      anchor_ts = admit_by_block[bk]
+      anchor_kind = "admit_ts_ms"
+    elif bk in earliest_pull:
+      anchor_ts = earliest_pull[bk]
+      anchor_kind = "earliest_leaf_pull_ts_ms"
+
+    entry = {"block_ns": None if bk == "__single_block__" else bk}
+    if anchor_ts is None:
+      entry["latency_ms"] = None
+      entry["anchor"] = None
+      entry["anchor_provenance"] = "UNMEASURED"
+    else:
+      latency = float(verified - anchor_ts)
+      entry["latency_ms"] = latency
+      entry["anchor"] = anchor_kind
+      entry["anchor_provenance"] = "measured-derived"
+      latencies.append(latency)
+      if anchor_kind == "admit_ts_ms":
+        used_admit += 1
+      else:
+        used_pull += 1
+    per_block.append(entry)
+
+  if not latencies:
+    return {
+        "measured": False,
+        "provenance": "UNMEASURED",
+        "note": (
+            "root-verified ts exist but NO block has an anchor ts "
+            "(neither admissions[*].admit_ts_ms nor an earliest leaf "
+            "pull_ts_ms); per-block latency not derivable"
+        ),
+        "anchor": None,
+        "per_block": per_block,
+        "distribution_ms": distribution([]),
+    }
+
+  # Which anchor dominated (self-describing so a reader knows admit vs pull).
+  if used_admit and not used_pull:
+    anchor_summary = "admit_ts_ms"
+  elif used_pull and not used_admit:
+    anchor_summary = "earliest_leaf_pull_ts_ms"
+  else:
+    anchor_summary = "mixed (admit_ts_ms where available, else earliest_leaf_pull_ts_ms)"
+
+  return {
+      "measured": True,
+      "provenance": "measured-derived",
+      "definition": (
+          "per_block latency = (block root-verified ts) - (admit_ts_ms if "
+          "available, else earliest leaf pull_ts_ms); p50/p95/p99/max across "
+          "blocks"
+      ),
+      "anchor": anchor_summary,
+      "num_blocks": len(latencies),
+      "per_block": per_block,
+      "distribution_ms": distribution(latencies),
+  }
+
+
+# ---------------------------------------------------------------------------
 # Derived sizing metrics (#328 §C). Everything here is computed from the parsed
 # REAL events; no constant is invented.
 # ---------------------------------------------------------------------------
-def compute_derived(events):
+def compute_derived(events, run_config=None):
   leaves = [e for e in events if e["role"] == "leaf" and e["status"] == "success"]
   folds = [
       e for e in events
@@ -981,6 +1505,16 @@ def compute_derived(events):
       "fold_critical_path": compute_fold_critical_path(events),
       "fold_parallelism": compute_fold_parallelism(events),
       "gating_ingestion_rate": compute_gating_ingestion_rate(events),
+      # ---- #377 lag-to-tip / occupancy / per-block latency telemetry. The
+      # decision-critical wall-clock/occupancy/lag metrics #372 gates on. These
+      # consume run_config['admissions'][*].admit_ts_ms (the #378 contract) and a
+      # completion ts derived as ev['ts'] OR pull_ts_ms + total_time_ms; each is
+      # self-describing (measured flag + provenance) and emits null + "UNMEASURED"
+      # with the specific missing field when its source is absent (e.g. a batch
+      # run without admissions[]) -- the tip is never faked.
+      "fleet_occupancy": compute_fleet_occupancy(events, run_config=run_config),
+      "lag_to_tip": compute_lag_to_tip(events, run_config=run_config),
+      "per_block_latency": compute_per_block_latency(events, run_config=run_config),
   }
 
 
@@ -1743,7 +2277,7 @@ def build_metrics_from_events(events, run_config=None, target_bps=None,
         node_gcs.append(float(ev["gcs_time_ms"]))
         node_totals.append(float(ev["total_time_ms"]))
 
-  derived = compute_derived(events)
+  derived = compute_derived(events, run_config=run_config)
   # The events payload does not carry the coordinator's stale-lease-redrive
   # marker, but the #347 dedup DID observe the redrive/dupe extras directly from
   # the number of GCS objects per logical key — a stronger, source-of-truth count.
@@ -1939,7 +2473,7 @@ def parse_coordinator_log_v2(log_path, seeder_start_dt=None, run_config=None,
     wall_sec = (root_reached_time - start_dt).total_seconds()
 
   # Derived sizing metrics (#328 §C).
-  derived = compute_derived(events)
+  derived = compute_derived(events, run_config=run_config)
   derived["recovery"]["max_stale_lease_redrive_count"] = max_stale_redrive
 
   # THROUGHPUT metric (#321 C-sweep). Additive; consumes run_config if given.
